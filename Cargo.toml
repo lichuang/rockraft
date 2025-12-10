@@ -10,6 +10,7 @@ bincode = "1.3.3"
 byteorder = "1.4.3"
 bytes = { version = "1", features = ["serde"] }
 openraft = { git="https://github.com/databendlabs/openraft.git", rev = "9b6b529", features = ["type-alias", "serde"] }
+rand = "0.9"
 rocksdb = "0.24.0"
 serde = { version = "1.0.114", features = ["derive"] }
 tokio = { version = "1.47", features = ["full"] }

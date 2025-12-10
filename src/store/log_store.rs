@@ -44,16 +44,16 @@ where C: RaftTypeConfig
 }
 
 impl RocksLogStore<TypeConfig> {
-  pub fn new(db: Arc<DB>) -> Self {
+  pub fn new(db: Arc<DB>) -> Result<Self, std::io::Error> {
     db.cf_handle(LOG_META_FAMILY)
-      .expect("column family `meta` not found");
+      .ok_or_else(|| std::io::Error::other("column family `_log_meta` not found"))?;
     db.cf_handle(LOG_DATA_FAMILY)
-      .expect("column family `logs` not found");
+      .ok_or_else(|| std::io::Error::other("column family `_log_data` not found"))?;
 
-    Self {
+    Ok(Self {
       db,
       _p: Default::default(),
-    }
+    })
   }
 
   fn cf_meta(&self) -> &ColumnFamily {

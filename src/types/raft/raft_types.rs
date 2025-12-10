@@ -1,7 +1,6 @@
 use core::fmt;
 
 use bytes::Bytes;
-use openraft::StorageError;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -30,13 +29,24 @@ pub struct Node {
   pub rpc_addr: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct KeyValue {
+  pub key: Bytes,
+  pub value: Bytes,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SnapshotData {
+  pub data: Vec<KeyValue>,
+}
+
 openraft::declare_raft_types!(
     pub TypeConfig:
         D = StorageData,
         R = AppResponseData,
         Node = Node,
+        SnapshotData = SnapshotData
 );
 
 pub type Entry = openraft::Entry<TypeConfig>;
-pub type Vote = openraft::Vote<TypeConfig>;
 pub type LogState = openraft::storage::LogState<TypeConfig>;
