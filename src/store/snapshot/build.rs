@@ -9,8 +9,10 @@ use openraft::SnapshotMeta;
 use openraft::StoredMembership;
 use rocksdb::DB;
 use tokio::fs::File;
+use tokio::spawn;
 use tokio::task::spawn_blocking;
 use tracing::error;
+use tracing::info;
 
 use super::util::save_last_snapshot_id_file;
 use super::util::save_snapshot_meta;
@@ -109,8 +111,25 @@ pub async fn build_snapshot(
 
   let res = File::open(&snapshot_data_file(&snapshot_id_dir)).await?;
 
+  let snapshot_dir_owned = snapshot_dir.to_path_buf();
+  let snapshot_id_clone = snapshot_id.clone();
+  spawn(async move {
+    if let Err(e) = vacuum_snapshot_files(snapshot_dir_owned, snapshot_id_clone) {
+      error!("Fail to cleanup old snapshot files: {}", e);
+    }
+  });
+
+  info!(
+    "Snapshot build completed successfully for snapshot_id={}",
+    snapshot_id
+  );
+
   Ok(Snapshot {
     meta,
     snapshot: res,
   })
+}
+
+fn vacuum_snapshot_files(snapshot_dir: PathBuf, last_snapshot_id: String) -> Result<(), io::Error> {
+  Ok(())
 }

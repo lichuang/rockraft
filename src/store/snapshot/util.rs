@@ -46,12 +46,12 @@ pub fn snapshot_last_snapshot_id_file(snapshot_dir: &PathBuf) -> String {
 
 pub async fn save_last_snapshot_id_file(
   snapshot_dir: &PathBuf,
-  snapshot_id: &str,
+  last_snapshot_id: &str,
 ) -> std::io::Result<()> {
   let last_snapshot_id_file = snapshot_last_snapshot_id_file(snapshot_dir);
 
   let mut file = File::create(&last_snapshot_id_file).await?;
-  file.write_all(snapshot_id.as_bytes()).await?;
+  file.write_all(last_snapshot_id.as_bytes()).await?;
   file.flush().await?;
 
   Ok(())
