@@ -1,7 +1,6 @@
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::{self};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use openraft::Snapshot;
@@ -43,7 +42,7 @@ pub async fn recover_snapshot(
   Ok(())
 }
 
-pub async fn do_recover_snapshot(
+async fn do_recover_snapshot(
   db: &Arc<DB>,
   snapshot: Snapshot<TypeConfig>,
 ) -> Result<(), io::Error> {

@@ -19,6 +19,7 @@ use super::util::save_snapshot_meta;
 use super::util::snapshot_data_file;
 use super::util::snapshot_dump_file;
 use crate::store::keys::SM_DATA_FAMILY;
+use crate::store::snapshot::util::snapshot_id_dir;
 use crate::types::TypeConfig;
 use crate::types::read_logs_err;
 use crate::utils::now_millis;
@@ -41,7 +42,7 @@ pub async fn build_snapshot(
   } else {
     format!("0-0-{}", snapshot_idx)
   };
-  let snapshot_id_dir = snapshot_dir.join(snapshot_id.clone());
+  let snapshot_id_dir = snapshot_id_dir(snapshot_dir, &snapshot_id);
   tokio::fs::create_dir_all(snapshot_id_dir.clone()).await?;
 
   let meta = SnapshotMeta {
