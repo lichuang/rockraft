@@ -1,12 +1,20 @@
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bincode::deserialize;
+use futures::Stream;
 use openraft::LogId;
+use openraft::OptionalSend;
 use openraft::RaftSnapshotBuilder;
 use openraft::Snapshot;
+use openraft::SnapshotMeta;
 use openraft::StoredMembership;
 use openraft::alias::LogIdOf;
+use openraft::alias::SnapshotDataOf;
+use openraft::storage::EntryResponder;
+use openraft::storage::RaftStateMachine;
 use rocksdb::DB;
 
 use super::keys::LAST_APPLIED_LOG_KEY;
@@ -15,7 +23,9 @@ use super::keys::SM_DATA_FAMILY;
 use super::keys::SM_META_FAMILY;
 use super::snapshot::build_snapshot;
 use crate::config::Config;
+use crate::store::snapshot::recover_snapshot;
 use crate::types::RaftCodec as _;
+use crate::types::SnapshotData;
 use crate::types::TypeConfig;
 use crate::types::read_logs_err;
 
@@ -72,6 +82,12 @@ impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
   async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, io::Error> {
     let (last_applied_log, last_membership) = self.get_meta()?;
 
-    build_snapshot(&self.db, last_applied_log, last_membership).await
+    build_snapshot(
+      &self.db,
+      &self.snapshot_dir,
+      last_applied_log,
+      last_membership,
+    )
+    .await
   }
 }

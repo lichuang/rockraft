@@ -4,6 +4,8 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
+pub type SnapshotData = tokio::fs::File;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StorageData {
   pub key: String,
@@ -29,15 +31,10 @@ pub struct Node {
   pub rpc_addr: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct KeyValue {
   pub key: Bytes,
   pub value: Bytes,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SnapshotData {
-  pub data: Vec<KeyValue>,
 }
 
 openraft::declare_raft_types!(

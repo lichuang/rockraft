@@ -1,28 +1,33 @@
 use std::io;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use openraft::LogId;
 use openraft::Snapshot;
 use openraft::SnapshotMeta;
 use openraft::StoredMembership;
-use rand::Rng;
 use rocksdb::DB;
+use tokio::fs::File;
 use tokio::task::spawn_blocking;
+use tracing::error;
 
+use super::util::save_last_snapshot_id_file;
+use super::util::save_snapshot_meta;
+use super::util::snapshot_data_file;
+use super::util::snapshot_dump_file;
 use crate::store::keys::SM_DATA_FAMILY;
-use crate::types::KeyValue;
-use crate::types::SnapshotData;
 use crate::types::TypeConfig;
 use crate::types::read_logs_err;
+use crate::utils::now_millis;
 
 pub async fn build_snapshot(
   db: &Arc<DB>,
+  snapshot_dir: &PathBuf,
   last_applied_log_id: Option<LogId<TypeConfig>>,
   last_membership: StoredMembership<TypeConfig>,
 ) -> Result<Snapshot<TypeConfig>, io::Error> {
-  // Generate a random snapshot index.
-  let snapshot_idx: u64 = rand::rng().random_range(0..1000);
+  let snapshot_idx = now_millis();
 
   let snapshot_id = if let Some(last) = last_applied_log_id {
     format!(
@@ -32,8 +37,10 @@ pub async fn build_snapshot(
       snapshot_idx
     )
   } else {
-    format!("--{}", snapshot_idx)
+    format!("0-0-{}", snapshot_idx)
   };
+  let snapshot_id_dir = snapshot_dir.join(snapshot_id.clone());
+  tokio::fs::create_dir_all(snapshot_id_dir.clone()).await?;
 
   let meta = SnapshotMeta {
     last_log_id: last_applied_log_id,
@@ -42,35 +49,68 @@ pub async fn build_snapshot(
   };
 
   let db = db.clone();
+  let snapshot_id_dir_clone = snapshot_id_dir.clone();
 
-  let data = spawn_blocking(move || {
+  let res = spawn_blocking(move || {
+    let snapshot_id_dir = snapshot_id_dir_clone;
     let snapshot = db.snapshot();
     let cf_data = db
       .cf_handle(SM_DATA_FAMILY)
       .expect("column family `sm_data` not found");
 
-    let mut snapshot_data = Vec::new();
+    let dump_file_name = snapshot_dump_file(&snapshot_id_dir);
+    let dump_file = std::fs::File::create(&dump_file_name)?;
+    let mut encoder = zstd::Encoder::new(dump_file, 3)?;
     let iter = snapshot.iterator_cf(cf_data, rocksdb::IteratorMode::Start);
 
     for item in iter {
       let (key, value) = item.map_err(read_logs_err)?;
-      let kv = KeyValue {
-        key: Bytes::from(key.into_vec()),
-        value: Bytes::from(value.into_vec()),
-      };
-      snapshot_data.push(kv);
+
+      encoder.write_all(&(key.len() as u32).to_le_bytes())?;
+      encoder.write_all(&key)?;
+      encoder.write_all(&(value.len() as u32).to_le_bytes())?;
+      encoder.write_all(&value)?;
     }
 
-    Ok(snapshot_data)
+    encoder.finish()?;
+
+    let snapshot_file_name = snapshot_data_file(&snapshot_id_dir);
+    std::fs::rename(&dump_file_name, &snapshot_file_name)?;
+
+    Ok(())
   })
   .await
   .map_err(read_logs_err)?;
 
-  match data {
-    Err(e) => Err(e),
-    Ok(data) => Ok(Snapshot {
-      meta,
-      snapshot: SnapshotData { data },
-    }),
+  if let Err(e) = res {
+    error!(
+      "Fail to build snapshot data file for snapshot id={}:{}",
+      snapshot_id, e
+    );
+    return Err(e);
   }
+
+  // save snapshot meta file and last_snapshot_id file
+  if let Err(e) = save_snapshot_meta(&snapshot_id_dir, meta.clone()).await {
+    error!(
+      "Fail to save snapshot meta file for snapshot id={}:{}",
+      snapshot_id, e
+    );
+    return Err(e);
+  }
+  // only when save snapshot data file and meta file success, save last_snapshot_id file
+  if let Err(e) = save_last_snapshot_id_file(&snapshot_dir, &snapshot_id).await {
+    error!(
+      "Fail to save last snapshot id file for snapshot id={}:{}",
+      snapshot_id, e
+    );
+    return Err(e);
+  }
+
+  let res = File::open(&snapshot_data_file(&snapshot_id_dir)).await?;
+
+  Ok(Snapshot {
+    meta,
+    snapshot: res,
+  })
 }
