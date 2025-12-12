@@ -12,3 +12,8 @@ message AppendRequest {
 message AppendReply {
   bytes value = 1;
 }
+
+service RaftService {
+  // Raft Internal
+  rpc Append(AppendRequest) returns (AppendReply) {}
+}
