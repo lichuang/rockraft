@@ -29,11 +29,11 @@ use super::StoreMeta;
 use super::keys::LOG_DATA_FAMILY;
 use super::keys::LOG_META_FAMILY;
 use super::meta::LastPurged;
-use crate::types::Entry;
-use crate::types::LogState;
-use crate::types::RaftCodec;
-use crate::types::TypeConfig;
-use crate::types::read_logs_err;
+use crate::raft::types::Entry;
+use crate::raft::types::LogState;
+use crate::raft::types::RaftCodec;
+use crate::raft::types::TypeConfig;
+use crate::raft::types::read_logs_err;
 
 #[derive(Debug, Clone)]
 pub struct RocksLogStore<C>

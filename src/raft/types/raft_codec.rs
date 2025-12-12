@@ -7,7 +7,7 @@ use openraft::StoredMembership;
 use openraft::alias::LogIdOf;
 use openraft::alias::VoteOf;
 
-use crate::types::TypeConfig;
+use crate::raft::types::TypeConfig;
 
 pub trait RaftCodec {
   fn decode_from(buf: &[u8]) -> Result<Self, io::Error>

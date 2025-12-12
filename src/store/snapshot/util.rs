@@ -11,7 +11,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt as _;
 use tracing::info;
 
-use crate::types::TypeConfig;
+use crate::raft::types::TypeConfig;
 
 pub fn snapshot_dump_file(snapshot_id_dir: &PathBuf) -> String {
   snapshot_id_dir
