@@ -19,6 +19,7 @@ use openraft::alias::VoteOf;
 use openraft::entry::RaftEntry;
 use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
+use rocksdb::BoundColumnFamily;
 use rocksdb::ColumnFamily;
 use rocksdb::DB;
 use rocksdb::Direction;
@@ -56,11 +57,11 @@ impl RocksLogStore<TypeConfig> {
     })
   }
 
-  fn cf_meta(&self) -> &ColumnFamily {
+  fn cf_meta(&self) -> Arc<BoundColumnFamily<'_>> {
     self.db.cf_handle(LOG_META_FAMILY).unwrap()
   }
 
-  fn cf_logs(&self) -> &ColumnFamily {
+  fn cf_logs(&self) -> Arc<BoundColumnFamily<'_>> {
     self.db.cf_handle(LOG_DATA_FAMILY).unwrap()
   }
 
@@ -70,7 +71,7 @@ impl RocksLogStore<TypeConfig> {
   fn get_meta<M: StoreMeta>(&self) -> Result<Option<M::Value>, io::Error> {
     let bytes = self
       .db
-      .get_cf(self.cf_meta(), M::KEY)
+      .get_cf(&self.cf_meta(), M::KEY)
       .map_err(M::read_err)?;
 
     let Some(bytes) = bytes else {
@@ -88,7 +89,7 @@ impl RocksLogStore<TypeConfig> {
 
     self
       .db
-      .put_cf(self.cf_meta(), M::KEY, encode_valude)
+      .put_cf(&self.cf_meta(), M::KEY, encode_valude)
       .map_err(|e| M::write_err(value, e))?;
 
     Ok(())
@@ -139,7 +140,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
   async fn get_log_state(&mut self) -> Result<LogState, io::Error> {
     let last = self
       .db
-      .iterator_cf(self.cf_logs(), rocksdb::IteratorMode::End)
+      .iterator_cf(&self.cf_logs(), rocksdb::IteratorMode::End)
       .next();
 
     let last_log_id = match last {
@@ -194,7 +195,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
       self
         .db
         .put_cf(
-          self.cf_logs(),
+          &self.cf_logs(),
           id,
           serialize(&entry).map_err(read_logs_err)?,
         )
@@ -223,7 +224,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
     let to = id_to_bin(u64::MAX);
     self
       .db
-      .delete_range_cf(self.cf_logs(), &from, &to)
+      .delete_range_cf(&self.cf_logs(), &from, &to)
       .map_err(read_logs_err)?;
 
     // Truncating does not need to be persisted.
@@ -242,7 +243,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
     let to = id_to_bin(log_id.index() + 1);
     self
       .db
-      .delete_range_cf(self.cf_logs(), &from, &to)
+      .delete_range_cf(&self.cf_logs(), &from, &to)
       .map_err(read_logs_err)?;
 
     // Purging does not need to be persistent.

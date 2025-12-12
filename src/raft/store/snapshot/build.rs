@@ -64,7 +64,7 @@ pub async fn build_snapshot(
     let dump_file_name = snapshot_dump_file(&snapshot_id_dir);
     let dump_file = std::fs::File::create(&dump_file_name)?;
     let mut encoder = zstd::Encoder::new(dump_file, 3)?;
-    let iter = snapshot.iterator_cf(cf_data, rocksdb::IteratorMode::Start);
+    let iter = snapshot.iterator_cf(&cf_data, rocksdb::IteratorMode::Start);
 
     for item in iter {
       let (key, value) = item.map_err(read_logs_err)?;

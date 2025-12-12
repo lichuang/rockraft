@@ -18,6 +18,7 @@ use openraft::alias::LogIdOf;
 use openraft::alias::SnapshotDataOf;
 use openraft::storage::EntryResponder;
 use openraft::storage::RaftStateMachine;
+use rocksdb::BoundColumnFamily;
 use rocksdb::DB;
 
 use super::keys::LAST_APPLIED_LOG_KEY;
@@ -52,18 +53,18 @@ impl RocksStateMachine {
     Ok(Self { db, snapshot_dir })
   }
 
-  fn cf_sm_meta(&self) -> &rocksdb::ColumnFamily {
+  fn cf_sm_meta(&self) -> Arc<BoundColumnFamily<'_>> {
     self.db.cf_handle(SM_META_FAMILY).unwrap()
   }
 
-  fn cf_sm_data(&self) -> &rocksdb::ColumnFamily {
+  fn cf_sm_data(&self) -> Arc<BoundColumnFamily<'_>> {
     self.db.cf_handle(SM_DATA_FAMILY).unwrap()
   }
 
   pub fn get_meta(
     &self,
   ) -> Result<(Option<LogId<TypeConfig>>, StoredMembership<TypeConfig>), io::Error> {
-    let cf = self.cf_sm_meta();
+    let cf = &self.cf_sm_meta();
 
     let last_applied_log = self
       .db
@@ -84,7 +85,7 @@ impl RocksStateMachine {
   }
 
   fn get_last_applied_log_id(&self) -> Result<Option<LogId<TypeConfig>>, io::Error> {
-    match self.db.get_cf(self.cf_sm_meta(), LAST_APPLIED_LOG_KEY) {
+    match self.db.get_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY) {
       Ok(Some(v)) => {
         let log_id = deserialize(&v).map_err(read_logs_err)?;
         Ok(Some(log_id))
@@ -100,12 +101,12 @@ impl RocksStateMachine {
         let data = serialize(&id).map_err(read_logs_err)?;
         self
           .db
-          .put_cf(self.cf_sm_meta(), LAST_APPLIED_LOG_KEY, data)
+          .put_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY, data)
           .map_err(read_logs_err)
       }
       None => self
         .db
-        .delete_cf(self.cf_sm_meta(), LAST_APPLIED_LOG_KEY)
+        .delete_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY)
         .map_err(read_logs_err),
     }
   }
@@ -117,7 +118,7 @@ impl RocksStateMachine {
     let data = serialize(membership).map_err(read_logs_err)?;
     self
       .db
-      .put_cf(self.cf_sm_meta(), LAST_MEMBERSHIP_KEY, data)
+      .put_cf(&self.cf_sm_meta(), LAST_MEMBERSHIP_KEY, data)
       .map_err(read_logs_err)
   }
 }
@@ -159,7 +160,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
       let response = match entry.payload {
         EntryPayload::Blank => AppResponseData { value: None },
         EntryPayload::Normal(req) => {
-          let cf_data = self.cf_sm_data();
+          let cf_data = &self.cf_sm_data();
           batch.put_cf(cf_data, req.key.as_bytes(), req.value);
           AppResponseData { value: None }
         }
