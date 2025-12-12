@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::engine::RocksDBEngine;
+use crate::raft::store::RocksLogStore;
+use crate::raft::store::column_family_list;
 use crate::raft::types::TypeConfig;
-use crate::store::RocksLogStore;
-use crate::store::column_family_list;
 
 pub struct RaftNode {
   engine: Arc<RocksDBEngine>,

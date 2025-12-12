@@ -18,10 +18,10 @@ use super::util::save_last_snapshot_id_file;
 use super::util::save_snapshot_meta;
 use super::util::snapshot_data_file;
 use super::util::snapshot_dump_file;
+use crate::raft::store::keys::SM_DATA_FAMILY;
+use crate::raft::store::snapshot::util::snapshot_id_dir;
 use crate::raft::types::TypeConfig;
 use crate::raft::types::read_logs_err;
-use crate::store::keys::SM_DATA_FAMILY;
-use crate::store::snapshot::util::snapshot_id_dir;
 use crate::utils::now_millis;
 
 pub async fn build_snapshot(

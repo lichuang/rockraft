@@ -8,8 +8,8 @@ use rocksdb::DB;
 use tracing::error;
 use tracing::info;
 
+use crate::raft::store::keys::SM_DATA_FAMILY;
 use crate::raft::types::TypeConfig;
-use crate::store::keys::SM_DATA_FAMILY;
 
 pub async fn recover_snapshot(
   db: &Arc<DB>,

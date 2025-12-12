@@ -27,12 +27,12 @@ use super::keys::SM_META_FAMILY;
 use super::snapshot::build_snapshot;
 use super::snapshot::get_current_snapshot;
 use crate::config::Config;
+use crate::raft::store::snapshot::recover_snapshot;
 use crate::raft::types::AppResponseData;
 use crate::raft::types::RaftCodec as _;
 use crate::raft::types::SnapshotData;
 use crate::raft::types::TypeConfig;
 use crate::raft::types::read_logs_err;
-use crate::store::snapshot::recover_snapshot;
 
 #[derive(Debug, Clone)]
 pub struct RocksStateMachine {
