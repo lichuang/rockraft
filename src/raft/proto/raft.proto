@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/wrappers.proto";
+
+package raftpb;
+
+message AppendRequest {
+  bytes value = 2;
+}
+
+message AppendReply {
+  bytes value = 1;
+}
