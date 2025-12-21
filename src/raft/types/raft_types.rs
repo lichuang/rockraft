@@ -26,7 +26,7 @@ pub struct AppResponseData {
 pub type NodeId = u64;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
-pub struct Node {
+pub struct RaftNode {
   pub node_id: u64,
   pub rpc_addr: String,
 }
@@ -41,7 +41,7 @@ openraft::declare_raft_types!(
     pub TypeConfig:
         D = StorageData,
         R = AppResponseData,
-        Node = Node,
+        Node = RaftNode,
         SnapshotData = SnapshotData
 );
 
@@ -49,3 +49,4 @@ pub type Entry = openraft::Entry<TypeConfig>;
 pub type LogState = openraft::storage::LogState<TypeConfig>;
 pub type LogId = openraft::LogId<TypeConfig>;
 pub type LeaderId = <TypeConfig as openraft::RaftTypeConfig>::LeaderId;
+pub type Node = <TypeConfig as openraft::RaftTypeConfig>::Node;

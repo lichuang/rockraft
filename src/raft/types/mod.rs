@@ -9,6 +9,7 @@ pub use raft_types::KeyValue;
 pub use raft_types::LeaderId;
 pub use raft_types::LogId;
 pub use raft_types::LogState;
+pub use raft_types::Node;
 pub use raft_types::NodeId;
 pub use raft_types::SnapshotData;
 pub use raft_types::StorageData;

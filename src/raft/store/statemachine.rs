@@ -1,4 +1,3 @@
-use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,11 +26,9 @@ use super::keys::SM_DATA_FAMILY;
 use super::keys::SM_META_FAMILY;
 use super::snapshot::build_snapshot;
 use super::snapshot::get_current_snapshot;
-use crate::config::Config;
 use crate::raft::store::snapshot::recover_snapshot;
 use crate::raft::types::AppResponseData;
 use crate::raft::types::RaftCodec as _;
-use crate::raft::types::SnapshotData;
 use crate::raft::types::TypeConfig;
 use crate::raft::types::read_logs_err;
 
@@ -42,13 +39,13 @@ pub struct RocksStateMachine {
 }
 
 impl RocksStateMachine {
-  pub async fn new(db: Arc<DB>, config: &Config) -> Result<RocksStateMachine, std::io::Error> {
+  pub async fn new(db: Arc<DB>, data_dir: PathBuf) -> Result<RocksStateMachine, std::io::Error> {
     db.cf_handle(SM_META_FAMILY)
       .ok_or_else(|| std::io::Error::other("column family `_log_meta` not found"))?;
     db.cf_handle(SM_DATA_FAMILY)
       .ok_or_else(|| std::io::Error::other("column family `_log_data` not found"))?;
 
-    let snapshot_dir = PathBuf::from(config.rocksdb.data_path.clone()).join("snapshot");
+    let snapshot_dir = data_dir.join("snapshot");
 
     Ok(Self { db, snapshot_dir })
   }
@@ -61,29 +58,6 @@ impl RocksStateMachine {
     self.db.cf_handle(SM_DATA_FAMILY).unwrap()
   }
 
-  pub fn get_meta(
-    &self,
-  ) -> Result<(Option<LogId<TypeConfig>>, StoredMembership<TypeConfig>), io::Error> {
-    let cf = &self.cf_sm_meta();
-
-    let last_applied_log = self
-      .db
-      .get_cf(cf, LAST_APPLIED_LOG_KEY)
-      .map_err(read_logs_err)?
-      .map(|bytes| LogIdOf::<TypeConfig>::decode_from(&bytes))
-      .transpose()?;
-
-    let last_membership = self
-      .db
-      .get_cf(cf, LAST_MEMBERSHIP_KEY)
-      .map_err(read_logs_err)?
-      .map(|bytes| StoredMembership::<TypeConfig>::decode_from(&bytes))
-      .transpose()?
-      .unwrap_or_default();
-
-    Ok((last_applied_log, last_membership))
-  }
-
   fn get_last_applied_log_id(&self) -> Result<Option<LogId<TypeConfig>>, io::Error> {
     match self.db.get_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY) {
       Ok(Some(v)) => {
@@ -93,6 +67,18 @@ impl RocksStateMachine {
       Ok(None) => Ok(None),
       Err(e) => Err(io::Error::other(e)),
     }
+  }
+
+  fn get_last_membership(&self) -> Result<StoredMembership<TypeConfig>, io::Error> {
+    Ok(
+      self
+        .db
+        .get_cf(&self.cf_sm_meta(), LAST_MEMBERSHIP_KEY)
+        .map_err(read_logs_err)?
+        .map(|bytes| StoredMembership::<TypeConfig>::decode_from(&bytes))
+        .transpose()?
+        .unwrap_or_default(),
+    )
   }
 
   fn set_last_applied_log_id(&self, log_id: Option<LogId<TypeConfig>>) -> Result<(), io::Error> {
@@ -125,7 +111,8 @@ impl RocksStateMachine {
 
 impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
   async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, io::Error> {
-    let (last_applied_log, last_membership) = self.get_meta()?;
+    let last_applied_log = self.get_last_applied_log_id()?;
+    let last_membership = self.get_last_membership()?;
 
     build_snapshot(
       &self.db,
@@ -143,11 +130,15 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
   async fn applied_state(
     &mut self,
   ) -> Result<(Option<LogId<TypeConfig>>, StoredMembership<TypeConfig>), io::Error> {
-    self.get_meta()
+    let last_applied_log = self.get_last_applied_log_id()?;
+    let last_membership = self.get_last_membership()?;
+
+    Ok((last_applied_log, last_membership))
   }
 
   async fn apply<Strm>(&mut self, mut entries: Strm) -> Result<(), io::Error>
-  where Strm: Stream<Item = Result<EntryResponder<TypeConfig>, io::Error>> + Unpin + OptionalSend
+  where
+    Strm: Stream<Item = Result<EntryResponder<TypeConfig>, io::Error>> + Unpin + OptionalSend,
   {
     let mut batch = rocksdb::WriteBatch::default();
     let mut last_applied_log_id = None;
@@ -215,10 +206,13 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     meta: &SnapshotMeta<TypeConfig>,
     snapshot: SnapshotDataOf<TypeConfig>,
   ) -> Result<(), io::Error> {
-    recover_snapshot(&self.db, Snapshot {
-      meta: meta.clone(),
-      snapshot,
-    })
+    recover_snapshot(
+      &self.db,
+      Snapshot {
+        meta: meta.clone(),
+        snapshot,
+      },
+    )
     .await
   }
 
@@ -236,5 +230,116 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     }
 
     Ok(None)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::{BTreeMap, BTreeSet};
+
+  use openraft::Membership;
+
+  use crate::{
+    engine::RocksDBEngine,
+    raft::types::{LeaderId, Node},
+  };
+
+  use super::*;
+
+  async fn create_test_state_machine() -> RocksStateMachine {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir
+        .clone()
+        .into_os_string()
+        .into_string()
+        .unwrap(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    );
+
+    RocksStateMachine::new(engine.db.clone(), temp_data_dir)
+      .await
+      .unwrap()
+  }
+
+  fn create_log_id(term: u64, node_id: u64, index: u64) -> LogId<TypeConfig> {
+    LogId {
+      leader_id: LeaderId { term, node_id },
+      index,
+    }
+  }
+
+  fn create_stored_membership(log_id: LogId<TypeConfig>) -> StoredMembership<TypeConfig> {
+    let mut nodes = BTreeSet::new();
+    nodes.insert(1);
+
+    let mut node_map = BTreeMap::new();
+    node_map.insert(
+      1,
+      Node {
+        node_id: 1,
+        rpc_addr: "127.0.0.1:1228".to_string(),
+      },
+    );
+
+    let membership = Membership::new(vec![nodes], node_map).unwrap();
+    StoredMembership::new(Some(log_id), membership)
+  }
+
+  #[tokio::test]
+  async fn test_set_and_get_last_applied() -> Result<(), io::Error> {
+    let sm = create_test_state_machine().await;
+
+    assert!(sm.get_last_applied_log_id()?.is_none());
+
+    let log_id = create_log_id(1, 1, 100);
+    sm.set_last_applied_log_id(Some(log_id))?;
+
+    let retrieved = sm.get_last_applied_log_id()?.unwrap();
+    assert_eq!(retrieved.leader_id.term, log_id.leader_id.term);
+    assert_eq!(retrieved.leader_id.node_id, log_id.leader_id.node_id);
+    assert_eq!(retrieved.index, log_id.index);
+
+    let new_log_id = create_log_id(2, 2, 200);
+    sm.set_last_applied_log_id(Some(new_log_id))?;
+
+    let updated = sm.get_last_applied_log_id()?.unwrap();
+    assert_eq!(updated.leader_id.term, 2);
+    assert_eq!(updated.leader_id.node_id, 2);
+    assert_eq!(updated.index, 200);
+
+    sm.set_last_applied_log_id(None)?;
+    assert!(sm.get_last_applied_log_id()?.is_none());
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_set_and_get_last_membership() -> Result<(), io::Error> {
+    let sm = create_test_state_machine().await;
+
+    assert!(sm.get_last_membership()?.log_id().is_none());
+
+    let log_id = create_log_id(1, 1, 100);
+    let membership = create_stored_membership(log_id);
+    sm.set_last_membership(&membership)?;
+
+    let retrieved = sm.get_last_membership()?;
+    assert_eq!(retrieved.log_id(), membership.log_id());
+    assert_eq!(
+      retrieved.membership().get_joint_config().len(),
+      membership.membership().get_joint_config().len()
+    );
+
+    let new_log_id = create_log_id(2, 2, 200);
+    let new_membership = create_stored_membership(new_log_id);
+    sm.set_last_membership(&new_membership)?;
+
+    let updated = sm.get_last_membership()?;
+    assert_eq!(updated.log_id().unwrap().leader_id.term, 2);
+    assert_eq!(updated.log_id().unwrap().index, 200);
+
+    Ok(())
   }
 }
