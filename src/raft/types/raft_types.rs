@@ -47,3 +47,5 @@ openraft::declare_raft_types!(
 
 pub type Entry = openraft::Entry<TypeConfig>;
 pub type LogState = openraft::storage::LogState<TypeConfig>;
+pub type LogId = openraft::LogId<TypeConfig>;
+pub type LeaderId = <TypeConfig as openraft::RaftTypeConfig>::LeaderId;

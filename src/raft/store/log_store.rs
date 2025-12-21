@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::fmt::Debug;
 use std::io;
 use std::marker::PhantomData;
@@ -20,7 +19,6 @@ use openraft::entry::RaftEntry;
 use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
 use rocksdb::BoundColumnFamily;
-use rocksdb::ColumnFamily;
 use rocksdb::DB;
 use rocksdb::Direction;
 use rocksdb::IteratorMode;
@@ -31,6 +29,7 @@ use super::keys::LOG_DATA_FAMILY;
 use super::keys::LOG_META_FAMILY;
 use super::meta::LastPurged;
 use crate::raft::types::Entry;
+use crate::raft::types::LogId;
 use crate::raft::types::LogState;
 use crate::raft::types::RaftCodec;
 use crate::raft::types::TypeConfig;
@@ -38,7 +37,8 @@ use crate::raft::types::read_logs_err;
 
 #[derive(Debug, Clone)]
 pub struct RocksLogStore<C>
-where C: RaftTypeConfig
+where
+  C: RaftTypeConfig,
 {
   pub db: Arc<DB>,
   _p: PhantomData<C>,
@@ -93,6 +93,10 @@ impl RocksLogStore<TypeConfig> {
       .map_err(|e| M::write_err(value, e))?;
 
     Ok(())
+  }
+
+  fn get_last_purged_log_id(&self) -> Result<Option<LogId>, io::Error> {
+    self.get_meta::<LastPurged>()
   }
 }
 
@@ -152,7 +156,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
       }
     };
 
-    let last_purged_log_id = self.get_meta::<LastPurged>()?;
+    let last_purged_log_id = self.get_last_purged_log_id()?;
 
     let last_log_id = match last_log_id {
       None => last_purged_log_id.clone(),
@@ -259,4 +263,96 @@ fn id_to_bin(id: u64) -> Vec<u8> {
 
 fn bin_to_id(buf: &[u8]) -> std::io::Result<u64> {
   (&buf[0..8]).read_u64::<BigEndian>()
+}
+
+#[cfg(test)]
+mod tests {
+  use bytes::Bytes;
+  use openraft::type_config::TypeConfigExt;
+  use rocksdb::{Options, WriteBatch};
+
+  use crate::raft::types::{LeaderId, LogId, NodeId, StorageData};
+
+  use super::*;
+
+  fn create_test_log_store() -> RocksLogStore<TypeConfig> {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut opts = Options::default();
+    opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
+    let db = DB::open_cf(
+      &opts,
+      temp_dir.path(),
+      vec![LOG_META_FAMILY, LOG_DATA_FAMILY],
+    )
+    .unwrap();
+
+    RocksLogStore::new(Arc::new(db)).unwrap()
+  }
+
+  fn create_log_id(term: u64, node_id: u64, index: u64) -> LogId {
+    LogId {
+      leader_id: LeaderId { term, node_id },
+      index,
+    }
+  }
+
+  fn create_entry(term: u64, node_id: u64, index: u64) -> Entry {
+    Entry {
+      log_id: create_log_id(term, node_id, index),
+      payload: openraft::EntryPayload::Normal(StorageData {
+        key: format!("key_{}_{}", term, index),
+        value: Bytes::from(format!("data_{}_{}", term, index)),
+      }),
+    }
+  }
+
+  async fn append_entries(
+    log_store: &mut RocksLogStore<TypeConfig>,
+    entries: Vec<Entry>,
+  ) -> Result<(), io::Error> {
+    let (tx, _rx) = TypeConfig::oneshot();
+    let callback = IOFlushed::<TypeConfig>::signal(tx);
+
+    log_store.append(entries, callback).await
+  }
+
+  #[tokio::test]
+  async fn test_raft_log_operations() -> Result<(), io::Error> {
+    let mut log_store = create_test_log_store();
+
+    let entries: Vec<_> = (1..=10).map(|i| create_entry(1, 1, i)).collect();
+    append_entries(&mut log_store, entries).await?;
+
+    let all = log_store.try_get_log_entries(1..=10).await?;
+    assert_eq!(all.len(), 10);
+    assert_eq!(all[all.len() - 1].log_id.index, 10);
+
+    let range = log_store.try_get_log_entries(3..=7).await?;
+    assert_eq!(range.len(), 5);
+    assert_eq!(range[0].log_id.index, 3);
+
+    let more: Vec<_> = (11..=15).map(|i| create_entry(1, 1, i)).collect();
+    append_entries(&mut log_store, more).await?;
+    assert_eq!(log_store.try_get_log_entries(1..=15).await?.len(), 15);
+
+    log_store.truncate(create_log_id(1, 1, 11)).await?;
+    assert_eq!(log_store.try_get_log_entries(1..=15).await?.len(), 10);
+    assert_eq!(log_store.try_get_log_entries(11..=15).await?.len(), 0);
+
+    log_store.purge(create_log_id(1, 1, 5)).await?;
+    assert_eq!(log_store.get_last_purged_log_id()?.unwrap().index, 5);
+    let after_purge = log_store.try_get_log_entries(1..=10).await?;
+    assert_eq!(after_purge.len(), 5);
+    assert_eq!(after_purge[0].log_id.index, 6);
+
+    let new: Vec<_> = (11..=13).map(|i| create_entry(2, 1, i)).collect();
+    append_entries(&mut log_store, new).await?;
+    let final_logs = log_store.try_get_log_entries(6..=13).await?;
+    assert_eq!(final_logs.len(), 8);
+    assert_eq!(final_logs[0].log_id.leader_id.term, 1);
+    assert_eq!(final_logs[5].log_id.leader_id.term, 2);
+
+    Ok(())
+  }
 }

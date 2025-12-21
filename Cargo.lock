@@ -1524,6 +1524,7 @@ dependencies = [
  "prost-build",
  "rocksdb",
  "serde",
+ "tempfile",
  "thiserror",
  "tokio",
  "tonic",
