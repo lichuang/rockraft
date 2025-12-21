@@ -95,8 +95,42 @@ impl RocksLogStore<TypeConfig> {
     Ok(())
   }
 
+  fn delete_meta<M: StoreMeta>(&self) -> Result<(), io::Error> {
+    self
+      .db
+      .delete_cf(&self.cf_meta(), M::KEY)
+      .map_err(|e| M::delete_err(e))?;
+
+    Ok(())
+  }
+
   fn get_last_purged_log_id(&self) -> Result<Option<LogId>, io::Error> {
     self.get_meta::<LastPurged>()
+  }
+
+  fn set_last_purged_log_id(&self, log_id: &LogId) -> Result<(), io::Error> {
+    self.put_meta::<LastPurged>(log_id)
+  }
+
+  fn get_vote(&mut self) -> Result<Option<VoteOf<TypeConfig>>, io::Error> {
+    self.get_meta::<super::meta::Vote>()
+  }
+
+  fn set_vote(&mut self, vote: &VoteOf<TypeConfig>) -> Result<(), io::Error> {
+    self.put_meta::<super::meta::Vote>(vote)
+  }
+
+  fn set_committed(&self, committed: &Option<LogIdOf<TypeConfig>>) -> Result<(), io::Error> {
+    if let Some(committed) = committed {
+      self.put_meta::<super::meta::Committed>(committed)?;
+    } else {
+      self.delete_meta::<super::meta::Committed>()?;
+    }
+    Ok(())
+  }
+
+  fn get_committed(&self) -> Result<Option<LogIdOf<TypeConfig>>, io::Error> {
+    self.get_meta::<super::meta::Committed>()
   }
 }
 
@@ -134,7 +168,7 @@ impl RaftLogReader<TypeConfig> for RocksLogStore<TypeConfig> {
   }
 
   async fn read_vote(&mut self) -> Result<Option<VoteOf<TypeConfig>>, io::Error> {
-    self.get_meta::<super::meta::Vote>()
+    self.get_vote()
   }
 }
 
@@ -167,6 +201,17 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
       last_purged_log_id,
       last_log_id,
     })
+  }
+
+  async fn save_committed(
+    &mut self,
+    committed: Option<LogIdOf<TypeConfig>>,
+  ) -> Result<(), io::Error> {
+    self.set_committed(&committed)
+  }
+
+  async fn read_committed(&mut self) -> Result<Option<LogId>, io::Error> {
+    self.get_committed()
   }
 
   async fn get_log_reader(&mut self) -> Self::LogReader {
@@ -241,7 +286,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
     // Write the last-purged log id before purging the logs.
     // The logs at and before last-purged log id will be ignored by openraft.
     // Therefore, there is no need to do it in a transaction.
-    self.put_meta::<LastPurged>(&log_id)?;
+    self.set_last_purged_log_id(&log_id)?;
 
     let from = id_to_bin(0);
     let to = id_to_bin(log_id.index() + 1);
@@ -268,10 +313,10 @@ fn bin_to_id(buf: &[u8]) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
   use bytes::Bytes;
-  use openraft::type_config::TypeConfigExt;
-  use rocksdb::{Options, WriteBatch};
+  use openraft::Vote;
+  use rocksdb::Options;
 
-  use crate::raft::types::{LeaderId, LogId, NodeId, StorageData};
+  use crate::raft::types::{LeaderId, LogId, StorageData};
 
   use super::*;
 
@@ -311,10 +356,7 @@ mod tests {
     log_store: &mut RocksLogStore<TypeConfig>,
     entries: Vec<Entry>,
   ) -> Result<(), io::Error> {
-    let (tx, _rx) = TypeConfig::oneshot();
-    let callback = IOFlushed::<TypeConfig>::signal(tx);
-
-    log_store.append(entries, callback).await
+    log_store.append(entries, IOFlushed::noop()).await
   }
 
   #[tokio::test]
@@ -352,6 +394,78 @@ mod tests {
     assert_eq!(final_logs.len(), 8);
     assert_eq!(final_logs[0].log_id.leader_id.term, 1);
     assert_eq!(final_logs[5].log_id.leader_id.term, 2);
+
+    Ok(())
+  }
+
+  #[test]
+  fn test_set_and_get_last_purged() -> Result<(), io::Error> {
+    let log_store = create_test_log_store();
+
+    assert!(log_store.get_last_purged_log_id()?.is_none());
+
+    let log_id = create_log_id(1, 1, 100);
+    log_store.set_last_purged_log_id(&log_id)?;
+
+    let retrieved = log_store.get_last_purged_log_id()?.unwrap();
+    assert_eq!(retrieved.leader_id.term, log_id.leader_id.term);
+    assert_eq!(retrieved.leader_id.node_id, log_id.leader_id.node_id);
+    assert_eq!(retrieved.index, log_id.index);
+
+    let new_log_id = create_log_id(2, 2, 200);
+    log_store.set_last_purged_log_id(&new_log_id).unwrap();
+
+    let updated = log_store.get_last_purged_log_id()?.unwrap();
+    assert_eq!(updated.index, new_log_id.index);
+
+    Ok(())
+  }
+
+  #[test]
+  fn test_set_and_get_committed() -> Result<(), io::Error> {
+    let log_store = create_test_log_store();
+
+    assert!(log_store.get_committed()?.is_none());
+
+    let log_id = create_log_id(1, 1, 100);
+    log_store.set_committed(&Some(log_id))?;
+
+    let retrieved = log_store.get_committed()?.unwrap();
+    assert_eq!(retrieved.leader_id.term, log_id.leader_id.term);
+    assert_eq!(retrieved.leader_id.node_id, log_id.leader_id.node_id);
+    assert_eq!(retrieved.index, log_id.index);
+
+    let new_log_id = create_log_id(2, 2, 200);
+    log_store.set_committed(&Some(new_log_id))?;
+
+    let updated = log_store.get_committed()?.unwrap();
+    assert_eq!(updated.index, new_log_id.index);
+
+    log_store.set_committed(&None)?;
+    assert!(log_store.get_committed()?.is_none());
+
+    Ok(())
+  }
+
+  #[test]
+  fn test_set_and_get_vote() -> Result<(), io::Error> {
+    let mut log_store = create_test_log_store();
+
+    assert!(log_store.get_vote()?.is_none());
+
+    let vote = Vote::new(1, 1);
+    log_store.set_vote(&vote)?;
+
+    let retrieved = log_store.get_vote()?.unwrap();
+    assert_eq!(retrieved.leader_id().term, vote.leader_id().term);
+    assert_eq!(retrieved.leader_id().node_id, vote.leader_id().node_id);
+
+    let new_vote = Vote::new(2, 2);
+    log_store.set_vote(&new_vote)?;
+
+    let updated = log_store.get_vote()?.unwrap();
+    assert_eq!(updated.leader_id().term, 2);
+    assert_eq!(updated.leader_id().node_id, 2);
 
     Ok(())
   }

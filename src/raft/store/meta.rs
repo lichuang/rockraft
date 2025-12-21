@@ -26,10 +26,15 @@ pub trait StoreMeta {
   fn write_err(v: &Self::Value, e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
     StorageError::new(Self::subject(Some(v)), ErrorVerb::Write, AnyError::new(&e))
   }
+
+  fn delete_err(e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
+    StorageError::new(Self::subject(None), ErrorVerb::Delete, AnyError::new(&e))
+  }
 }
 
 pub(crate) struct LastPurged {}
 pub(crate) struct Vote {}
+pub(crate) struct Committed {}
 
 impl StoreMeta for LastPurged {
   const KEY: &'static str = "last_purged_log_id";
@@ -46,5 +51,14 @@ impl StoreMeta for Vote {
 
   fn subject(_v: Option<&Self::Value>) -> ErrorSubject<TypeConfig> {
     ErrorSubject::Vote
+  }
+}
+
+impl StoreMeta for Committed {
+  const KEY: &'static str = "committed";
+  type Value = LogIdOf<TypeConfig>;
+
+  fn subject(_v: Option<&Self::Value>) -> ErrorSubject<TypeConfig> {
+    ErrorSubject::Store
   }
 }
