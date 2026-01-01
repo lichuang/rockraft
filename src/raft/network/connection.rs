@@ -1,17 +1,24 @@
-use crate::error::Result;
-use std::sync::Arc;
-
-use crate::raft::grpc_client::ClientPool;
-use crate::raft::protobuf::AppendRequest;
-use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
-use crate::raft::protobuf::VoteRequest as PbVoteRequest;
-use crate::raft::types::TypeConfig;
+use openraft::error::InstallSnapshotError;
+use openraft::error::NetworkError;
+use openraft::error::RPCError;
+use openraft::error::RaftError;
+use openraft::network::RPCOption;
+use openraft::network::RaftNetwork;
 use openraft::raft::AppendEntriesRequest;
 use openraft::raft::AppendEntriesResponse;
 use openraft::raft::InstallSnapshotRequest;
 use openraft::raft::InstallSnapshotResponse;
 use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
+use std::sync::Arc;
+
+use crate::error::Result;
+use crate::error::RockRaftError;
+use crate::raft::grpc_client::ClientPool;
+use crate::raft::protobuf::AppendRequest;
+use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
+use crate::raft::protobuf::VoteRequest as PbVoteRequest;
+use crate::raft::types::TypeConfig;
 
 pub struct NetworkConnection {
   addr: String,
@@ -123,5 +130,47 @@ impl NetworkConnection {
     let result: InstallSnapshotResponse<TypeConfig> = bincode::deserialize(&snapshot_reply.value)?;
 
     Ok(result)
+  }
+}
+
+impl RaftNetwork<TypeConfig> for NetworkConnection {
+  async fn append_entries(
+    &mut self,
+    rpc: AppendEntriesRequest<TypeConfig>,
+    _option: RPCOption,
+  ) -> std::result::Result<
+    AppendEntriesResponse<TypeConfig>,
+    RPCError<TypeConfig, RaftError<TypeConfig>>,
+  > {
+    self
+      .append_entries_internal(rpc)
+      .await
+      .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+  }
+
+  async fn install_snapshot(
+    &mut self,
+    rpc: InstallSnapshotRequest<TypeConfig>,
+    _option: RPCOption,
+  ) -> std::result::Result<
+    InstallSnapshotResponse<TypeConfig>,
+    RPCError<TypeConfig, RaftError<TypeConfig, InstallSnapshotError>>,
+  > {
+    self
+      .install_snapshot_internal(rpc)
+      .await
+      .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+  }
+
+  async fn vote(
+    &mut self,
+    rpc: VoteRequest<TypeConfig>,
+    _option: RPCOption,
+  ) -> std::result::Result<VoteResponse<TypeConfig>, RPCError<TypeConfig, RaftError<TypeConfig>>>
+  {
+    self
+      .vote_internal(rpc)
+      .await
+      .map_err(|e| RPCError::Network(NetworkError::new(&e)))
   }
 }
