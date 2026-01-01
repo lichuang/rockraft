@@ -21,9 +21,19 @@ message AppendReply {
   bytes value = 1;
 }
 
+message SnapshotRequest {
+  bytes value = 1;
+}
+
+message SnapshotReply {
+  bytes value = 1;
+}
+
 service RaftService {
   // Raft Internal
   rpc Append(AppendRequest) returns (AppendReply) {}
 
   rpc Vote(VoteRequest) returns (VoteReply) {}
+
+  rpc Snapshot(SnapshotRequest) returns (SnapshotReply) {}
 }
