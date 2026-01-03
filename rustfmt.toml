@@ -1,4 +1,4 @@
-edition = "2021"
+edition = "2024"
 version = "Two"
 reorder_imports = true
 imports_granularity = "Item"

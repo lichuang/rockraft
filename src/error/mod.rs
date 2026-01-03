@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::raft::types::TypeConfig;
+
 #[derive(Error, Debug)]
 pub enum RockRaftError {
   #[error("{0}")]
@@ -13,6 +15,12 @@ pub enum RockRaftError {
 
   #[error("Connection pool has no connection information available. {0}")]
   NoAvailableGrpcConnection(String),
+
+  #[error("IO error: {0}")]
+  Io(#[from] std::io::Error),
+
+  #[error("Fatal Raft error: {0}")]
+  OpenraftFatal(#[from] openraft::error::Fatal<TypeConfig>),
 }
 
 pub type Result<T> = std::result::Result<T, RockRaftError>;

@@ -4,6 +4,7 @@ use openraft::error::RPCError;
 use openraft::error::RaftError;
 use openraft::network::RPCOption;
 use openraft::network::RaftNetwork;
+use openraft::network::RaftNetworkFactory;
 use openraft::raft::AppendEntriesRequest;
 use openraft::raft::AppendEntriesResponse;
 use openraft::raft::InstallSnapshotRequest;
@@ -13,13 +14,15 @@ use openraft::raft::VoteResponse;
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::error::RockRaftError;
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::protobuf::AppendRequest;
 use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
 use crate::raft::protobuf::VoteRequest as PbVoteRequest;
+use crate::raft::types::RaftNode;
 use crate::raft::types::TypeConfig;
-
+/// Represents a network connection to a specific Raft node.
+///
+/// This struct handles the actual RPC communication with a target node using gRPC.
 pub struct NetworkConnection {
   addr: String,
   client_pool: Arc<ClientPool>,
@@ -172,5 +175,27 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
       .vote_internal(rpc)
       .await
       .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+  }
+}
+
+/// Factory for creating network connections to Raft cluster members.
+///
+/// This struct implements the [`RaftNetworkFactory`] trait required by OpenRaft
+/// to create [`NetworkConnection`] instances for communicating with other nodes.
+pub struct NetworkFactory {
+  client_pool: Arc<ClientPool>,
+}
+
+impl NetworkFactory {
+  pub fn new(client_pool: Arc<ClientPool>) -> Self {
+    Self { client_pool }
+  }
+}
+
+impl openraft::RaftNetworkFactory<TypeConfig> for NetworkFactory {
+  type Network = NetworkConnection;
+
+  async fn new_client(&mut self, _target: u64, node: &RaftNode) -> Self::Network {
+    NetworkConnection::new(node.rpc_addr.clone(), self.client_pool.clone())
   }
 }

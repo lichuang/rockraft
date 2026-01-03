@@ -6,6 +6,8 @@ use super::default::default_rocksdb_config;
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct Config {
+  pub node_id: u64,
+
   #[serde(default = "default_raft_address")]
   pub raft_addr: String,
 

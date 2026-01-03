@@ -45,7 +45,7 @@ where
 }
 
 impl RocksLogStore<TypeConfig> {
-  pub fn new(db: Arc<DB>) -> Result<Self, std::io::Error> {
+  pub fn create(db: Arc<DB>) -> Result<Self, std::io::Error> {
     db.cf_handle(LOG_META_FAMILY)
       .ok_or_else(|| std::io::Error::other("column family `_log_meta` not found"))?;
     db.cf_handle(LOG_DATA_FAMILY)

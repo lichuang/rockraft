@@ -7,3 +7,4 @@ mod statemachine;
 pub use keys::column_family_list;
 pub use log_store::RocksLogStore;
 pub use meta::StoreMeta;
+pub use statemachine::RocksStateMachine;
