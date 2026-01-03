@@ -20,6 +20,11 @@ pub struct RaftNode {
 }
 
 impl RaftNode {
+  /// Get a reference to the underlying Raft instance
+  pub fn raft(&self) -> &Arc<Raft<TypeConfig>> {
+    &self.raft
+  }
+
   pub async fn create(config: &Config) -> Result<Self> {
     let engine = Arc::new(RocksDBEngine::new(
       &config.rocksdb.data_path,

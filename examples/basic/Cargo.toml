@@ -1,0 +1,14 @@
+[package]
+name = "basic_example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 引用上一层的 rockraft 库
+rockraft = { path = "../.." }
+openraft = { git="https://github.com/databendlabs/openraft.git", rev = "9b6b529", features = ["type-alias", "serde"] }
+bytes = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tempfile = "3.9"
