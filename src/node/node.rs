@@ -1,22 +1,30 @@
 use crate::error::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 
 use openraft::Config as OpenRaftConfig;
 use openraft::Raft;
+use tonic::transport::Server;
 
 use crate::config::Config;
 use crate::engine::RocksDBEngine;
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::network::NetworkFactory;
+use crate::raft::protobuf::raft_service_server::RaftServiceServer;
 use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::store::column_family_list;
 use crate::raft::types::TypeConfig;
+use crate::service::RaftServiceImpl;
 
 pub struct RaftNode {
   engine: Arc<RocksDBEngine>,
   raft: Arc<Raft<TypeConfig>>,
+  shutdown_tx: broadcast::Sender<()>,
+  _shutdown_rx: broadcast::Receiver<()>,
+  service_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RaftNode {
@@ -25,7 +33,21 @@ impl RaftNode {
     &self.raft
   }
 
-  pub async fn create(config: &Config) -> Result<Self> {
+  /// Shutdown the raft thread
+  pub async fn shutdown(&self) -> Result<()> {
+    // Send shutdown signal
+    let _ = self.shutdown_tx.send(());
+
+    // Wait for the service task to finish if it exists
+    let handle = self.service_handle.lock().unwrap().take();
+    if let Some(h) = handle {
+      h.await.ok();
+    }
+
+    Ok(())
+  }
+
+  pub async fn create(config: &Config) -> Result<Arc<Self>> {
     let engine = Arc::new(RocksDBEngine::new(
       &config.rocksdb.data_path,
       config.rocksdb.max_open_files,
@@ -62,6 +84,73 @@ impl RaftNode {
       .await?,
     );
 
-    Ok(Self { engine, raft })
+    // Create shutdown channel
+    let (shutdown_tx, shutdown_rx_for_struct) = broadcast::channel(1);
+
+    Ok(Arc::new(Self {
+      engine,
+      raft,
+      shutdown_tx,
+      _shutdown_rx: shutdown_rx_for_struct,
+      service_handle: std::sync::Mutex::new(None),
+    }))
+  }
+
+  /// Start the Raft gRPC service in a separate thread
+  pub async fn start_raft_service(raft_node: Arc<Self>, config: &Config) -> Result<()> {
+    let raft_addr = config.raft_addr.clone();
+
+    // Subscribe to shutdown signal
+    let mut shutdown_rx = raft_node.shutdown_tx.subscribe();
+
+    // Clone raft_node for the spawned task
+    let raft_node_for_service = raft_node.clone();
+
+    // Spawn gRPC server in a separate thread/task
+    let handle = tokio::task::spawn(async move {
+      tracing::info!("Starting Raft gRPC service on {}", raft_addr);
+
+      // Create gRPC service instance
+      let raft_service = RaftServiceImpl::new(raft_node_for_service);
+
+      // Create TCP listener
+      let listener = match TcpListener::bind(&raft_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+          tracing::error!("Failed to bind gRPC server to {}: {}", raft_addr, e);
+          return;
+        }
+      };
+
+      tracing::info!("Raft gRPC service listening on {}", raft_addr);
+
+      // Run the gRPC server with shutdown handling
+      let server_future = Server::builder()
+        .add_service(RaftServiceServer::new(raft_service))
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+
+      tokio::select! {
+        // Wait for shutdown signal
+        _ = shutdown_rx.recv() => {
+          tracing::info!("Raft gRPC service received shutdown signal, shutting down...");
+        }
+
+        // Wait for server to finish (if it errors)
+        result = server_future => {
+          match result {
+            Ok(_) => tracing::info!("Raft gRPC service finished normally"),
+            Err(e) => tracing::error!("Raft gRPC service error: {}", e),
+          }
+        }
+      }
+
+      tracing::info!("Raft gRPC service stopped");
+    });
+
+    // Store the handle in RaftNode
+    *raft_node.service_handle.lock().unwrap() = Some(handle);
+    tracing::info!("Raft gRPC service started");
+
+    Ok(())
   }
 }

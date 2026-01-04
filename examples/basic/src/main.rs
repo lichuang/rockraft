@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use rockraft::config::Config;
-use rockraft::node::RaftNode as ClusterNode;
+use rockraft::node::RaftNodeBuilder;
 use rockraft::raft::types::RaftNode as RaftNodeInfo;
 use std::collections::BTreeMap;
 use tempfile::tempdir;
@@ -41,8 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   // Step 2: Create and initialize Raft node
   println!("\nCreating Raft node...");
-  let raft_node = ClusterNode::create(&config).await?;
-  println!("✓ Raft node created successfully!");
+  let raft_node = RaftNodeBuilder::build(&config).await?;
+  println!("✓ Raft node created and gRPC service started successfully!");
 
   // Step 3: Initialize cluster with a single voter
   println!("\nInitializing single-node cluster...");
@@ -131,13 +131,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   println!("  Membership: {:?}", metrics.membership_config);
 
   // Additional info
+  // Step 6: Shutdown the Raft node gracefully
+  println!("\nShutting down Raft node...");
+  raft_node.shutdown().await?;
+  println!("✓ Raft node shutdown successfully!");
+
+  // Additional info
   println!("\nExample completed successfully!");
   println!("Data directory: {:?}", data_path);
   println!("Note: Data directory will be cleaned up when tempdir goes out of scope");
   println!("\nNote: In a real application, you would:");
   println!("  - Run multiple nodes for high availability");
   println!("  - Add nodes using: raft.add_learner() and raft.change_membership()");
-  println!("  - Add a gRPC server to handle RPC requests from other nodes");
+  println!("  - Call raft.shutdown() when stopping the application");
   println!("  - Implement read operations to query the state machine");
 
   Ok(())
