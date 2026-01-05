@@ -3,14 +3,20 @@ use rockraft::config::Config;
 use rockraft::node::RaftNodeBuilder;
 use rockraft::raft::types::RaftNode as RaftNodeInfo;
 use std::collections::BTreeMap;
-use tempfile::tempdir;
+use std::env;
+use std::fs;
 
 /// Basic usage example demonstrating how to create and use a RaftNode
 ///
+/// Usage:
+///   cargo run -- --conf conf/node1.toml
+///   cargo run -- --conf conf/node2.toml
+///   cargo run -- --conf conf/node3.toml
+///
 /// This example shows:
-/// 1. Creating a configuration
+/// 1. Loading configuration from TOML file
 /// 2. Initializing a Raft node
-/// 3. Setting up a single-node cluster
+/// 3. Setting up a multi-node cluster
 /// 4. Writing data to Raft cluster
 /// 5. Reading cluster metrics
 #[tokio::main]
@@ -20,50 +26,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_max_level(tracing::Level::INFO)
     .init();
 
-  // Create a temporary directory for RocksDB data
-  let temp_dir = tempdir()?;
-  let data_path = temp_dir.path().join("node1");
+  // Parse command line arguments
+  let args: Vec<String> = env::args().collect();
 
-  // Step 1: Create a configuration
-  let config = Config {
-    node_id: 1,
-    raft_addr: "127.0.0.1:6682".to_string(),
-    rocksdb: rockraft::config::RocksdbConfig {
-      data_path: data_path.to_string_lossy().to_string(),
-      max_open_files: 10000,
-    },
+  let config_path = if args.len() > 2 && args[1] == "--conf" {
+    &args[2]
+  } else {
+    eprintln!("Usage: {} --conf <config-file>", args[0]);
+    eprintln!("Example: {} --conf conf/node1.toml", args[0]);
+    std::process::exit(1);
   };
+
+  // Load configuration from TOML file
+  let config = load_config(config_path)?;
 
   println!("Creating Raft node with config:");
   println!("  node_id: {}", config.node_id);
   println!("  raft_addr: {}", config.raft_addr);
   println!("  data_path: {}", config.rocksdb.data_path);
 
-  // Step 2: Create and initialize Raft node
+  // Step 1: Create and initialize Raft node
   println!("\nCreating Raft node...");
   let raft_node = RaftNodeBuilder::build(&config).await?;
   println!("✓ Raft node created and gRPC service started successfully!");
 
-  // Step 3: Initialize cluster with a single voter
-  println!("\nInitializing single-node cluster...");
+  // Step 2: For node 1, initialize the cluster
+  if config.node_id == 1 {
+    println!("\nInitializing 3-node cluster...");
 
-  // Create node configuration for initial cluster member
-  let mut nodes = BTreeMap::new();
-  nodes.insert(
-    1,
-    RaftNodeInfo {
-      node_id: 1,
-      rpc_addr: "127.0.0.1:6682".to_string(),
-    },
-  );
+    // Create node configuration for initial cluster members
+    let mut nodes = BTreeMap::new();
 
-  // Initialize cluster with single voter node
-  raft_node.raft().initialize(nodes).await?;
-  println!("✓ Cluster initialized successfully!");
+    // Node 1
+    nodes.insert(
+      1,
+      RaftNodeInfo {
+        node_id: 1,
+        rpc_addr: "127.0.0.1:6682".to_string(),
+      },
+    );
 
-  // Wait for the initial log to be committed
+    // Node 2
+    nodes.insert(
+      2,
+      RaftNodeInfo {
+        node_id: 2,
+        rpc_addr: "127.0.0.1:6683".to_string(),
+      },
+    );
+
+    // Node 3
+    nodes.insert(
+      3,
+      RaftNodeInfo {
+        node_id: 3,
+        rpc_addr: "127.0.0.1:6684".to_string(),
+      },
+    );
+
+    // Initialize cluster with three voter nodes
+    raft_node.raft().initialize(nodes).await?;
+    println!("✓ Cluster initialized successfully!");
+  } else {
+    // For other nodes, wait a bit for cluster to be initialized
+    println!("\nWaiting for cluster to be initialized by node 1...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+  }
+
+  // Step 3: Wait for the initial log to be committed
   println!("\nWaiting for initial log to be committed (log index 0)...");
-  let timeout = Some(std::time::Duration::from_secs(5));
+  let timeout = Some(std::time::Duration::from_secs(10));
   raft_node
     .raft()
     .wait(timeout)
@@ -71,54 +103,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
   println!("✓ Initial log committed successfully!");
 
-  // Step 4: Write some data to the cluster
-  let key = "my_key".to_string();
-  let value = Bytes::from("my_value");
+  // Step 4: Only node 1 writes some data to the cluster
+  if config.node_id == 1 {
+    println!("\nNode 1 is the leader, writing data to cluster...");
 
-  println!("\nWriting data to cluster:");
-  println!("  key: {}", key);
-  println!("  value: {:?}", value);
+    let key = "my_key".to_string();
+    let value = Bytes::from("my_value");
 
-  let response = raft_node
-    .raft()
-    .client_write(rockraft::raft::types::StorageData {
-      key: key.clone(),
-      value: value.clone(),
-    })
-    .await?;
+    println!("  key: {}", key);
+    println!("  value: {:?}", value);
 
-  println!("✓ Write result: log_id={:?}", response.log_id);
+    let response = raft_node
+      .raft()
+      .client_write(rockraft::raft::types::StorageData {
+        key: key.clone(),
+        value: value.clone(),
+      })
+      .await?;
 
-  // Wait for write to be applied
-  let log_id = response.log_id;
-  println!(
-    "\nWaiting for write to be applied (log index {})...",
-    log_id.index
-  );
-  raft_node
-    .raft()
-    .wait(timeout)
-    .applied_index(Some(log_id.index), "write")
-    .await?;
-  println!("✓ Write applied successfully!");
+    println!("✓ Write result: log_id={:?}", response.log_id);
 
-  // Write another piece of data
-  let key2 = "another_key".to_string();
-  let value2 = Bytes::from("another_value");
+    // Wait for write to be applied
+    let log_id = response.log_id;
+    println!(
+      "\nWaiting for write to be applied (log index {})...",
+      log_id.index
+    );
+    raft_node
+      .raft()
+      .wait(timeout)
+      .applied_index(Some(log_id.index), "write")
+      .await?;
+    println!("✓ Write applied successfully!");
 
-  println!("\nWriting second piece of data:");
-  println!("  key: {}", key2);
-  println!("  value: {:?}", value2);
+    // Write another piece of data
+    let key2 = "another_key".to_string();
+    let value2 = Bytes::from("another_value");
 
-  let response2 = raft_node
-    .raft()
-    .client_write(rockraft::raft::types::StorageData {
-      key: key2.clone(),
-      value: value2.clone(),
-    })
-    .await?;
+    println!("\nWriting second piece of data:");
+    println!("  key: {}", key2);
+    println!("  value: {:?}", value2);
 
-  println!("✓ Write result: log_id={:?}", response2.log_id);
+    let response2 = raft_node
+      .raft()
+      .client_write(rockraft::raft::types::StorageData {
+        key: key2.clone(),
+        value: value2.clone(),
+      })
+      .await?;
+
+    println!("✓ Write result: log_id={:?}", response2.log_id);
+  }
 
   // Step 5: Print cluster statistics
   let metrics = raft_node.raft().metrics().borrow().clone();
@@ -130,21 +165,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   println!("  State: {:?}", metrics.running_state);
   println!("  Membership: {:?}", metrics.membership_config);
 
-  // Additional info
-  // Step 6: Shutdown the Raft node gracefully
-  println!("\nShutting down Raft node...");
+  // Step 6: Keep the node running
+  println!(
+    "\nRaft node {} is running. Press Ctrl+C to shutdown.",
+    config.node_id
+  );
+
+  // Set up Ctrl+C handler
+  tokio::signal::ctrl_c().await?;
+
+  // Step 7: Shutdown the Raft node gracefully
+  println!("\nShutting down Raft node {}...", config.node_id);
   raft_node.shutdown().await?;
   println!("✓ Raft node shutdown successfully!");
 
-  // Additional info
   println!("\nExample completed successfully!");
-  println!("Data directory: {:?}", data_path);
-  println!("Note: Data directory will be cleaned up when tempdir goes out of scope");
   println!("\nNote: In a real application, you would:");
-  println!("  - Run multiple nodes for high availability");
-  println!("  - Add nodes using: raft.add_learner() and raft.change_membership()");
+  println!("  - Run multiple nodes for high availability (as configured)");
   println!("  - Call raft.shutdown() when stopping the application");
   println!("  - Implement read operations to query the state machine");
+  println!("  - Add error handling and retry logic for network failures");
 
   Ok(())
+}
+
+/// Load configuration from a TOML file
+fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
+  let config_str = fs::read_to_string(path)
+    .map_err(|e| format!("Failed to read config file '{}': {}", path, e))?;
+
+  let config: Config = toml::from_str(&config_str)
+    .map_err(|e| format!("Failed to parse config file '{}': {}", path, e))?;
+
+  Ok(config)
 }
