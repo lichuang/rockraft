@@ -98,7 +98,7 @@ impl RaftNode {
 
   /// Start the Raft gRPC service in a separate thread
   pub async fn start_raft_service(raft_node: Arc<Self>, config: &Config) -> Result<()> {
-    let raft_addr = config.raft_addr.clone();
+    let raft_addr = config.raft.addr.clone();
 
     // Subscribe to shutdown signal
     let mut shutdown_rx = raft_node.shutdown_tx.subscribe();

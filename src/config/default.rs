@@ -1,7 +1,11 @@
-use super::config::RocksdbConfig;
+use super::config::{RaftConfig, RocksdbConfig};
 
-pub fn default_raft_address() -> String {
-  "127.0.0.1:6682".to_string()
+pub fn default_raft_config() -> RaftConfig {
+  RaftConfig {
+    addr: "127.0.0.1:6682".to_string(),
+    single: true,
+    join: vec![],
+  }
 }
 
 pub fn default_rocksdb_config() -> RocksdbConfig {
