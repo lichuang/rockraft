@@ -25,7 +25,7 @@ pub struct AppResponseData {
 
 pub type NodeId = u64;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct RaftNode {
   pub node_id: u64,
   pub rpc_addr: String,

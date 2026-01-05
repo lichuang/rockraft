@@ -29,6 +29,15 @@ message SnapshotReply {
   bytes value = 1;
 }
 
+message JoinRequest {
+  uint64 node_id = 1;
+  string endpoint = 2;
+}
+
+message JoinReply {
+  bytes value = 1;
+}
+
 service RaftService {
   // Raft Internal
   rpc Append(AppendRequest) returns (AppendReply) {}
