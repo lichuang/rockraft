@@ -4,7 +4,6 @@ use openraft::error::RPCError;
 use openraft::error::RaftError;
 use openraft::network::RPCOption;
 use openraft::network::RaftNetwork;
-use openraft::network::RaftNetworkFactory;
 use openraft::raft::AppendEntriesRequest;
 use openraft::raft::AppendEntriesResponse;
 use openraft::raft::InstallSnapshotRequest;
@@ -20,6 +19,7 @@ use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
 use crate::raft::protobuf::VoteRequest as PbVoteRequest;
 use crate::raft::types::RaftNode;
 use crate::raft::types::TypeConfig;
+
 /// Represents a network connection to a specific Raft node.
 ///
 /// This struct handles the actual RPC communication with a target node using gRPC.

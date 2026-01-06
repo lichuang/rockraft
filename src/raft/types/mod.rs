@@ -1,3 +1,6 @@
+mod cmd;
+mod endpoint;
+mod node;
 mod raft_codec;
 mod raft_types;
 

@@ -15,7 +15,7 @@ This example demonstrates:
 
 ## Prerequisites
 
-- Rust 2021 edition or later
+- Rust 2024 edition or later
 - Cargo package manager
 
 ## Project Structure

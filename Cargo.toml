@@ -6,11 +6,13 @@ description = "A strong consistency KV service library base on Raft and Rocksdb"
 keywords = ["raft", "consensus", "rocksdb"]
 
 [dependencies]
+anyerror = { version = "=0.1.13" }
 anyhow = "1.0.98"
 bincode = "1.3.3"
 byteorder = "1.4.3"
 bytes = { version = "1", features = ["serde"] }
 dashmap = { version = "6.1.0", features = ["serde"] }
+display-more = { version = "0.2.1" }
 futures = "0.3.31"
 mobc = "0.9.0"
 openraft = { git="https://github.com/databendlabs/openraft.git", rev = "9b6b529", features = ["type-alias", "serde"] }
