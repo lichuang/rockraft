@@ -10,8 +10,6 @@ use std::fmt::Formatter;
 pub enum Operation<T> {
   Update(T),
   Delete,
-  #[deprecated(note = "not supported and will be removed from server side")]
-  AsIs,
 }
 
 impl<T> Debug for Operation<T> {
@@ -19,8 +17,6 @@ impl<T> Debug for Operation<T> {
     match self {
       Operation::Update(_) => f.debug_tuple("Update").field(&"[binary]").finish(),
       Operation::Delete => f.debug_tuple("Delete").finish(),
-      #[allow(deprecated)]
-      Operation::AsIs => f.debug_tuple("AsIs").finish(),
     }
   }
 }

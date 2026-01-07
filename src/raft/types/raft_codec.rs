@@ -11,13 +11,16 @@ use crate::raft::types::TypeConfig;
 
 pub trait RaftCodec {
   fn decode_from(buf: &[u8]) -> Result<Self, io::Error>
-  where Self: Sized;
+  where
+    Self: Sized;
   fn encode_to(&self) -> Result<Vec<u8>, io::Error>;
 }
 
 impl RaftCodec for LogIdOf<TypeConfig> {
   fn decode_from(buf: &[u8]) -> Result<Self, io::Error>
-  where Self: Sized {
+  where
+    Self: Sized,
+  {
     Ok(deserialize(buf).map_err(read_logs_err)?)
   }
 
@@ -28,7 +31,9 @@ impl RaftCodec for LogIdOf<TypeConfig> {
 
 impl RaftCodec for VoteOf<TypeConfig> {
   fn decode_from(buf: &[u8]) -> Result<Self, io::Error>
-  where Self: Sized {
+  where
+    Self: Sized,
+  {
     Ok(deserialize(buf).map_err(read_logs_err)?)
   }
 
@@ -39,7 +44,9 @@ impl RaftCodec for VoteOf<TypeConfig> {
 
 impl RaftCodec for StoredMembership<TypeConfig> {
   fn decode_from(buf: &[u8]) -> Result<Self, io::Error>
-  where Self: Sized {
+  where
+    Self: Sized,
+  {
     Ok(deserialize(buf).map_err(read_logs_err)?)
   }
 

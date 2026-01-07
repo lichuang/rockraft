@@ -4,19 +4,9 @@ use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::cmd::Cmd;
+
 pub type SnapshotData = tokio::fs::File;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct StorageData {
-  pub key: String,
-  pub value: Bytes,
-}
-
-impl fmt::Display for StorageData {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "({:?}, {:?})", self.key, self.value)
-  }
-}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppResponseData {
@@ -39,7 +29,7 @@ pub struct KeyValue {
 
 openraft::declare_raft_types!(
     pub TypeConfig:
-        D = StorageData,
+        D = Cmd,
         R = AppResponseData,
         Node = RaftNode,
         SnapshotData = SnapshotData

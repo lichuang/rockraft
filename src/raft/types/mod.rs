@@ -4,6 +4,8 @@ mod node;
 mod raft_codec;
 mod raft_types;
 
+pub use cmd::Cmd;
+pub use cmd::Operation;
 pub use raft_codec::RaftCodec;
 pub use raft_codec::read_logs_err;
 pub use raft_types::AppResponseData;
@@ -16,5 +18,4 @@ pub use raft_types::Node;
 pub use raft_types::NodeId;
 pub use raft_types::RaftNode;
 pub use raft_types::SnapshotData;
-pub use raft_types::StorageData;
 pub use raft_types::TypeConfig;

@@ -13,7 +13,6 @@ use openraft::RaftSnapshotBuilder;
 use openraft::Snapshot;
 use openraft::SnapshotMeta;
 use openraft::StoredMembership;
-use openraft::alias::LogIdOf;
 use openraft::alias::SnapshotDataOf;
 use openraft::storage::EntryResponder;
 use openraft::storage::RaftStateMachine;
@@ -28,6 +27,8 @@ use super::snapshot::build_snapshot;
 use super::snapshot::get_current_snapshot;
 use crate::raft::store::snapshot::recover_snapshot;
 use crate::raft::types::AppResponseData;
+use crate::raft::types::Cmd;
+use crate::raft::types::Operation;
 use crate::raft::types::RaftCodec as _;
 use crate::raft::types::TypeConfig;
 use crate::raft::types::read_logs_err;
@@ -151,8 +152,21 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
       let response = match entry.payload {
         EntryPayload::Blank => AppResponseData { value: None },
         EntryPayload::Normal(req) => {
-          let cf_data = &self.cf_sm_data();
-          batch.put_cf(cf_data, req.key.as_bytes(), req.value);
+          match req {
+            Cmd::UpsertKV(kv) => {
+              let cf_data = &self.cf_sm_data();
+              match kv.value {
+                Operation::Update(value) => {
+                  batch.put_cf(cf_data, kv.key.as_bytes(), value);
+                }
+                Operation::Delete => {
+                  batch.delete_cf(cf_data, kv.key.as_bytes());
+                }
+              }
+            }
+            _ => {}
+          }
+
           AppResponseData { value: None }
         }
         EntryPayload::Membership(mem) => {

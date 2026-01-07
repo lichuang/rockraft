@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::raft::types::{NodeId, node::Node};
@@ -21,4 +23,25 @@ pub enum Cmd {
 
   /// Update or insert a general purpose kv store
   UpsertKV(UpsertKV),
+}
+
+impl fmt::Display for Cmd {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      Cmd::AddNode { node, overriding } => {
+        if *overriding {
+          write!(f, "add_node(override):{}", node)
+        } else {
+          write!(f, "add_node(no-override):{}", node)
+        }
+      }
+      Cmd::RemoveNode { node_id } => {
+        write!(f, "remove_node:{}", node_id)
+      }
+
+      Cmd::UpsertKV(upsert_kv) => {
+        write!(f, "upsert_kv:{}", upsert_kv)
+      }
+    }
+  }
 }
