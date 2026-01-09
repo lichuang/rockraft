@@ -1,3 +1,4 @@
+use anyerror::AnyError;
 use thiserror::Error;
 
 use crate::raft::types::TypeConfig;
@@ -21,6 +22,9 @@ pub enum RockRaftError {
 
   #[error("Fatal Raft error: {0}")]
   OpenraftFatal(#[from] openraft::error::Fatal<TypeConfig>),
+
+  #[error("Other error: {0}")]
+  Other(#[from] AnyError),
 }
 
 pub type Result<T> = std::result::Result<T, RockRaftError>;

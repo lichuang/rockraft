@@ -1,22 +1,26 @@
 use crate::error::Result;
+use anyerror::AnyError;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+use tokio::time::{timeout, Duration};
 
 use openraft::Config as OpenRaftConfig;
 use openraft::Raft;
 use tonic::transport::Server;
 
+use super::LeaderHandler;
 use crate::config::Config;
 use crate::engine::RocksDBEngine;
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::network::NetworkFactory;
 use crate::raft::protobuf::raft_service_server::RaftServiceServer;
+use crate::raft::store::column_family_list;
 use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
-use crate::raft::store::column_family_list;
 use crate::raft::types::TypeConfig;
+use crate::raft::types::{ForwardToLeader, NodeId};
 use crate::service::RaftServiceImpl;
 
 pub struct RaftNode {
@@ -33,7 +37,7 @@ impl RaftNode {
     &self.raft
   }
 
-  /// Shutdown the raft thread
+  /// Shutdown raft thread
   pub async fn shutdown(&self) -> Result<()> {
     // Send shutdown signal
     let _ = self.shutdown_tx.send(());
@@ -152,5 +156,68 @@ impl RaftNode {
     tracing::info!("Raft gRPC service started");
 
     Ok(())
+  }
+
+  pub async fn get_leader(&self) -> Result<Option<NodeId>> {
+    let deadline = Duration::from_millis(2000);
+    let mut metrics_rx = self.raft.metrics();
+
+    let result = timeout(deadline, async {
+      loop {
+        if let Some(leader) = metrics_rx.borrow().current_leader {
+          return Ok(Some(leader));
+        }
+        if let Err(e) = metrics_rx.changed().await {
+          // If changed() returns an error, the watch channel is closed
+          // or receiver lagged. Return the error to the caller
+          let error_msg = format!("Metrics watch error: {:?}", e);
+          tracing::debug!("{}", error_msg);
+          return Err(AnyError::error(error_msg).into());
+        }
+      }
+    })
+    .await;
+
+    match result {
+      Ok(inner_result) => inner_result,
+      Err(_) => {
+        // Timeout occurred
+        Ok(None)
+      }
+    }
+  }
+
+  /// Assume's current node is a leader
+  /// Returns Ok(LeaderHandler) if this node is the current leader
+  /// Returns Err(ForwardToLeader) with the current leader information if this node is not a leader
+  pub async fn assume_leader(&self) -> std::result::Result<LeaderHandler<'_>, ForwardToLeader> {
+    let current_node_id = *self.raft.node_id();
+
+    match self.get_leader().await {
+      Ok(Some(leader_id)) => {
+        if leader_id == current_node_id {
+          Ok(LeaderHandler::new(self))
+        } else {
+          Err(ForwardToLeader {
+            leader_id: Some(leader_id),
+            leader_node: None,
+          })
+        }
+      }
+      Ok(None) => {
+        // No leader found, return error without leader_id
+        Err(ForwardToLeader {
+          leader_id: None,
+          leader_node: None,
+        })
+      }
+      Err(_) => {
+        // Error occurred while getting leader, assume we are not the leader
+        Err(ForwardToLeader {
+          leader_id: None,
+          leader_node: None,
+        })
+      }
+    }
   }
 }

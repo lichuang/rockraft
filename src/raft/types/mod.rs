@@ -6,10 +6,11 @@ mod raft_types;
 
 pub use cmd::Cmd;
 pub use cmd::Operation;
-pub use raft_codec::RaftCodec;
 pub use raft_codec::read_logs_err;
+pub use raft_codec::RaftCodec;
 pub use raft_types::AppResponseData;
 pub use raft_types::Entry;
+pub use raft_types::ForwardToLeader;
 pub use raft_types::KeyValue;
 pub use raft_types::LeaderId;
 pub use raft_types::LogId;

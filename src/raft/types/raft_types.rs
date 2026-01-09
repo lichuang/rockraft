@@ -31,6 +31,7 @@ openraft::declare_raft_types!(
     pub TypeConfig:
         D = Cmd,
         R = AppResponseData,
+        NodeId = NodeId,
         Node = RaftNode,
         SnapshotData = SnapshotData
 );
@@ -40,3 +41,4 @@ pub type LogState = openraft::storage::LogState<TypeConfig>;
 pub type LogId = openraft::LogId<TypeConfig>;
 pub type LeaderId = <TypeConfig as openraft::RaftTypeConfig>::LeaderId;
 pub type Node = <TypeConfig as openraft::RaftTypeConfig>::Node;
+pub type ForwardToLeader = openraft::error::ForwardToLeader<TypeConfig>;
