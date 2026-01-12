@@ -3,10 +3,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use openraft::LogId;
-use openraft::Snapshot;
 use openraft::SnapshotMeta;
-use openraft::StoredMembership;
 use rocksdb::DB;
 use tokio::fs::File;
 use tokio::spawn;
@@ -20,8 +17,10 @@ use super::util::snapshot_data_file;
 use super::util::snapshot_dump_file;
 use crate::raft::store::keys::SM_DATA_FAMILY;
 use crate::raft::store::snapshot::util::snapshot_id_dir;
-use crate::raft::types::TypeConfig;
 use crate::raft::types::read_logs_err;
+use crate::raft::types::LogId;
+use crate::raft::types::Snapshot;
+use crate::raft::types::StoredMembership;
 use crate::utils::now_millis;
 
 /// Build a snapshot from the current database state
@@ -37,7 +36,7 @@ use crate::utils::now_millis;
 ///   last_membership: The membership configuration at the time of snapshot
 ///
 /// Returns:
-///   Result<Snapshot<TypeConfig>, io::Error>: Snapshot containing metadata and data file
+///   Result<Snapshot, io::Error>: Snapshot containing metadata and data file
 ///
 /// Snapshot Structure:
 ///   - snapshot_dir/{snapshot_id}/snapshot : Compressed SM_DATA_FAMILY data
@@ -60,9 +59,9 @@ use crate::utils::now_millis;
 pub async fn build_snapshot(
   db: &Arc<DB>,
   snapshot_dir: &PathBuf,
-  last_applied_log_id: Option<LogId<TypeConfig>>,
-  last_membership: StoredMembership<TypeConfig>,
-) -> Result<Snapshot<TypeConfig>, io::Error> {
+  last_applied_log_id: Option<LogId>,
+  last_membership: StoredMembership,
+) -> Result<Snapshot, io::Error> {
   // Generate unique snapshot ID based on current timestamp and log state
   let snapshot_idx = now_millis();
 
@@ -424,7 +423,7 @@ mod tests {
     let db = create_test_db_empty();
     let snapshot_dir = tempdir().unwrap().path().join("snapshots");
 
-    let last_applied_log_id: Option<LogId<TypeConfig>> = None;
+    let last_applied_log_id: Option<LogId> = None;
 
     let last_membership = StoredMembership::new(None, Membership::default());
 

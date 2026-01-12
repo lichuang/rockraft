@@ -3,13 +3,12 @@ use std::io::Read;
 use std::io::{self};
 use std::sync::Arc;
 
-use openraft::Snapshot;
 use rocksdb::DB;
 use tracing::error;
 use tracing::info;
 
 use crate::raft::store::keys::SM_DATA_FAMILY;
-use crate::raft::types::TypeConfig;
+use crate::raft::types::Snapshot;
 
 /// Recover from a snapshot asynchronously
 ///
@@ -30,10 +29,7 @@ use crate::raft::types::TypeConfig;
 ///   - Recovery happens asynchronously; caller does not wait for completion
 ///
 /// Note: TODO: add recover complete callback for notification when recovery finishes
-pub async fn recover_snapshot(
-  db: &Arc<DB>,
-  snapshot: Snapshot<TypeConfig>,
-) -> Result<(), io::Error> {
+pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io::Error> {
   let snapshot_id = snapshot.meta.snapshot_id.clone();
 
   info!(
@@ -87,10 +83,7 @@ pub async fn recover_snapshot(
 ///   - Batch writing reduces database I/O operations
 ///   - Compression reduces disk I/O for snapshot files
 ///   - Streaming approach minimizes memory usage
-async fn do_recover_snapshot(
-  db: &Arc<DB>,
-  snapshot: Snapshot<TypeConfig>,
-) -> Result<(), io::Error> {
+async fn do_recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io::Error> {
   let snapshot_file = snapshot.snapshot.into_std().await;
 
   let cf_handle = db.cf_handle(SM_DATA_FAMILY).ok_or_else(|| {

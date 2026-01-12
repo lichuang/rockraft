@@ -1,9 +1,9 @@
 use std::error::Error;
 use std::io;
 
+use crate::raft::types::StoredMembership;
 use bincode::deserialize;
 use bincode::serialize;
-use openraft::StoredMembership;
 use openraft::alias::LogIdOf;
 use openraft::alias::VoteOf;
 
@@ -42,7 +42,7 @@ impl RaftCodec for VoteOf<TypeConfig> {
   }
 }
 
-impl RaftCodec for StoredMembership<TypeConfig> {
+impl RaftCodec for StoredMembership {
   fn decode_from(buf: &[u8]) -> Result<Self, io::Error>
   where
     Self: Sized,

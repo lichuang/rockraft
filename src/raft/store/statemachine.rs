@@ -6,16 +6,12 @@ use bincode::deserialize;
 use bincode::serialize;
 use futures::Stream;
 use futures::TryStreamExt;
-use openraft::EntryPayload;
-use openraft::LogId;
-use openraft::OptionalSend;
-use openraft::RaftSnapshotBuilder;
-use openraft::Snapshot;
-use openraft::SnapshotMeta;
-use openraft::StoredMembership;
 use openraft::alias::SnapshotDataOf;
 use openraft::storage::EntryResponder;
 use openraft::storage::RaftStateMachine;
+use openraft::EntryPayload;
+use openraft::OptionalSend;
+use openraft::RaftSnapshotBuilder;
 use rocksdb::BoundColumnFamily;
 use rocksdb::DB;
 
@@ -26,12 +22,16 @@ use super::keys::SM_META_FAMILY;
 use super::snapshot::build_snapshot;
 use super::snapshot::get_current_snapshot;
 use crate::raft::store::snapshot::recover_snapshot;
+use crate::raft::types::read_logs_err;
 use crate::raft::types::AppResponseData;
 use crate::raft::types::Cmd;
+use crate::raft::types::LogId;
 use crate::raft::types::Operation;
 use crate::raft::types::RaftCodec as _;
+use crate::raft::types::Snapshot;
+use crate::raft::types::SnapshotMeta;
+use crate::raft::types::StoredMembership;
 use crate::raft::types::TypeConfig;
-use crate::raft::types::read_logs_err;
 
 #[derive(Debug, Clone)]
 pub struct RocksStateMachine {
@@ -59,7 +59,7 @@ impl RocksStateMachine {
     self.db.cf_handle(SM_DATA_FAMILY).unwrap()
   }
 
-  fn get_last_applied_log_id(&self) -> Result<Option<LogId<TypeConfig>>, io::Error> {
+  fn get_last_applied_log_id(&self) -> Result<Option<LogId>, io::Error> {
     match self.db.get_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY) {
       Ok(Some(v)) => {
         let log_id = deserialize(&v).map_err(read_logs_err)?;
@@ -70,19 +70,19 @@ impl RocksStateMachine {
     }
   }
 
-  fn get_last_membership(&self) -> Result<StoredMembership<TypeConfig>, io::Error> {
+  fn get_last_membership(&self) -> Result<StoredMembership, io::Error> {
     Ok(
       self
         .db
         .get_cf(&self.cf_sm_meta(), LAST_MEMBERSHIP_KEY)
         .map_err(read_logs_err)?
-        .map(|bytes| StoredMembership::<TypeConfig>::decode_from(&bytes))
+        .map(|bytes| StoredMembership::decode_from(&bytes))
         .transpose()?
         .unwrap_or_default(),
     )
   }
 
-  fn set_last_applied_log_id(&self, log_id: Option<LogId<TypeConfig>>) -> Result<(), io::Error> {
+  fn set_last_applied_log_id(&self, log_id: Option<LogId>) -> Result<(), io::Error> {
     match log_id {
       Some(id) => {
         let data = serialize(&id).map_err(read_logs_err)?;
@@ -98,10 +98,7 @@ impl RocksStateMachine {
     }
   }
 
-  fn set_last_membership(
-    &self,
-    membership: &StoredMembership<TypeConfig>,
-  ) -> Result<(), io::Error> {
+  fn set_last_membership(&self, membership: &StoredMembership) -> Result<(), io::Error> {
     let data = serialize(membership).map_err(read_logs_err)?;
     self
       .db
@@ -111,7 +108,7 @@ impl RocksStateMachine {
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
-  async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, io::Error> {
+  async fn build_snapshot(&mut self) -> Result<Snapshot, io::Error> {
     let last_applied_log = self.get_last_applied_log_id()?;
     let last_membership = self.get_last_membership()?;
 
@@ -128,9 +125,7 @@ impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
 impl RaftStateMachine<TypeConfig> for RocksStateMachine {
   type SnapshotBuilder = Self;
 
-  async fn applied_state(
-    &mut self,
-  ) -> Result<(Option<LogId<TypeConfig>>, StoredMembership<TypeConfig>), io::Error> {
+  async fn applied_state(&mut self) -> Result<(Option<LogId>, StoredMembership), io::Error> {
     let last_applied_log = self.get_last_applied_log_id()?;
     let last_membership = self.get_last_membership()?;
 
@@ -217,7 +212,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
   async fn install_snapshot(
     &mut self,
-    meta: &SnapshotMeta<TypeConfig>,
+    meta: &SnapshotMeta,
     snapshot: SnapshotDataOf<TypeConfig>,
   ) -> Result<(), io::Error> {
     recover_snapshot(
@@ -230,7 +225,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     .await
   }
 
-  async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot<TypeConfig>>, io::Error> {
+  async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot>, io::Error> {
     let data = get_current_snapshot(&self.snapshot_dir).await?;
 
     if let Some(snapshot) = data {
@@ -277,14 +272,14 @@ mod tests {
       .unwrap()
   }
 
-  fn create_log_id(term: u64, node_id: u64, index: u64) -> LogId<TypeConfig> {
+  fn create_log_id(term: u64, node_id: u64, index: u64) -> LogId {
     LogId {
       leader_id: LeaderId { term, node_id },
       index,
     }
   }
 
-  fn create_stored_membership(log_id: LogId<TypeConfig>) -> StoredMembership<TypeConfig> {
+  fn create_stored_membership(log_id: LogId) -> StoredMembership {
     let mut nodes = BTreeSet::new();
     nodes.insert(1);
 

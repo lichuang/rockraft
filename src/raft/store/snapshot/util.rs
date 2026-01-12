@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 use bincode::deserialize;
 use bincode::serialize;
-use openraft::Snapshot;
-use openraft::SnapshotMeta;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt as _;
 use tracing::info;
 
+use crate::raft::types::Snapshot;
+use crate::raft::types::SnapshotMeta;
 use crate::raft::types::TypeConfig;
 
 /// Construct the path to the snapshot dump file for a given snapshot ID directory.
@@ -231,7 +231,7 @@ pub(crate) async fn get_last_snapshot_id(snapshot_dir: &PathBuf) -> std::io::Res
 /// - The file system experiences an I/O error
 pub async fn save_snapshot_meta(
   snapshot_id_dir: &PathBuf,
-  meta: SnapshotMeta<TypeConfig>,
+  meta: SnapshotMeta,
 ) -> std::io::Result<()> {
   let meta_file = snapshot_meta_file(snapshot_id_dir);
 
@@ -270,9 +270,7 @@ pub async fn save_snapshot_meta(
 /// - There are insufficient permissions to read the file
 /// - The file contains invalid or corrupted bincode data (ErrorKind::InvalidData)
 /// - The file system experiences an I/O error
-pub async fn get_snapshot_meta(
-  snapshot_id_dir: &PathBuf,
-) -> std::io::Result<SnapshotMeta<TypeConfig>> {
+pub async fn get_snapshot_meta(snapshot_id_dir: &PathBuf) -> std::io::Result<SnapshotMeta> {
   let mut file = File::open(snapshot_id_dir).await?;
   let mut data = Vec::new();
   file.read_to_end(&mut data).await?;
@@ -311,9 +309,7 @@ pub async fn get_snapshot_meta(
 /// - Any unexpected I/O error occurs
 ///
 /// Note that missing files are not considered errors and result in `Ok(None)`.
-pub async fn get_current_snapshot(
-  snapshot_dir: &PathBuf,
-) -> std::io::Result<Option<Snapshot<TypeConfig>>> {
+pub async fn get_current_snapshot(snapshot_dir: &PathBuf) -> std::io::Result<Option<Snapshot>> {
   let snapshot_id = match get_last_snapshot_id(snapshot_dir).await {
     Ok(id) => id,
     Err(e) if e.kind() == ErrorKind::NotFound => {

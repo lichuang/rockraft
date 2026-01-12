@@ -3,6 +3,7 @@ mod endpoint;
 mod node;
 mod raft_codec;
 mod raft_types;
+mod sys_data;
 
 pub use cmd::Cmd;
 pub use cmd::Operation;
@@ -18,5 +19,8 @@ pub use raft_types::LogState;
 pub use raft_types::Node;
 pub use raft_types::NodeId;
 pub use raft_types::RaftNode;
+pub use raft_types::Snapshot;
 pub use raft_types::SnapshotData;
+pub use raft_types::SnapshotMeta;
+pub use raft_types::StoredMembership;
 pub use raft_types::TypeConfig;

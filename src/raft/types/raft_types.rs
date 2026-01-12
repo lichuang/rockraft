@@ -42,3 +42,6 @@ pub type LogId = openraft::LogId<TypeConfig>;
 pub type LeaderId = <TypeConfig as openraft::RaftTypeConfig>::LeaderId;
 pub type Node = <TypeConfig as openraft::RaftTypeConfig>::Node;
 pub type ForwardToLeader = openraft::error::ForwardToLeader<TypeConfig>;
+pub type StoredMembership = openraft::StoredMembership<TypeConfig>;
+pub type Snapshot = openraft::Snapshot<TypeConfig>;
+pub type SnapshotMeta = openraft::SnapshotMeta<TypeConfig>;
