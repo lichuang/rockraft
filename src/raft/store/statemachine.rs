@@ -462,4 +462,257 @@ mod tests {
 
     Ok(())
   }
+
+  #[tokio::test]
+  async fn test_recover_sys_data_last_applied() -> Result<(), io::Error> {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir
+        .clone()
+        .into_os_string()
+        .into_string()
+        .unwrap(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    );
+
+    // Create state machine and write data
+    let sm1 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    let log_id = create_log_id(3, 5, 300);
+    sm1.set_last_applied_log_id(Some(log_id))?;
+
+    // Create a new state machine instance from the same database
+    // This should recover the data from the database
+    let sm2 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    let recovered = sm2.get_last_applied_log_id()?;
+    assert!(recovered.is_some());
+
+    let recovered_log_id = recovered.unwrap();
+    assert_eq!(recovered_log_id.leader_id.term, log_id.leader_id.term);
+    assert_eq!(recovered_log_id.leader_id.node_id, log_id.leader_id.node_id);
+    assert_eq!(recovered_log_id.index, log_id.index);
+
+    // Update the data again
+    let new_log_id = create_log_id(4, 6, 400);
+    sm2.set_last_applied_log_id(Some(new_log_id))?;
+
+    // Create another instance and verify the updated data
+    let sm3 = RocksStateMachine::new(engine.db.clone(), temp_data_dir)
+      .await
+      .unwrap();
+
+    let updated = sm3.get_last_applied_log_id()?.unwrap();
+    assert_eq!(updated.leader_id.term, 4);
+    assert_eq!(updated.leader_id.node_id, 6);
+    assert_eq!(updated.index, 400);
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_recover_sys_data_last_membership() -> Result<(), io::Error> {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir
+        .clone()
+        .into_os_string()
+        .into_string()
+        .unwrap(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    );
+
+    // Create state machine and write data
+    let sm1 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    let log_id = create_log_id(5, 7, 500);
+    let membership = create_stored_membership(log_id);
+    sm1.set_last_membership(&membership)?;
+
+    // Create a new state machine instance from the same database
+    let sm2 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    let recovered = sm2.get_last_membership()?;
+    assert!(recovered.log_id().is_some());
+
+    assert_eq!(recovered.log_id().unwrap().leader_id.term, 5);
+    assert_eq!(recovered.log_id().unwrap().index, 500);
+
+    // Verify membership content
+    let voter_ids: BTreeSet<_> = recovered.membership().voter_ids().collect();
+    assert_eq!(voter_ids.len(), 1);
+    assert!(voter_ids.contains(&1));
+
+    // Update with new membership
+    let new_log_id = create_log_id(6, 8, 600);
+    let new_membership = create_stored_membership(new_log_id);
+    sm2.set_last_membership(&new_membership)?;
+
+    // Create another instance and verify
+    let sm3 = RocksStateMachine::new(engine.db.clone(), temp_data_dir)
+      .await
+      .unwrap();
+
+    let updated = sm3.get_last_membership()?;
+    assert_eq!(updated.log_id().unwrap().leader_id.term, 6);
+    assert_eq!(updated.log_id().unwrap().index, 600);
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_recover_sys_data_nodes() -> Result<(), io::Error> {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir
+        .clone()
+        .into_os_string()
+        .into_string()
+        .unwrap(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    );
+
+    // Create state machine and add nodes
+    let sm1 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    let node1 = Node {
+      node_id: 1,
+      endpoint: Endpoint::new("127.0.0.1", 8081),
+    };
+    sm1.add_node(node1.clone())?;
+
+    let node2 = Node {
+      node_id: 2,
+      endpoint: Endpoint::new("127.0.0.1", 8082),
+    };
+    sm1.add_node(node2)?;
+
+    // Create a new state machine instance from the same database
+    let sm2 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    // Verify nodes are recovered
+    let sys_data = sm2.sys_data.lock().unwrap();
+    assert_eq!(sys_data.nodes.len(), 2);
+    assert!(sys_data.nodes.contains_key(&1));
+    assert!(sys_data.nodes.contains_key(&2));
+
+    let recovered_node1 = sys_data.nodes.get(&1).unwrap();
+    assert_eq!(recovered_node1.node_id, 1);
+    assert_eq!(recovered_node1.endpoint.addr(), "127.0.0.1");
+    assert_eq!(recovered_node1.endpoint.port(), 8081);
+
+    let recovered_node2 = sys_data.nodes.get(&2).unwrap();
+    assert_eq!(recovered_node2.node_id, 2);
+    assert_eq!(recovered_node2.endpoint.addr(), "127.0.0.1");
+    assert_eq!(recovered_node2.endpoint.port(), 8082);
+    drop(sys_data);
+
+    // Remove a node
+    sm2.remove_node(1)?;
+
+    // Create another instance and verify
+    let sm3 = RocksStateMachine::new(engine.db.clone(), temp_data_dir)
+      .await
+      .unwrap();
+
+    let sys_data = sm3.sys_data.lock().unwrap();
+    assert_eq!(sys_data.nodes.len(), 1);
+    assert!(!sys_data.nodes.contains_key(&1));
+    assert!(sys_data.nodes.contains_key(&2));
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_recover_sys_data_all_fields() -> Result<(), io::Error> {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir
+        .clone()
+        .into_os_string()
+        .into_string()
+        .unwrap(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    );
+
+    // Create state machine and write all fields
+    let sm1 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    // Write last_applied
+    let log_id = create_log_id(7, 9, 700);
+    sm1.set_last_applied_log_id(Some(log_id))?;
+
+    // Write last_membership
+    let membership = create_stored_membership(log_id);
+    sm1.set_last_membership(&membership)?;
+
+    // Write nodes
+    let node1 = Node {
+      node_id: 1,
+      endpoint: Endpoint::new("127.0.0.1", 9091),
+    };
+    sm1.add_node(node1)?;
+
+    let node2 = Node {
+      node_id: 2,
+      endpoint: Endpoint::new("127.0.0.1", 9092),
+    };
+    sm1.add_node(node2)?;
+
+    let node3 = Node {
+      node_id: 3,
+      endpoint: Endpoint::new("127.0.0.1", 9093),
+    };
+    sm1.add_node(node3)?;
+
+    // Create a new state machine instance and verify all data is recovered
+    let sm2 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    // Verify last_applied
+    let recovered_log_id = sm2.get_last_applied_log_id()?.unwrap();
+    assert_eq!(recovered_log_id.leader_id.term, 7);
+    assert_eq!(recovered_log_id.leader_id.node_id, 9);
+    assert_eq!(recovered_log_id.index, 700);
+
+    // Verify last_membership
+    let recovered_membership = sm2.get_last_membership()?;
+    assert_eq!(recovered_membership.log_id().unwrap().index, 700);
+    let voter_ids: BTreeSet<_> = recovered_membership.membership().voter_ids().collect();
+    assert_eq!(voter_ids.len(), 1);
+
+    // Verify nodes
+    let sys_data = sm2.sys_data.lock().unwrap();
+    assert_eq!(sys_data.nodes.len(), 3);
+    assert!(sys_data.nodes.contains_key(&1));
+    assert!(sys_data.nodes.contains_key(&2));
+    assert!(sys_data.nodes.contains_key(&3));
+
+    // Verify node 3
+    let recovered_node3 = sys_data.nodes.get(&3).unwrap();
+    assert_eq!(recovered_node3.node_id, 3);
+    assert_eq!(recovered_node3.endpoint.addr(), "127.0.0.1");
+    assert_eq!(recovered_node3.endpoint.port(), 9093);
+
+    Ok(())
+  }
 }
