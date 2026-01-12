@@ -1,6 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use bincode::deserialize;
 use bincode::serialize;
@@ -17,6 +18,7 @@ use rocksdb::DB;
 
 use super::keys::LAST_APPLIED_LOG_KEY;
 use super::keys::LAST_MEMBERSHIP_KEY;
+use super::keys::NODES_KEY;
 use super::keys::SM_DATA_FAMILY;
 use super::keys::SM_META_FAMILY;
 use super::snapshot::build_snapshot;
@@ -26,17 +28,32 @@ use crate::raft::types::read_logs_err;
 use crate::raft::types::AppResponseData;
 use crate::raft::types::Cmd;
 use crate::raft::types::LogId;
+use crate::raft::types::Node;
+use crate::raft::types::NodeId;
 use crate::raft::types::Operation;
 use crate::raft::types::RaftCodec as _;
 use crate::raft::types::Snapshot;
 use crate::raft::types::SnapshotMeta;
 use crate::raft::types::StoredMembership;
+use crate::raft::types::SysData;
 use crate::raft::types::TypeConfig;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RocksStateMachine {
   db: Arc<DB>,
   snapshot_dir: PathBuf,
+
+  sys_data: Mutex<SysData>,
+}
+
+impl Clone for RocksStateMachine {
+  fn clone(&self) -> Self {
+    Self {
+      db: self.db.clone(),
+      snapshot_dir: self.snapshot_dir.clone(),
+      sys_data: Mutex::new(self.sys_data.lock().unwrap().clone()),
+    }
+  }
 }
 
 impl RocksStateMachine {
@@ -48,7 +65,11 @@ impl RocksStateMachine {
 
     let snapshot_dir = data_dir.join("snapshot");
 
-    Ok(Self { db, snapshot_dir })
+    Ok(Self {
+      db,
+      snapshot_dir,
+      sys_data: Mutex::new(SysData::default()),
+    })
   }
 
   fn cf_sm_meta(&self) -> Arc<BoundColumnFamily<'_>> {
@@ -60,6 +81,8 @@ impl RocksStateMachine {
   }
 
   fn get_last_applied_log_id(&self) -> Result<Option<LogId>, io::Error> {
+    return Ok(self.sys_data.lock().unwrap().last_applied);
+    /*
     match self.db.get_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY) {
       Ok(Some(v)) => {
         let log_id = deserialize(&v).map_err(read_logs_err)?;
@@ -68,9 +91,12 @@ impl RocksStateMachine {
       Ok(None) => Ok(None),
       Err(e) => Err(io::Error::other(e)),
     }
+    */
   }
 
   fn get_last_membership(&self) -> Result<StoredMembership, io::Error> {
+    return Ok(self.sys_data.lock().unwrap().last_membership.clone());
+    /*
     Ok(
       self
         .db
@@ -80,30 +106,70 @@ impl RocksStateMachine {
         .transpose()?
         .unwrap_or_default(),
     )
+    */
   }
 
   fn set_last_applied_log_id(&self, log_id: Option<LogId>) -> Result<(), io::Error> {
+    let mut sys_data = self.sys_data.lock().unwrap();
+
     match log_id {
       Some(id) => {
         let data = serialize(&id).map_err(read_logs_err)?;
         self
           .db
           .put_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY, data)
-          .map_err(read_logs_err)
+          .map_err(read_logs_err)?;
+        sys_data.last_applied = log_id;
       }
-      None => self
-        .db
-        .delete_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY)
-        .map_err(read_logs_err),
+      None => {
+        self
+          .db
+          .delete_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY)
+          .map_err(read_logs_err)?;
+        sys_data.last_applied = None;
+      }
     }
+    Ok(())
   }
 
   fn set_last_membership(&self, membership: &StoredMembership) -> Result<(), io::Error> {
+    let mut sys_data = self.sys_data.lock().unwrap();
+
     let data = serialize(membership).map_err(read_logs_err)?;
     self
       .db
       .put_cf(&self.cf_sm_meta(), LAST_MEMBERSHIP_KEY, data)
-      .map_err(read_logs_err)
+      .map_err(read_logs_err)?;
+    sys_data.last_membership = membership.clone();
+    Ok(())
+  }
+
+  fn add_node(&self, node: Node) -> Result<(), io::Error> {
+    let mut sys_data = self.sys_data.lock().unwrap();
+
+    sys_data.nodes.insert(node.node_id, node);
+
+    let data = serialize(&sys_data.nodes).map_err(read_logs_err)?;
+    self
+      .db
+      .put_cf(&self.cf_sm_meta(), NODES_KEY, data)
+      .map_err(read_logs_err)?;
+
+    Ok(())
+  }
+
+  fn remove_node(&self, node_id: NodeId) -> Result<(), io::Error> {
+    let mut sys_data = self.sys_data.lock().unwrap();
+
+    sys_data.nodes.remove(&node_id);
+
+    let data = serialize(&sys_data.nodes).map_err(read_logs_err)?;
+    self
+      .db
+      .put_cf(&self.cf_sm_meta(), NODES_KEY, data)
+      .map_err(read_logs_err)?;
+
+    Ok(())
   }
 }
 
@@ -158,6 +224,12 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
                   batch.delete_cf(cf_data, kv.key.as_bytes());
                 }
               }
+            }
+            Cmd::AddNode { node, .. } => {
+              self.add_node(node)?;
+            }
+            Cmd::RemoveNode { node_id } => {
+              self.remove_node(node_id)?;
             }
             _ => {}
           }
