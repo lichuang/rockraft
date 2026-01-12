@@ -1,13 +1,13 @@
 mod cmd;
 mod endpoint;
-mod node;
 mod raft_codec;
 mod raft_types;
 mod sys_data;
 
 pub use cmd::Cmd;
 pub use cmd::Operation;
-pub use node::Node;
+pub use cmd::UpsertKV;
+pub use endpoint::Endpoint;
 pub use raft_codec::read_logs_err;
 pub use raft_codec::RaftCodec;
 pub use raft_types::AppResponseData;
@@ -17,9 +17,8 @@ pub use raft_types::KeyValue;
 pub use raft_types::LeaderId;
 pub use raft_types::LogId;
 pub use raft_types::LogState;
-//pub use raft_types::Node;
+pub use raft_types::Node;
 pub use raft_types::NodeId;
-pub use raft_types::RaftNode;
 pub use raft_types::Snapshot;
 pub use raft_types::SnapshotData;
 pub use raft_types::SnapshotMeta;

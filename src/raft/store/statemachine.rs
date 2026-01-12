@@ -64,11 +64,12 @@ impl RocksStateMachine {
       .ok_or_else(|| std::io::Error::other("column family `_log_data` not found"))?;
 
     let snapshot_dir = data_dir.join("snapshot");
+    let sys_data = Self::recover_sys_data(&db)?;
 
     Ok(Self {
       db,
       snapshot_dir,
-      sys_data: Mutex::new(SysData::default()),
+      sys_data: Mutex::new(sys_data),
     })
   }
 
@@ -78,6 +79,44 @@ impl RocksStateMachine {
 
   fn cf_sm_data(&self) -> Arc<BoundColumnFamily<'_>> {
     self.db.cf_handle(SM_DATA_FAMILY).unwrap()
+  }
+
+  fn recover_sys_data(db: &Arc<DB>) -> Result<SysData, io::Error> {
+    let cf_meta = db
+      .cf_handle(SM_META_FAMILY)
+      .ok_or_else(|| std::io::Error::other("column family `_sm_meta` not found"))?;
+
+    // Recover last_applied
+    let last_applied = match db.get_cf(&cf_meta, LAST_APPLIED_LOG_KEY) {
+      Ok(Some(v)) => {
+        let log_id = deserialize(&v).map_err(read_logs_err)?;
+        Some(log_id)
+      }
+      Ok(None) => None,
+      Err(e) => return Err(io::Error::other(e)),
+    };
+
+    // Recover last_membership
+    let last_membership = db
+      .get_cf(&cf_meta, LAST_MEMBERSHIP_KEY)
+      .map_err(read_logs_err)?
+      .map(|bytes| StoredMembership::decode_from(&bytes))
+      .transpose()?
+      .unwrap_or_default();
+
+    // Recover nodes
+    let nodes = db
+      .get_cf(&cf_meta, NODES_KEY)
+      .map_err(read_logs_err)?
+      .map(|bytes| deserialize(&bytes).map_err(read_logs_err))
+      .transpose()?
+      .unwrap_or_default();
+
+    Ok(SysData {
+      last_applied,
+      last_membership,
+      nodes,
+    })
   }
 
   fn get_last_applied_log_id(&self) -> Result<Option<LogId>, io::Error> {
@@ -322,7 +361,7 @@ mod tests {
 
   use crate::{
     engine::RocksDBEngine,
-    raft::types::{LeaderId, Node},
+    raft::types::{Endpoint, LeaderId, Node},
   };
 
   use super::*;
@@ -360,7 +399,7 @@ mod tests {
       1,
       Node {
         node_id: 1,
-        rpc_addr: "127.0.0.1:1228".to_string(),
+        endpoint: Endpoint::new("127.0.0.1", 1228),
       },
     );
 

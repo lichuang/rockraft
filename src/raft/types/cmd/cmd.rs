@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::raft::types::{NodeId, node::Node};
+use crate::raft::types::{Node, NodeId};
 
 use super::upsert_kv::UpsertKV;
 

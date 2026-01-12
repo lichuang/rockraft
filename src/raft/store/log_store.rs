@@ -9,31 +9,31 @@ use bincode::serialize;
 use byteorder::BigEndian;
 use byteorder::ReadBytesExt as _;
 use byteorder::WriteBytesExt as _;
-use openraft::OptionalSend;
-use openraft::RaftLogReader;
-use openraft::RaftTypeConfig;
 use openraft::alias::EntryOf;
 use openraft::alias::LogIdOf;
 use openraft::alias::VoteOf;
 use openraft::entry::RaftEntry;
 use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
+use openraft::OptionalSend;
+use openraft::RaftLogReader;
+use openraft::RaftTypeConfig;
 use rocksdb::BoundColumnFamily;
-use rocksdb::DB;
 use rocksdb::Direction;
 use rocksdb::IteratorMode;
+use rocksdb::DB;
 use tokio::task::spawn_blocking;
 
-use super::StoreMeta;
 use super::keys::LOG_DATA_FAMILY;
 use super::keys::LOG_META_FAMILY;
 use super::meta::LastPurged;
+use super::StoreMeta;
+use crate::raft::types::read_logs_err;
 use crate::raft::types::Entry;
 use crate::raft::types::LogId;
 use crate::raft::types::LogState;
 use crate::raft::types::RaftCodec;
 use crate::raft::types::TypeConfig;
-use crate::raft::types::read_logs_err;
 
 #[derive(Debug, Clone)]
 pub struct RocksLogStore<C>
@@ -316,7 +316,7 @@ mod tests {
   use openraft::Vote;
   use rocksdb::Options;
 
-  use crate::raft::types::{LeaderId, LogId, StorageData};
+  use crate::raft::types::{Cmd, KeyValue, LeaderId, LogId, Operation, UpsertKV};
 
   use super::*;
 
@@ -332,7 +332,7 @@ mod tests {
     )
     .unwrap();
 
-    RocksLogStore::new(Arc::new(db)).unwrap()
+    RocksLogStore::create(Arc::new(db)).unwrap()
   }
 
   fn create_log_id(term: u64, node_id: u64, index: u64) -> LogId {
@@ -345,10 +345,11 @@ mod tests {
   fn create_entry(term: u64, node_id: u64, index: u64) -> Entry {
     Entry {
       log_id: create_log_id(term, node_id, index),
-      payload: openraft::EntryPayload::Normal(StorageData {
-        key: format!("key_{}_{}", term, index),
-        value: Bytes::from(format!("data_{}_{}", term, index)),
-      }),
+      payload: openraft::EntryPayload::Normal(Cmd::UpsertKV(UpsertKV::new(
+        format!("key_{}_{}", term, index),
+        Operation::Update(format!("data_{}_{}", term, index).into_bytes()),
+        None,
+      ))),
     }
   }
 

@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::cmd::Cmd;
+use super::endpoint::Endpoint;
 
 pub type SnapshotData = tokio::fs::File;
 
@@ -15,10 +16,16 @@ pub struct AppResponseData {
 
 pub type NodeId = u64;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct RaftNode {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Node {
   pub node_id: u64,
-  pub rpc_addr: String,
+  pub endpoint: Endpoint,
+}
+
+impl std::fmt::Display for Node {
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    write!(f, "{}={}", self.node_id, self.endpoint)
+  }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -32,7 +39,7 @@ openraft::declare_raft_types!(
         D = Cmd,
         R = AppResponseData,
         NodeId = NodeId,
-        Node = RaftNode,
+        Node = Node,
         SnapshotData = SnapshotData
 );
 
@@ -40,7 +47,7 @@ pub type Entry = openraft::Entry<TypeConfig>;
 pub type LogState = openraft::storage::LogState<TypeConfig>;
 pub type LogId = openraft::LogId<TypeConfig>;
 pub type LeaderId = <TypeConfig as openraft::RaftTypeConfig>::LeaderId;
-pub type Node = <TypeConfig as openraft::RaftTypeConfig>::Node;
+
 pub type ForwardToLeader = openraft::error::ForwardToLeader<TypeConfig>;
 pub type StoredMembership = openraft::StoredMembership<TypeConfig>;
 pub type Snapshot = openraft::Snapshot<TypeConfig>;

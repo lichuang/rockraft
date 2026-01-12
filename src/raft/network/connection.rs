@@ -17,7 +17,7 @@ use crate::raft::grpc_client::ClientPool;
 use crate::raft::protobuf::AppendRequest;
 use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
 use crate::raft::protobuf::VoteRequest as PbVoteRequest;
-use crate::raft::types::RaftNode;
+use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
 
 /// Represents a network connection to a specific Raft node.
@@ -195,7 +195,7 @@ impl NetworkFactory {
 impl openraft::RaftNetworkFactory<TypeConfig> for NetworkFactory {
   type Network = NetworkConnection;
 
-  async fn new_client(&mut self, _target: u64, node: &RaftNode) -> Self::Network {
-    NetworkConnection::new(node.rpc_addr.clone(), self.client_pool.clone())
+  async fn new_client(&mut self, _target: u64, node: &Node) -> Self::Network {
+    NetworkConnection::new(node.endpoint.to_string(), self.client_pool.clone())
   }
 }

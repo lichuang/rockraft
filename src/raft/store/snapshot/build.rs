@@ -21,6 +21,7 @@ use crate::raft::types::read_logs_err;
 use crate::raft::types::LogId;
 use crate::raft::types::Snapshot;
 use crate::raft::types::StoredMembership;
+use crate::raft::types::TypeConfig;
 use crate::utils::now_millis;
 
 /// Build a snapshot from the current database state
@@ -310,7 +311,7 @@ mod tests {
     let temp_dir = tempdir().unwrap();
     let snapshot_dir = temp_dir.path().join("snapshots");
 
-    let last_applied_log_id = Some(LogId::<TypeConfig> {
+    let last_applied_log_id = Some(LogId {
       leader_id: crate::raft::types::LeaderId {
         term: 2,
         node_id: 1,
@@ -319,7 +320,7 @@ mod tests {
     });
 
     let last_membership = StoredMembership::new(
-      Some(LogId::<TypeConfig> {
+      Some(LogId {
         leader_id: crate::raft::types::LeaderId {
           term: 2,
           node_id: 1,
@@ -461,7 +462,7 @@ mod tests {
     let temp_dir = tempdir().unwrap();
     let snapshot_dir = temp_dir.path().join("snapshots");
 
-    let last_applied_log_id = Some(LogId::<TypeConfig> {
+    let last_applied_log_id = Some(LogId {
       leader_id: crate::raft::types::LeaderId {
         term: 1,
         node_id: 2,
@@ -470,7 +471,7 @@ mod tests {
     });
 
     let last_membership = StoredMembership::new(
-      Some(LogId::<TypeConfig> {
+      Some(LogId {
         leader_id: crate::raft::types::LeaderId {
           term: 1,
           node_id: 2,
@@ -522,7 +523,7 @@ mod tests {
     let db = create_test_db_empty();
     let snapshot_dir = tempdir().unwrap().path().join("deeply/nested/snapshots");
 
-    let last_applied_log_id = Some(LogId::<TypeConfig> {
+    let last_applied_log_id = Some(LogId {
       leader_id: crate::raft::types::LeaderId {
         term: 1,
         node_id: 1,
@@ -531,7 +532,7 @@ mod tests {
     });
 
     let last_membership = StoredMembership::new(
-      Some(LogId::<TypeConfig> {
+      Some(LogId {
         leader_id: crate::raft::types::LeaderId {
           term: 1,
           node_id: 1,
@@ -578,7 +579,7 @@ mod tests {
     let db = create_test_db_empty();
     let snapshot_dir = tempdir().unwrap().path().join("snapshots");
 
-    let last_applied_log_id = Some(LogId::<TypeConfig> {
+    let last_applied_log_id = Some(LogId {
       leader_id: crate::raft::types::LeaderId {
         term: 5,
         node_id: 3,
@@ -587,7 +588,7 @@ mod tests {
     });
 
     let last_membership = StoredMembership::new(
-      Some(LogId::<TypeConfig> {
+      Some(LogId {
         leader_id: crate::raft::types::LeaderId {
           term: 4,
           node_id: 2,
@@ -639,7 +640,7 @@ mod tests {
   ///       not a full integration test with build_snapshot.
   #[test]
   fn test_snapshot_id_format_with_log_id() {
-    let last_applied_log_id = Some(LogId::<TypeConfig> {
+    let last_applied_log_id = Some(LogId {
       leader_id: crate::raft::types::LeaderId {
         term: 3,
         node_id: 5,

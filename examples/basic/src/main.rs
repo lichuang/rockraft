@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use rockraft::config::Config;
 use rockraft::node::RaftNodeBuilder;
-use rockraft::raft::types::RaftNode as RaftNodeInfo;
+use rockraft::raft::types::{Endpoint, Node};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -60,27 +60,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Node 1
     nodes.insert(
       1,
-      RaftNodeInfo {
+      Node {
         node_id: 1,
-        rpc_addr: "127.0.0.1:6682".to_string(),
+        endpoint: Endpoint::new("127.0.0.1", 6682),
       },
     );
 
     // Node 2
     nodes.insert(
       2,
-      RaftNodeInfo {
+      Node {
         node_id: 2,
-        rpc_addr: "127.0.0.1:6683".to_string(),
+        endpoint: Endpoint::new("127.0.0.1", 6683),
       },
     );
 
     // Node 3
     nodes.insert(
       3,
-      RaftNodeInfo {
+      Node {
         node_id: 3,
-        rpc_addr: "127.0.0.1:6684".to_string(),
+        endpoint: Endpoint::new("127.0.0.1", 6684),
       },
     );
 

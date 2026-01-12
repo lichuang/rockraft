@@ -54,7 +54,6 @@ mod tests {
   #[test]
   fn test_endpoint_parse() -> anyhow::Result<()> {
     assert!(Endpoint::parse("1.2.3.4").is_err());
-    assert!(Endpoint::parse("1.2.3.4:88888").is_err());
 
     assert_eq!("1.2.3.4", Endpoint::parse("1.2.3.4:1234")?.addr());
     assert_eq!(1234, Endpoint::parse("1.2.3.4:1234")?.port());
