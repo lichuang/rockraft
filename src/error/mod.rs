@@ -23,8 +23,8 @@ pub enum RockRaftError {
   #[error("Fatal Raft error: {0}")]
   OpenraftFatal(#[from] openraft::error::Fatal<TypeConfig>),
 
-  #[error("Other error: {0}")]
-  Other(#[from] AnyError),
+  #[error("Storage error: {0}")]
+  StorageError(#[from] AnyError),
 }
 
 pub type Result<T> = std::result::Result<T, RockRaftError>;

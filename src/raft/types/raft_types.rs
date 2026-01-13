@@ -1,5 +1,3 @@
-use core::fmt;
-
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
@@ -18,7 +16,7 @@ pub type NodeId = u64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Node {
-  pub node_id: u64,
+  pub node_id: NodeId,
   pub endpoint: Endpoint,
 }
 

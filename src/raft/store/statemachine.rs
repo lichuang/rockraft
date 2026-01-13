@@ -133,7 +133,7 @@ impl RocksStateMachine {
     */
   }
 
-  fn get_last_membership(&self) -> Result<StoredMembership, io::Error> {
+  pub fn get_last_membership(&self) -> Result<StoredMembership, io::Error> {
     return Ok(self.sys_data.lock().unwrap().last_membership.clone());
     /*
     Ok(
@@ -171,7 +171,7 @@ impl RocksStateMachine {
     Ok(())
   }
 
-  fn set_last_membership(&self, membership: &StoredMembership) -> Result<(), io::Error> {
+  pub fn set_last_membership(&self, membership: &StoredMembership) -> Result<(), io::Error> {
     let mut sys_data = self.sys_data.lock().unwrap();
 
     let data = serialize(membership).map_err(read_logs_err)?;

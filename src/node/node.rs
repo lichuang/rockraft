@@ -26,6 +26,9 @@ use crate::service::RaftServiceImpl;
 pub struct RaftNode {
   engine: Arc<RocksDBEngine>,
   raft: Arc<Raft<TypeConfig>>,
+
+  state_machine: Arc<RocksStateMachine>,
+
   shutdown_tx: broadcast::Sender<()>,
   _shutdown_rx: broadcast::Receiver<()>,
   service_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -83,7 +86,7 @@ impl RaftNode {
         Arc::new(raft_config),
         network,
         log_store,
-        state_machine,
+        state_machine.clone(),
       )
       .await?,
     );
@@ -94,6 +97,7 @@ impl RaftNode {
     Ok(Arc::new(Self {
       engine,
       raft,
+      state_machine: Arc::new(state_machine),
       shutdown_tx,
       _shutdown_rx: shutdown_rx_for_struct,
       service_handle: std::sync::Mutex::new(None),
@@ -219,5 +223,113 @@ impl RaftNode {
         })
       }
     }
+  }
+
+  /// Check if this node is in the cluster membership
+  pub fn is_in_cluster(&self) -> Result<bool> {
+    let last_membership = self
+      .state_machine
+      .get_last_membership()
+      .map_err(|e| AnyError::error(format!("get_last_membership error: {}", e)))?;
+    let node_id = *self.raft.node_id();
+
+    // Only check voter_ids
+    let is_voter = last_membership
+      .membership()
+      .voter_ids()
+      .any(|id| id == node_id);
+
+    Ok(is_voter)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::config::Config;
+  use std::collections::{BTreeMap, BTreeSet};
+  use tempfile::tempdir;
+
+  /// Helper function to create a test config
+  fn create_test_config(data_dir: &str, node_id: u64, addr: &str) -> Config {
+    Config {
+      node_id,
+      raft: crate::config::RaftConfig {
+        addr: addr.to_string(),
+        single: true,
+        join: vec![],
+      },
+      rocksdb: crate::config::RocksdbConfig {
+        data_path: data_dir.to_string(),
+        max_open_files: 1024,
+      },
+    }
+  }
+
+  /// Helper function to set up membership for testing
+  async fn setup_membership(raft_node: &RaftNode, node_ids: Vec<u64>) {
+    let sm = &raft_node.state_machine;
+    let mut nodes = BTreeMap::new();
+
+    for node_id in node_ids {
+      nodes.insert(
+        node_id,
+        crate::raft::types::Node {
+          node_id,
+          endpoint: crate::raft::types::Endpoint::new("127.0.0.1", 1000 + node_id as u32),
+        },
+      );
+    }
+
+    let voter_ids: BTreeSet<u64> = nodes.keys().cloned().collect();
+    let membership = openraft::Membership::new(vec![voter_ids], nodes).unwrap();
+    let log_id = crate::raft::types::LogId {
+      leader_id: crate::raft::types::LeaderId {
+        term: 1,
+        node_id: 1,
+      },
+      index: 1,
+    };
+
+    let stored_membership = openraft::StoredMembership::new(Some(log_id), membership);
+    sm.set_last_membership(&stored_membership).unwrap();
+  }
+
+  #[tokio::test]
+  async fn test_is_in_cluster_node_exists() -> Result<()> {
+    let temp_dir = tempdir().unwrap().keep();
+    let data_path = temp_dir.into_os_string().into_string().unwrap();
+
+    // Create RaftNode with node_id=1
+    let config = create_test_config(&data_path, 1, "127.0.0.1:5001");
+    let raft_node = RaftNode::create(&config).await?;
+
+    // Set up membership with node 1
+    setup_membership(&raft_node, vec![1, 2, 3]).await;
+
+    // Check if node 1 is in cluster
+    let result = raft_node.is_in_cluster()?;
+    assert!(result, "Node 1 should be in the cluster");
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_is_in_cluster_node_not_exists() -> Result<()> {
+    let temp_dir = tempdir().unwrap().keep();
+    let data_path = temp_dir.into_os_string().into_string().unwrap();
+
+    // Create RaftNode with node_id=4 (not in membership)
+    let config = create_test_config(&data_path, 4, "127.0.0.1:5004");
+    let raft_node = RaftNode::create(&config).await?;
+
+    // Set up membership with nodes 1, 2, 3 (not including node 4)
+    setup_membership(&raft_node, vec![1, 2, 3]).await;
+
+    // Check if node 4 is in cluster
+    let result = raft_node.is_in_cluster()?;
+    assert!(!result, "Node 4 should not be in the cluster");
+
+    Ok(())
   }
 }
