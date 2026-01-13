@@ -14,6 +14,7 @@ use openraft::EntryPayload;
 use openraft::OptionalSend;
 use openraft::RaftSnapshotBuilder;
 use rocksdb::BoundColumnFamily;
+
 use rocksdb::DB;
 
 use super::keys::LAST_APPLIED_LOG_KEY;
@@ -46,12 +47,17 @@ pub struct RocksStateMachine {
   sys_data: Mutex<SysData>,
 }
 
+/// Convert Mutex lock error to io::Error
+fn mutex_lock_err(e: std::sync::PoisonError<std::sync::MutexGuard<'_, SysData>>) -> io::Error {
+  io::Error::other(format!("Mutex lock failed: {}", e))
+}
+
 impl Clone for RocksStateMachine {
   fn clone(&self) -> Self {
     Self {
       db: self.db.clone(),
       snapshot_dir: self.snapshot_dir.clone(),
-      sys_data: Mutex::new(self.sys_data.lock().unwrap().clone()),
+      sys_data: Mutex::new(SysData::default()),
     }
   }
 }
@@ -120,7 +126,7 @@ impl RocksStateMachine {
   }
 
   fn get_last_applied_log_id(&self) -> Result<Option<LogId>, io::Error> {
-    return Ok(self.sys_data.lock().unwrap().last_applied);
+    Ok(self.sys_data.lock().map_err(mutex_lock_err)?.last_applied)
     /*
     match self.db.get_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY) {
       Ok(Some(v)) => {
@@ -134,7 +140,14 @@ impl RocksStateMachine {
   }
 
   pub fn get_last_membership(&self) -> Result<StoredMembership, io::Error> {
-    return Ok(self.sys_data.lock().unwrap().last_membership.clone());
+    Ok(
+      self
+        .sys_data
+        .lock()
+        .map_err(mutex_lock_err)?
+        .last_membership
+        .clone(),
+    )
     /*
     Ok(
       self
@@ -149,7 +162,7 @@ impl RocksStateMachine {
   }
 
   fn set_last_applied_log_id(&self, log_id: Option<LogId>) -> Result<(), io::Error> {
-    let mut sys_data = self.sys_data.lock().unwrap();
+    let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
 
     match log_id {
       Some(id) => {
@@ -172,7 +185,7 @@ impl RocksStateMachine {
   }
 
   pub fn set_last_membership(&self, membership: &StoredMembership) -> Result<(), io::Error> {
-    let mut sys_data = self.sys_data.lock().unwrap();
+    let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
 
     let data = serialize(membership).map_err(read_logs_err)?;
     self
@@ -184,7 +197,7 @@ impl RocksStateMachine {
   }
 
   fn add_node(&self, node: Node) -> Result<(), io::Error> {
-    let mut sys_data = self.sys_data.lock().unwrap();
+    let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
 
     sys_data.nodes.insert(node.node_id, node);
 
@@ -198,7 +211,7 @@ impl RocksStateMachine {
   }
 
   fn remove_node(&self, node_id: NodeId) -> Result<(), io::Error> {
-    let mut sys_data = self.sys_data.lock().unwrap();
+    let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
 
     sys_data.nodes.remove(&node_id);
 
@@ -606,7 +619,10 @@ mod tests {
       .unwrap();
 
     // Verify nodes are recovered
-    let sys_data = sm2.sys_data.lock().unwrap();
+    let sys_data = sm2
+      .sys_data
+      .lock()
+      .expect("Mutex lock should not be poisoned");
     assert_eq!(sys_data.nodes.len(), 2);
     assert!(sys_data.nodes.contains_key(&1));
     assert!(sys_data.nodes.contains_key(&2));
@@ -630,7 +646,10 @@ mod tests {
       .await
       .unwrap();
 
-    let sys_data = sm3.sys_data.lock().unwrap();
+    let sys_data = sm3
+      .sys_data
+      .lock()
+      .expect("Mutex lock should not be poisoned");
     assert_eq!(sys_data.nodes.len(), 1);
     assert!(!sys_data.nodes.contains_key(&1));
     assert!(sys_data.nodes.contains_key(&2));
@@ -701,7 +720,10 @@ mod tests {
     assert_eq!(voter_ids.len(), 1);
 
     // Verify nodes
-    let sys_data = sm2.sys_data.lock().unwrap();
+    let sys_data = sm2
+      .sys_data
+      .lock()
+      .expect("Mutex lock should not be poisoned");
     assert_eq!(sys_data.nodes.len(), 3);
     assert!(sys_data.nodes.contains_key(&1));
     assert!(sys_data.nodes.contains_key(&2));
