@@ -1,3 +1,5 @@
+pub mod startup;
+
 use anyerror::AnyError;
 use thiserror::Error;
 
@@ -25,6 +27,9 @@ pub enum RockRaftError {
 
   #[error("Storage error: {0}")]
   StorageError(#[from] AnyError),
+
+  #[error("Startup error: {0}")]
+  Startup(#[from] startup::StartupError),
 }
 
 pub type Result<T> = std::result::Result<T, RockRaftError>;

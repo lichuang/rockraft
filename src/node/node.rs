@@ -1,12 +1,14 @@
+use crate::error::startup::StartupError;
 use crate::error::Result;
 use anyerror::AnyError;
+use openraft::error::{InitializeError, RaftError};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
+use tracing::info;
 
-use crate::raft::protobuf as pb;
 use openraft::Config as OpenRaftConfig;
 use openraft::Raft;
 use tonic::transport::Server;
@@ -21,7 +23,7 @@ use crate::raft::protobuf::raft_service_server::RaftServiceServer;
 use crate::raft::store::column_family_list;
 use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
-use crate::raft::types::{ForwardRequest, ForwardResponse, TypeConfig};
+use crate::raft::types::{ForwardRequest, ForwardResponse, Node, TypeConfig};
 use crate::raft::types::{ForwardToLeader, NodeId};
 use crate::service::RaftServiceImpl;
 
@@ -242,6 +244,70 @@ impl RaftNode {
       .any(|id| id == node_id);
 
     Ok(is_voter)
+  }
+
+  /// Initialize the Raft cluster with a single node
+  ///
+  /// This method should only be called once when the cluster is first created.
+  /// Calling it on an already initialized cluster will return an error.
+  ///
+  /// # Arguments
+  ///
+  /// * `node` - The node to initialize the cluster with
+  ///
+  /// # Returns
+  ///
+  /// * `Ok(())` - Successfully initialized the cluster
+  /// * `Err(AnyError)` - Failed to initialize with StartupError variants:
+  ///   - `StartupError::InvalidConfig` if node configuration is invalid
+  ///   - `StartupError::AddNodeError` if adding node to cluster fails
+  pub async fn init_cluster(&self, node: Node) -> Result<()> {
+    // Validate node configuration
+    if node.node_id == 0 {
+      let err = StartupError::invalid_config("Node ID cannot be zero");
+      return Err(crate::error::RockRaftError::from(err));
+    }
+
+    if node.node_id != *self.raft.node_id() {
+      let err = StartupError::invalid_config(format!(
+        "Node ID {} does not match current node ID {}",
+        node.node_id,
+        self.raft.node_id()
+      ));
+      return Err(crate::error::RockRaftError::from(err));
+    }
+
+    // Validate endpoint
+    if node.endpoint.addr().is_empty() {
+      let err = StartupError::invalid_config("Node endpoint address cannot be empty");
+      return Err(crate::error::RockRaftError::from(err));
+    }
+
+    // Initialize cluster with the node
+    let node_id = node.node_id;
+    let mut nodes = std::collections::BTreeMap::new();
+    nodes.insert(node_id, node);
+
+    match self.raft.initialize(nodes).await {
+      Ok(_) => {}
+      Err(e) => match e {
+        RaftError::APIError(e) => match e {
+          InitializeError::NotAllowed(e) => {
+            info!("Already initialized: {}", e);
+          }
+          InitializeError::NotInMembers(e) => {
+            let err = StartupError::InvalidConfig(e.to_string());
+            return Err(err.into());
+          }
+        },
+        RaftError::Fatal(e) => {
+          let err = StartupError::OtherError(e.to_string());
+          return Err(err.into());
+        }
+      },
+    }
+
+    Ok(())
   }
 
   pub async fn handle_forward(
