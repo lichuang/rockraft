@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use crate::node::RaftNode;
 use crate::raft::protobuf as pb;
-use crate::raft::types::TypeConfig;
+
+use crate::node::RaftNode;
+use crate::raft::types::{ForwardRequest, ForwardResponse, TypeConfig};
 use openraft::raft;
 use pb::raft_service_server::RaftService;
 
@@ -13,14 +14,41 @@ pub struct RaftServiceImpl {
 }
 
 impl RaftServiceImpl {
-  /// Create a new RaftServiceImpl instance
   pub fn new(node: Arc<RaftNode>) -> Self {
     Self { node }
+  }
+
+  fn result_to_raft_reply(result: Result<ForwardResponse, Status>) -> pb::RaftReply {
+    match result {
+      Ok(response) => {
+        let data = bincode::serialize(&response).expect("Failed to serialize ForwardResponse");
+        pb::RaftReply {
+          data,
+          error: String::new(),
+        }
+      }
+      Err(status) => pb::RaftReply {
+        data: Vec::new(),
+        error: status.to_string(),
+      },
+    }
   }
 }
 
 #[tonic::async_trait]
 impl RaftService for RaftServiceImpl {
+  async fn forward(
+    &self,
+    request: Request<pb::RaftRequest>,
+  ) -> Result<Response<pb::RaftReply>, Status> {
+    let req = request.into_inner();
+    let forward_req: ForwardRequest = bincode::deserialize(&req.data)
+      .map_err(|e| Status::internal(format!("Failed to deserialize forward request: {}", e)))?;
+    let response = self.node.handle_forward(forward_req).await;
+    let reply = Self::result_to_raft_reply(response);
+    Ok(Response::new(reply))
+  }
+
   /// Handle AppendEntries RPC from other Raft nodes
   async fn append(
     &self,

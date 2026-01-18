@@ -5,6 +5,15 @@ package raftpb;
 import "google/protobuf/empty.proto";
 import "google/protobuf/wrappers.proto";
 
+message RaftRequest {
+  bytes data = 1;
+}
+
+message RaftReply {
+  bytes data = 1;
+  string error = 2;
+}
+
 message VoteRequest {
   bytes value = 1;
 }
@@ -39,6 +48,9 @@ message JoinReply {
 }
 
 service RaftService {
+  // Forward a request to another node.
+  rpc Forward(RaftRequest) returns (RaftReply);
+
   // Raft Internal
   rpc Append(AppendRequest) returns (AppendReply) {}
 

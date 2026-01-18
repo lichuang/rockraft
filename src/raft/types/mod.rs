@@ -1,5 +1,6 @@
 mod cmd;
 mod endpoint;
+mod message;
 mod raft_codec;
 mod raft_types;
 mod sys_data;
@@ -8,6 +9,8 @@ pub use cmd::Cmd;
 pub use cmd::Operation;
 pub use cmd::UpsertKV;
 pub use endpoint::Endpoint;
+pub use message::ForwardRequest;
+pub use message::ForwardResponse;
 pub use raft_codec::read_logs_err;
 pub use raft_codec::RaftCodec;
 pub use raft_types::AppResponseData;

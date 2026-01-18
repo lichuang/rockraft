@@ -6,9 +6,11 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
+use crate::raft::protobuf as pb;
 use openraft::Config as OpenRaftConfig;
 use openraft::Raft;
 use tonic::transport::Server;
+use tonic::Status;
 
 use super::LeaderHandler;
 use crate::config::Config;
@@ -19,7 +21,7 @@ use crate::raft::protobuf::raft_service_server::RaftServiceServer;
 use crate::raft::store::column_family_list;
 use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
-use crate::raft::types::TypeConfig;
+use crate::raft::types::{ForwardRequest, ForwardResponse, TypeConfig};
 use crate::raft::types::{ForwardToLeader, NodeId};
 use crate::service::RaftServiceImpl;
 
@@ -240,6 +242,13 @@ impl RaftNode {
       .any(|id| id == node_id);
 
     Ok(is_voter)
+  }
+
+  pub async fn handle_forward(
+    &self,
+    request: ForwardRequest,
+  ) -> std::result::Result<ForwardResponse, Status> {
+    Ok(ForwardResponse {})
   }
 }
 
