@@ -23,7 +23,7 @@ use crate::raft::protobuf::raft_service_server::RaftServiceServer;
 use crate::raft::store::column_family_list;
 use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
-use crate::raft::types::{ForwardRequest, ForwardResponse, Node, TypeConfig};
+use crate::raft::types::{Endpoint, ForwardRequest, ForwardResponse, Node, TypeConfig};
 use crate::raft::types::{ForwardToLeader, NodeId};
 use crate::service::RaftServiceImpl;
 
@@ -108,8 +108,22 @@ impl RaftNode {
     }))
   }
 
+  pub async fn start(raft_node: Arc<Self>, config: &Config) -> Result<()> {
+    if config.raft.single {
+      let node = Node {
+        node_id: config.node_id,
+        endpoint: Endpoint::parse(&config.raft.addr)?,
+      };
+      raft_node.init_cluster(node).await?;
+    } else {
+      unreachable!()
+    }
+
+    Self::start_raft_service(raft_node, config).await
+  }
+
   /// Start the Raft gRPC service in a separate thread
-  pub async fn start_raft_service(raft_node: Arc<Self>, config: &Config) -> Result<()> {
+  async fn start_raft_service(raft_node: Arc<Self>, config: &Config) -> Result<()> {
     let raft_addr = config.raft.addr.clone();
 
     // Subscribe to shutdown signal
@@ -247,27 +261,11 @@ impl RaftNode {
   }
 
   /// Initialize the Raft cluster with a single node
-  ///
-  /// This method should only be called once when the cluster is first created.
-  /// Calling it on an already initialized cluster will return an error.
-  ///
-  /// # Arguments
-  ///
-  /// * `node` - The node to initialize the cluster with
-  ///
-  /// # Returns
-  ///
   /// * `Ok(())` - Successfully initialized the cluster
   /// * `Err(AnyError)` - Failed to initialize with StartupError variants:
   ///   - `StartupError::InvalidConfig` if node configuration is invalid
   ///   - `StartupError::AddNodeError` if adding node to cluster fails
-  pub async fn init_cluster(&self, node: Node) -> Result<()> {
-    // Validate node configuration
-    if node.node_id == 0 {
-      let err = StartupError::invalid_config("Node ID cannot be zero");
-      return Err(crate::error::RockRaftError::from(err));
-    }
-
+  async fn init_cluster(&self, node: Node) -> Result<()> {
     if node.node_id != *self.raft.node_id() {
       let err = StartupError::invalid_config(format!(
         "Node ID {} does not match current node ID {}",
@@ -288,9 +286,8 @@ impl RaftNode {
     let mut nodes = std::collections::BTreeMap::new();
     nodes.insert(node_id, node);
 
-    match self.raft.initialize(nodes).await {
-      Ok(_) => {}
-      Err(e) => match e {
+    if let Err(e) = self.raft.initialize(nodes).await {
+      match e {
         RaftError::APIError(e) => match e {
           InitializeError::NotAllowed(e) => {
             info!("Already initialized: {}", e);
@@ -304,7 +301,7 @@ impl RaftNode {
           let err = StartupError::OtherError(e.to_string());
           return Err(err.into());
         }
-      },
+      }
     }
 
     Ok(())

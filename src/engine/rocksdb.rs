@@ -3,11 +3,11 @@ use std::sync::Arc;
 use rocksdb::BlockBasedOptions;
 use rocksdb::Cache;
 use rocksdb::ColumnFamilyDescriptor;
+use rocksdb::DB;
 use rocksdb::DBCompactionStyle;
 use rocksdb::DBCompressionType;
 use rocksdb::Options;
 use rocksdb::SliceTransform;
-use rocksdb::DB;
 
 #[derive(Debug, Clone)]
 pub struct RocksDBConfig {

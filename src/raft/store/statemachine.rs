@@ -7,12 +7,12 @@ use bincode::deserialize;
 use bincode::serialize;
 use futures::Stream;
 use futures::TryStreamExt;
-use openraft::alias::SnapshotDataOf;
-use openraft::storage::EntryResponder;
-use openraft::storage::RaftStateMachine;
 use openraft::EntryPayload;
 use openraft::OptionalSend;
 use openraft::RaftSnapshotBuilder;
+use openraft::alias::SnapshotDataOf;
+use openraft::storage::EntryResponder;
+use openraft::storage::RaftStateMachine;
 use rocksdb::BoundColumnFamily;
 
 use rocksdb::DB;
@@ -25,7 +25,6 @@ use super::keys::SM_META_FAMILY;
 use super::snapshot::build_snapshot;
 use super::snapshot::get_current_snapshot;
 use crate::raft::store::snapshot::recover_snapshot;
-use crate::raft::types::read_logs_err;
 use crate::raft::types::AppResponseData;
 use crate::raft::types::Cmd;
 use crate::raft::types::LogId;
@@ -38,6 +37,7 @@ use crate::raft::types::SnapshotMeta;
 use crate::raft::types::StoredMembership;
 use crate::raft::types::SysData;
 use crate::raft::types::TypeConfig;
+use crate::raft::types::read_logs_err;
 
 #[derive(Debug)]
 pub struct RocksStateMachine {

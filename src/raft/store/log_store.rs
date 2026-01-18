@@ -9,31 +9,31 @@ use bincode::serialize;
 use byteorder::BigEndian;
 use byteorder::ReadBytesExt as _;
 use byteorder::WriteBytesExt as _;
+use openraft::OptionalSend;
+use openraft::RaftLogReader;
+use openraft::RaftTypeConfig;
 use openraft::alias::EntryOf;
 use openraft::alias::LogIdOf;
 use openraft::alias::VoteOf;
 use openraft::entry::RaftEntry;
 use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
-use openraft::OptionalSend;
-use openraft::RaftLogReader;
-use openraft::RaftTypeConfig;
 use rocksdb::BoundColumnFamily;
+use rocksdb::DB;
 use rocksdb::Direction;
 use rocksdb::IteratorMode;
-use rocksdb::DB;
 use tokio::task::spawn_blocking;
 
+use super::StoreMeta;
 use super::keys::LOG_DATA_FAMILY;
 use super::keys::LOG_META_FAMILY;
 use super::meta::LastPurged;
-use super::StoreMeta;
-use crate::raft::types::read_logs_err;
 use crate::raft::types::Entry;
 use crate::raft::types::LogId;
 use crate::raft::types::LogState;
 use crate::raft::types::RaftCodec;
 use crate::raft::types::TypeConfig;
+use crate::raft::types::read_logs_err;
 
 #[derive(Debug, Clone)]
 pub struct RocksLogStore<C>

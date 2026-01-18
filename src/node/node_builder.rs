@@ -8,8 +8,10 @@ pub struct RaftNodeBuilder;
 impl RaftNodeBuilder {
   /// Build a new RaftNode with the given configuration
   pub async fn build(config: &Config) -> Result<Arc<RaftNode>> {
+    config.validate()?;
+
     let raft_node = RaftNode::create(config).await?;
-    RaftNode::start_raft_service(raft_node.clone(), config).await?;
+    RaftNode::start(raft_node.clone(), config).await?;
     Ok(raft_node)
   }
 }

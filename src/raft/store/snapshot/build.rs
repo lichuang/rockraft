@@ -17,11 +17,11 @@ use super::util::snapshot_data_file;
 use super::util::snapshot_dump_file;
 use crate::raft::store::keys::SM_DATA_FAMILY;
 use crate::raft::store::snapshot::util::snapshot_id_dir;
-use crate::raft::types::read_logs_err;
 use crate::raft::types::LogId;
 use crate::raft::types::Snapshot;
 use crate::raft::types::StoredMembership;
 use crate::raft::types::TypeConfig;
+use crate::raft::types::read_logs_err;
 use crate::utils::now_millis;
 
 /// Build a snapshot from the current database state
