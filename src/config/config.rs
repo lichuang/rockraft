@@ -3,8 +3,8 @@ use serde::Serialize;
 
 use super::default::default_raft_config;
 use super::default::default_rocksdb_config;
-use crate::error::startup::StartupError;
 use crate::error::Result;
+use crate::error::StartupError;
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct Config {

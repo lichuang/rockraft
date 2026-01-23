@@ -1,16 +1,27 @@
 use crate::raft::protobuf as pb;
-use tonic::Status;
+use crate::raft::types::Endpoint;
+use crate::raft::types::NodeId;
+use serde::Deserialize;
+use serde::Serialize;
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ForwardRequestBody {}
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct JoinRequest {
+  pub node_id: NodeId,
+  pub endpoint: Endpoint,
+}
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ForwardRequestBody {
+  Join(JoinRequest),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ForwardRequest {
   pub forward_to_leader: u64,
   pub body: ForwardRequestBody,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ForwardResponse {}
 
 impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {

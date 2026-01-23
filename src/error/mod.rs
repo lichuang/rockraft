@@ -1,4 +1,10 @@
-pub mod startup;
+mod api_error;
+mod management_error;
+mod startup_error;
+
+pub use api_error::APIError;
+pub use management_error::ManagementError;
+pub use startup_error::StartupError;
 
 use anyerror::AnyError;
 use thiserror::Error;
@@ -29,7 +35,10 @@ pub enum RockRaftError {
   StorageError(#[from] AnyError),
 
   #[error("Startup error: {0}")]
-  Startup(#[from] startup::StartupError),
+  Startup(#[from] StartupError),
+
+  #[error("Management error: {0}")]
+  Management(#[from] ManagementError),
 }
 
 pub type Result<T> = std::result::Result<T, RockRaftError>;

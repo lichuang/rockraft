@@ -1,5 +1,7 @@
-use crate::error::startup::StartupError;
+use crate::error::APIError;
+use crate::error::ManagementError;
 use crate::error::Result;
+use crate::error::StartupError;
 use anyerror::AnyError;
 use openraft::error::{InitializeError, RaftError};
 use std::path::PathBuf;
@@ -9,6 +11,9 @@ use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 use tracing::info;
 
+use std::result::Result as StdResult;
+use tokio::time::sleep;
+
 use openraft::Config as OpenRaftConfig;
 use openraft::Raft;
 use tonic::transport::Server;
@@ -16,6 +21,7 @@ use tonic::Status;
 
 use super::LeaderHandler;
 use crate::config::Config;
+use crate::config::RaftConfig;
 use crate::engine::RocksDBEngine;
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::network::NetworkFactory;
@@ -304,6 +310,63 @@ impl RaftNode {
       }
     }
 
+    Ok(())
+  }
+
+  pub async fn join_cluster(&self, conf: &RaftConfig) -> Result<()> {
+    if conf.join.is_empty() {
+      info!("'--join' is empty, do not need joining cluster");
+      return Ok(());
+    }
+
+    if self.is_in_cluster()? {
+      info!("node has already in cluster, do not need joining cluster");
+      return Ok(());
+    }
+
+    Ok(self.do_join_cluster(conf).await?.into())
+  }
+
+  async fn do_join_cluster(&self, conf: &RaftConfig) -> StdResult<(), ManagementError> {
+    let addrs = &conf.join;
+    let mut errors = vec![];
+
+    for addr in addrs {
+      if addr == &conf.addr {
+        continue;
+      }
+      for _i in 0..3 {
+        let result = self.join_via(conf, addr).await;
+        match result {
+          Ok(x) => return Ok(x),
+          Err(api_error) => {
+            let can_retry = api_error.is_retryable();
+
+            if can_retry {
+              sleep(Duration::from_millis(1_000)).await;
+              continue;
+            } else {
+              errors.push(api_error);
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    Err(ManagementError::Join(AnyError::error(format!(
+      "fail to join node-{} to cluster via {:?}, errors: {}",
+      self.raft.node_id(),
+      addrs,
+      errors
+        .into_iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+    ))))
+  }
+
+  async fn join_via(&self, conf: &RaftConfig, addr: &String) -> StdResult<(), APIError> {
     Ok(())
   }
 
