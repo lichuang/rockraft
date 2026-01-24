@@ -12,11 +12,16 @@ use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
 use std::sync::Arc;
 
+use crate::error::APIError;
 use crate::error::Result;
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::protobuf::AppendRequest;
+use crate::raft::protobuf::RaftReply;
+use crate::raft::protobuf::RaftRequest;
 use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
 use crate::raft::protobuf::VoteRequest as PbVoteRequest;
+use crate::raft::types::ForwardRequest;
+use crate::raft::types::ForwardResponse;
 use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
 
@@ -39,33 +44,50 @@ impl NetworkConnection {
     }
   }
 
+  pub async fn forward(&mut self, req: ForwardRequest) -> Result<ForwardResponse> {
+    let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
+
+    self.serialize_buf.clear();
+
+    bincode::serialize_into(&mut self.serialize_buf, &req)?;
+
+    let grpc_request = tonic::Request::new(RaftRequest {
+      data: self.serialize_buf.clone(),
+    });
+
+    let grpc_response = conn.forward(grpc_request).await?;
+
+    let reply: RaftReply = grpc_response.into_inner();
+
+    if !reply.error.is_empty() {
+      let error: APIError = bincode::deserialize(&reply.error)?;
+      Err(error.into())
+    } else {
+      let result: ForwardResponse = bincode::deserialize(&reply.data)?;
+      Ok(result)
+    }
+  }
+
   /// Internal function to send AppendEntries RPC to the target node.
   /// This function handles serialization of the request and deserialization of the response.
   async fn append_entries_internal(
     &mut self,
     req: AppendEntriesRequest<TypeConfig>,
   ) -> Result<AppendEntriesResponse<TypeConfig>> {
-    // Get a gRPC client from the connection pool
     let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
 
-    // Clear and reuse the serialization buffer
     self.serialize_buf.clear();
 
-    // Serialize the request using bincode
     bincode::serialize_into(&mut self.serialize_buf, &req)?;
 
-    // Create the gRPC request with serialized data
     let grpc_request = tonic::Request::new(AppendRequest {
       value: self.serialize_buf.clone(),
     });
 
-    // Call the Append RPC from the RaftService
     let grpc_response = conn.append(grpc_request).await?;
 
-    // Extract the response payload
     let append_reply = grpc_response.into_inner();
 
-    // Deserialize the response
     let result: AppendEntriesResponse<TypeConfig> = bincode::deserialize(&append_reply.value)?;
 
     Ok(result)
@@ -77,27 +99,20 @@ impl NetworkConnection {
     &mut self,
     req: VoteRequest<TypeConfig>,
   ) -> Result<VoteResponse<TypeConfig>> {
-    // Get a gRPC client from the connection pool
     let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
 
-    // Clear and reuse the serialization buffer
     self.serialize_buf.clear();
 
-    // Serialize the request using bincode
     bincode::serialize_into(&mut self.serialize_buf, &req)?;
 
-    // Create the gRPC request with serialized data
     let grpc_request = tonic::Request::new(PbVoteRequest {
       value: self.serialize_buf.clone(),
     });
 
-    // Call the Vote RPC from the RaftService
     let grpc_response = conn.vote(grpc_request).await?;
 
-    // Extract the response payload
     let vote_reply = grpc_response.into_inner();
 
-    // Deserialize the response
     let result: VoteResponse<TypeConfig> = bincode::deserialize(&vote_reply.value)?;
 
     Ok(result)
@@ -109,27 +124,20 @@ impl NetworkConnection {
     &mut self,
     req: InstallSnapshotRequest<TypeConfig>,
   ) -> Result<InstallSnapshotResponse<TypeConfig>> {
-    // Get a gRPC client from the connection pool
     let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
 
-    // Clear and reuse the serialization buffer
     self.serialize_buf.clear();
 
-    // Serialize the request using bincode
     bincode::serialize_into(&mut self.serialize_buf, &req)?;
 
-    // Create the gRPC request with serialized data
     let grpc_request = tonic::Request::new(PbSnapshotRequest {
       value: self.serialize_buf.clone(),
     });
 
-    // Call the Snapshot RPC from the RaftService
     let grpc_response = conn.snapshot(grpc_request).await?;
 
-    // Extract the response payload
     let snapshot_reply = grpc_response.into_inner();
 
-    // Deserialize the response
     let result: InstallSnapshotResponse<TypeConfig> = bincode::deserialize(&snapshot_reply.value)?;
 
     Ok(result)
@@ -182,6 +190,7 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
 ///
 /// This struct implements the [`RaftNetworkFactory`] trait required by OpenRaft
 /// to create [`NetworkConnection`] instances for communicating with other nodes.
+#[derive(Clone)]
 pub struct NetworkFactory {
   client_pool: Arc<ClientPool>,
 }
@@ -190,12 +199,16 @@ impl NetworkFactory {
   pub fn new(client_pool: Arc<ClientPool>) -> Self {
     Self { client_pool }
   }
+
+  pub fn new_client_with_addr(&self, addr: String) -> NetworkConnection {
+    NetworkConnection::new(addr, self.client_pool.clone())
+  }
 }
 
 impl openraft::RaftNetworkFactory<TypeConfig> for NetworkFactory {
   type Network = NetworkConnection;
 
   async fn new_client(&mut self, _target: u64, node: &Node) -> Self::Network {
-    NetworkConnection::new(node.endpoint.to_string(), self.client_pool.clone())
+    self.new_client_with_addr(node.endpoint.to_string())
   }
 }

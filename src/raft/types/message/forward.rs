@@ -15,7 +15,9 @@ pub struct ForwardRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ForwardResponse {}
+pub enum ForwardResponse {
+  Join(()),
+}
 
 impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {
   fn into_request(self) -> tonic::Request<pb::RaftRequest> {

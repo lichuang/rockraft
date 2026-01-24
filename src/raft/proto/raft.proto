@@ -11,7 +11,7 @@ message RaftRequest {
 
 message RaftReply {
   bytes data = 1;
-  string error = 2;
+  bytes error = 2;
 }
 
 message VoteRequest {

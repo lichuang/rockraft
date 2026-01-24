@@ -1,9 +1,11 @@
 mod api_error;
 mod management_error;
+mod network_error;
 mod startup_error;
 
 pub use api_error::APIError;
 pub use management_error::ManagementError;
+pub use network_error::NetworkError;
 pub use startup_error::StartupError;
 
 use anyerror::AnyError;
@@ -39,6 +41,21 @@ pub enum RockRaftError {
 
   #[error("Management error: {0}")]
   Management(#[from] ManagementError),
+
+  #[error("Network error: {0}")]
+  Network(#[from] NetworkError),
+
+  #[error("API error: {0}")]
+  API(#[from] APIError),
+}
+
+impl RockRaftError {
+  pub fn is_retryable(&self) -> bool {
+    match self {
+      RockRaftError::API(api) => api.is_retryable(),
+      _ => false,
+    }
+  }
 }
 
 pub type Result<T> = std::result::Result<T, RockRaftError>;

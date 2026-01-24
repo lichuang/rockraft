@@ -24,12 +24,12 @@ impl RaftServiceImpl {
         let data = bincode::serialize(&response).expect("Failed to serialize ForwardResponse");
         pb::RaftReply {
           data,
-          error: String::new(),
+          error: String::new().into(),
         }
       }
       Err(status) => pb::RaftReply {
         data: Vec::new(),
-        error: status.to_string(),
+        error: status.to_string().into(),
       },
     }
   }

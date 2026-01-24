@@ -1,4 +1,3 @@
-use crate::raft::protobuf as pb;
 use crate::raft::types::Endpoint;
 use crate::raft::types::NodeId;
 use serde::Deserialize;

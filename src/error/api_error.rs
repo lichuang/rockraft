@@ -1,3 +1,4 @@
+use super::NetworkError;
 use crate::raft::types::ForwardToLeader;
 use anyerror::AnyError;
 
@@ -9,6 +10,9 @@ pub enum APIError {
 
   #[error("can not forward any more: {0}")]
   CanNotForward(AnyError),
+
+  #[error(transparent)]
+  NetworkError(#[from] NetworkError),
 }
 
 impl APIError {
@@ -22,6 +26,7 @@ impl APIError {
         // Leader is changing, wait a while and retry
         true
       }
+      _ => false,
     }
   }
 }

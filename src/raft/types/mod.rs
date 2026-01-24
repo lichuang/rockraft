@@ -10,6 +10,7 @@ pub use cmd::Operation;
 pub use cmd::UpsertKV;
 pub use endpoint::Endpoint;
 pub use message::ForwardRequest;
+pub use message::ForwardRequestBody;
 pub use message::ForwardResponse;
 pub use message::JoinRequest;
 pub use raft_codec::read_logs_err;

@@ -1,3 +1,4 @@
 mod connection;
 
-pub use connection::{NetworkConnection, NetworkFactory};
+pub use connection::NetworkConnection;
+pub use connection::NetworkFactory;

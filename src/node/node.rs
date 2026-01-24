@@ -2,6 +2,8 @@ use crate::error::APIError;
 use crate::error::ManagementError;
 use crate::error::Result;
 use crate::error::StartupError;
+use crate::raft::types::ForwardRequestBody;
+use crate::raft::types::JoinRequest;
 use anyerror::AnyError;
 use openraft::error::{InitializeError, RaftError};
 use std::path::PathBuf;
@@ -36,6 +38,10 @@ use crate::service::RaftServiceImpl;
 pub struct RaftNode {
   engine: Arc<RocksDBEngine>,
   raft: Arc<Raft<TypeConfig>>,
+
+  config: Config,
+
+  factory: NetworkFactory,
 
   state_machine: Arc<RocksStateMachine>,
 
@@ -84,7 +90,7 @@ impl RaftNode {
     let client_pool = Arc::new(ClientPool::new(10));
 
     // Create network factory
-    let network = NetworkFactory::new(client_pool);
+    let factory = NetworkFactory::new(client_pool);
 
     // Configure Raft
     let raft_config = OpenRaftConfig::default();
@@ -94,7 +100,7 @@ impl RaftNode {
       Raft::new(
         node_id,
         Arc::new(raft_config),
-        network,
+        factory.clone(),
         log_store,
         state_machine.clone(),
       )
@@ -107,6 +113,8 @@ impl RaftNode {
     Ok(Arc::new(Self {
       engine,
       raft,
+      config: config.clone(),
+      factory,
       state_machine: Arc::new(state_machine),
       shutdown_tx,
       _shutdown_rx: shutdown_rx_for_struct,
@@ -366,7 +374,19 @@ impl RaftNode {
     ))))
   }
 
-  async fn join_via(&self, conf: &RaftConfig, addr: &String) -> StdResult<(), APIError> {
+  async fn join_via(&self, conf: &RaftConfig, addr: &String) -> Result<()> {
+    let mut client = self.factory.new_client_with_addr(addr.clone());
+    let join_req = JoinRequest {
+      node_id: self.config.node_id,
+      endpoint: Endpoint::parse(&conf.addr)?,
+    };
+
+    let req = ForwardRequest {
+      forward_to_leader: 1,
+      body: ForwardRequestBody::Join(join_req),
+    };
+
+    let response = client.forward(req).await?;
     Ok(())
   }
 
@@ -374,7 +394,7 @@ impl RaftNode {
     &self,
     request: ForwardRequest,
   ) -> std::result::Result<ForwardResponse, Status> {
-    Ok(ForwardResponse {})
+    Ok(ForwardResponse::Join(()))
   }
 }
 
