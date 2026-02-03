@@ -5,7 +5,7 @@ use axum::{
   response::{IntoResponse, Json},
   routing::{get, post},
 };
-use rockraft::config::Config as RaftConfig;
+use rockraft::config::Config as RockraftConfig;
 use rockraft::node::RaftNodeBuilder;
 use rockraft::raft::types::{Cmd, Endpoint, Node};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
   #[serde(flatten)]
-  pub raft: RaftConfig,
+  pub base: RockraftConfig,
   pub http_addr: String,
 }
 
@@ -89,66 +89,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   // Load configuration
   let config = load_config(&config_path)?;
   println!("Configuration loaded:");
-  println!("  node_id: {}", config.raft.node_id);
-  println!("  raft_addr: {}", config.raft.raft.addr);
+  println!("  node_id: {}", config.base.node_id);
+  println!("  raft_addr: {}", config.base.raft.addr);
   println!("  http_addr: {}", config.http_addr);
-  println!("  data_path: {}", config.raft.rocksdb.data_path);
-  println!("  single: {}", config.raft.raft.single);
-  println!("  join: {:?}", config.raft.raft.join);
+  println!("  data_path: {}", config.base.rocksdb.data_path);
+  println!("  single: {}", config.base.raft.single);
+  println!("  join: {:?}", config.base.raft.join);
 
   // Create Raft node
   println!("\nCreating Raft node...");
-  let raft_node = RaftNodeBuilder::build(&config.raft).await?;
+  let raft_node = RaftNodeBuilder::build(&config.base).await?;
   println!("✓ Raft node created successfully!");
 
-  // Initialize cluster if this is node 1 and join is empty
-  let data_path = config.raft.rocksdb.data_path.clone();
-  if config.raft.node_id == 1 {
-    // Check if cluster needs initialization
-    let cluster_initialized = raft_node.is_in_cluster().unwrap_or(false);
-
-    if !cluster_initialized {
-      println!("\nInitializing 3-node cluster...");
-
-      let mut nodes = BTreeMap::new();
-
-      // Add node 1
-      nodes.insert(
-        1,
-        Node {
-          node_id: 1,
-          endpoint: Endpoint::new("127.0.0.1", 7001),
-        },
-      );
-
-      // Add node 2
-      nodes.insert(
-        2,
-        Node {
-          node_id: 2,
-          endpoint: Endpoint::new("127.0.0.1", 7002),
-        },
-      );
-
-      // Add node 3
-      nodes.insert(
-        3,
-        Node {
-          node_id: 3,
-          endpoint: Endpoint::new("127.0.0.1", 7003),
-        },
-      );
-
-      raft_node.raft().initialize(nodes).await?;
-      println!("✓ Cluster initialized successfully!");
-    } else {
-      println!("✓ Cluster already initialized");
-    }
-  } else {
-    // Wait for cluster to be ready
-    println!("\nWaiting for cluster to be ready...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-  }
+  // Initialize cluster if this is node 1
+  let data_path = config.base.rocksdb.data_path.clone();
 
   // Wait for initial log to be applied
   println!("\nWaiting for initial log to be committed...");
@@ -275,7 +229,7 @@ async fn set_handler(
       }
     }
     Err(forward_err) => {
-      // This node is not the leader
+      // This node is not leader
       let leader_id = forward_err
         .leader_id
         .map(|id| id.to_string())
@@ -316,7 +270,7 @@ async fn delete_handler(
       }
     }
     Err(forward_err) => {
-      // This node is not the leader
+      // This node is not leader
       let leader_id = forward_err
         .leader_id
         .map(|id| id.to_string())
@@ -364,9 +318,6 @@ fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
 
   let config: Config = toml::from_str(&config_str)
     .map_err(|e| format!("Failed to parse config file '{}': {}", path, e))?;
-
-  // Validate configuration
-  config.raft.validate()?;
 
   Ok(config)
 }

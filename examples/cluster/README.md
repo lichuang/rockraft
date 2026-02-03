@@ -229,10 +229,14 @@ Each node has its own TOML configuration file in the `conf/` directory.
 
 ```toml
 node_id = 1
-raft_addr = "127.0.0.1:7001"
 http_addr = "127.0.0.1:8001"
+
+[raft]
+addr = "127.0.0.1:7001"
 single = false
 join = ["127.0.0.1:7002", "127.0.0.1:7003"]
+
+[rocksdb]
 data_path = "/tmp/rockraft_cluster/node1"
 max_open_files = 10000
 ```
@@ -241,10 +245,14 @@ max_open_files = 10000
 
 ```toml
 node_id = 2
-raft_addr = "127.0.0.1:7002"
 http_addr = "127.0.0.1:8002"
+
+[raft]
+addr = "127.0.0.1:7002"
 single = false
 join = ["127.0.0.1:7001"]
+
+[rocksdb]
 data_path = "/tmp/rockraft_cluster/node2"
 max_open_files = 10000
 ```
@@ -253,10 +261,14 @@ max_open_files = 10000
 
 ```toml
 node_id = 3
-raft_addr = "127.0.0.1:7003"
 http_addr = "127.0.0.1:8003"
+
+[raft]
+addr = "127.0.0.1:7003"
 single = false
 join = ["127.0.0.1:7001"]
+
+[rocksdb]
 data_path = "/tmp/rockraft_cluster/node3"
 max_open_files = 10000
 ```

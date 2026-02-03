@@ -17,6 +17,7 @@ NODES=("node1" "node2" "node3")
 PIDS=()
 LOG_DIR="logs"
 BIN="target/debug/cluster_example"
+DEFAULT_LOG_LEVEL="info"
 
 # Function to print colored messages
 print_info() {
@@ -55,6 +56,7 @@ is_node_running() {
 start_node() {
     local node=$1
     local conf="conf/${node}.toml"
+    local log_level=$2
 
     if is_node_running "$node"; then
         print_warning "Node $node is already running (PID: $(cat ${LOG_DIR}/${node}.pid))"
@@ -71,13 +73,33 @@ start_node() {
         return 1
     fi
 
-    print_info "Starting node $node..."
+    print_info "Starting node $node (log level: $log_level)..."
 
     # Create log directory if it doesn't exist
     mkdir -p "$LOG_DIR"
 
+    # Build RUST_LOG based on log level
+    local rust_log
+    case "$log_level" in
+        debug|trace)
+            rust_log="rockraft=${log_level},rockraft_cluster=${log_level},tower_http=info,axum=info"
+            ;;
+        info)
+            rust_log="rockraft=info,rockraft_cluster=info,tower_http=info,axum=info"
+            ;;
+        warn|warning)
+            rust_log="rockraft=warn,rockraft_cluster=warn,tower_http=warn,axum=warn"
+            ;;
+        error)
+            rust_log="rockraft=error,rockraft_cluster=error,tower_http=error,axum=error"
+            ;;
+        *)
+            rust_log="$log_level"
+            ;;
+    esac
+
     # Start the node in background, redirecting output to log file
-    nohup "$BIN" --conf "$conf" > "${LOG_DIR}/${node}.log" 2>&1 &
+    nohup env RUST_LOG="$rust_log" "$BIN" --conf "$conf" > "${LOG_DIR}/${node}.log" 2>&1 &
     local pid=$!
 
     # Save PID for later use
@@ -204,12 +226,17 @@ test_cluster() {
 # Main script logic
 case "$1" in
     start)
-        print_info "Starting all nodes in the cluster..."
+        local log_level="$2"
+        if [ -z "$log_level" ]; then
+            log_level="$DEFAULT_LOG_LEVEL"
+        fi
+
+        print_info "Starting all nodes in the cluster (log level: $log_level)..."
         echo ""
 
         # Start nodes sequentially with a small delay
         for node in "${NODES[@]}"; do
-            start_node "$node"
+            start_node "$node" "$log_level"
             if [ $? -eq 0 ]; then
                 # Wait a bit before starting the next node
                 sleep 2
@@ -233,9 +260,14 @@ case "$1" in
         ;;
 
     restart)
+        local log_level="$2"
         stop_all_nodes
         sleep 2
-        $0 start
+        if [ -n "$log_level" ]; then
+            $0 start "$log_level"
+        else
+            $0 start
+        fi
         ;;
 
     status)
@@ -270,20 +302,22 @@ case "$1" in
         echo "Usage: $0 {start|stop|restart|status|logs|test|clean}"
         echo ""
         echo "Commands:"
-        echo "  start          - Start all cluster nodes"
+        echo "  start [level]  - Start all cluster nodes (log level: info|debug|trace|warn|error)"
         echo "  stop           - Stop all cluster nodes"
-        echo "  restart        - Restart all cluster nodes"
+        echo "  restart [level]- Restart all cluster nodes"
         echo "  status         - Show status of all nodes"
         echo "  logs <node>   - Show logs for a specific node (tail -f)"
         echo "  test           - Test the cluster with curl"
         echo "  clean          - Clean up log files"
         echo ""
         echo "Examples:"
-        echo "  $0 start        # Start all nodes"
-        echo "  $0 status       # Check cluster status"
-        echo "  $0 logs node1   # View node1 logs"
-        echo "  $0 test         # Test cluster"
-        echo "  $0 stop         # Stop all nodes"
+        echo "  $0 start              # Start all nodes with info level"
+        echo "  $0 start debug        # Start all nodes with debug level"
+        echo "  $0 start trace         # Start all nodes with trace level"
+        echo "  $0 status             # Check cluster status"
+        echo "  $0 logs node1         # View node1 logs"
+        echo "  $0 test               # Test cluster"
+        echo "  $0 stop               # Stop all nodes"
         exit 1
         ;;
 esac

@@ -1,7 +1,11 @@
 node_id = 3
-raft_addr = "127.0.0.1:7003"
 http_addr = "127.0.0.1:8003"
+
+[raft]
+addr = "127.0.0.1:7003"
 single = false
 join = ["127.0.0.1:7001"]
+
+[rocksdb]
 data_path = "/tmp/rockraft_cluster/node3"
 max_open_files = 10000
