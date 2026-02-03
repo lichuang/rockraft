@@ -1,0 +1,21 @@
+[package]
+name = "cluster_example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rockraft = { path = "../.." }
+bytes = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3.9"
+rocksdb = "0.24.0"
+
+# HTTP server dependencies
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = "1.0"
