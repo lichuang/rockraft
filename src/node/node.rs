@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
+use tracing::debug;
 use tracing::info;
 
 use std::result::Result as StdResult;
@@ -18,8 +19,8 @@ use tokio::time::sleep;
 
 use openraft::Config as OpenRaftConfig;
 use openraft::Raft;
-use tonic::transport::Server;
 use tonic::Status;
+use tonic::transport::Server;
 
 use super::LeaderHandler;
 use crate::config::Config;
@@ -28,9 +29,9 @@ use crate::engine::RocksDBEngine;
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::network::NetworkFactory;
 use crate::raft::protobuf::raft_service_server::RaftServiceServer;
-use crate::raft::store::column_family_list;
 use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
+use crate::raft::store::column_family_list;
 use crate::raft::types::{Endpoint, ForwardRequest, ForwardResponse, Node, TypeConfig};
 use crate::raft::types::{ForwardToLeader, NodeId};
 use crate::service::RaftServiceImpl;
@@ -130,7 +131,7 @@ impl RaftNode {
       };
       raft_node.init_cluster(node).await?;
     } else {
-      unreachable!()
+      raft_node.join_cluster().await?;
     }
 
     Self::start_raft_service(raft_node, config).await
@@ -321,8 +322,9 @@ impl RaftNode {
     Ok(())
   }
 
-  pub async fn join_cluster(&self, conf: &RaftConfig) -> Result<()> {
-    if conf.join.is_empty() {
+  pub async fn join_cluster(&self) -> Result<()> {
+    let raft_config = &self.config.raft;
+    if raft_config.join.is_empty() {
       info!("'--join' is empty, do not need joining cluster");
       return Ok(());
     }
@@ -332,7 +334,7 @@ impl RaftNode {
       return Ok(());
     }
 
-    Ok(self.do_join_cluster(conf).await?.into())
+    Ok(self.do_join_cluster(raft_config).await?.into())
   }
 
   async fn do_join_cluster(&self, conf: &RaftConfig) -> StdResult<(), ManagementError> {
@@ -349,8 +351,10 @@ impl RaftNode {
           Ok(x) => return Ok(x),
           Err(api_error) => {
             let can_retry = api_error.is_retryable();
+            debug!("can_retry: {}", can_retry);
 
             if can_retry {
+              debug!("try to connect to addr {} again", addr);
               sleep(Duration::from_millis(1_000)).await;
               continue;
             } else {

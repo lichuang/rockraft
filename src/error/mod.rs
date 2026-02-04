@@ -16,6 +16,12 @@ use crate::raft::types::TypeConfig;
 #[derive(Error, Debug)]
 pub enum RockRaftError {
   #[error("{0}")]
+  DnsParseError(String),
+
+  #[error("{0}")]
+  TokioError(String),
+
+  #[error("{0}")]
   TonicTransport(#[from] tonic::transport::Error),
 
   #[error("Tonic RPC status error: {0}")]

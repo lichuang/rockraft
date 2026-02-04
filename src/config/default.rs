@@ -11,6 +11,6 @@ pub fn default_raft_config() -> RaftConfig {
 pub fn default_rocksdb_config() -> RocksdbConfig {
   RocksdbConfig {
     max_open_files: 10000,
-    data_path: ".rocksraft_data".to_string(),
+    data_path: ".rockraft_data".to_string(),
   }
 }
