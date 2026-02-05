@@ -24,7 +24,8 @@ serde = { version = "1.0.114", features = ["derive"] }
 thiserror = "1.0"
 tokio = { version = "1.47", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
-tonic = "0.12.3"
+tonic = { version =  "0.12.3", features = ["transport", "codegen", "tls-native-roots"] }
+#tonic = { version = "0.13", features = ["transport", "codegen", "tls-native-roots"] }
 tower-service = "0.3.3"
 tracing = "0.1.41"
 zstd = "0.13"

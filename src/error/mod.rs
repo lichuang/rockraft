@@ -1,9 +1,11 @@
 mod api_error;
+mod grpc_connection_error;
 mod management_error;
 mod network_error;
 mod startup_error;
 
 pub use api_error::APIError;
+pub use grpc_connection_error::GrpcConnectionError;
 pub use management_error::ManagementError;
 pub use network_error::NetworkError;
 pub use startup_error::StartupError;
@@ -53,6 +55,9 @@ pub enum RockRaftError {
 
   #[error("API error: {0}")]
   API(#[from] APIError),
+
+  #[error("Grpc Connect error: {0}")]
+  GrpcConnection(#[from] GrpcConnectionError),
 }
 
 impl RockRaftError {
