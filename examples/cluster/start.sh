@@ -98,8 +98,9 @@ start_node() {
             ;;
     esac
 
-    # Start the node in background, redirecting output to log file
-    nohup env RUST_LOG="$rust_log" "$BIN" --conf "$conf" > "${LOG_DIR}/${node}.log" 2>&1 &
+    # Start the node in background
+    # Log output is controlled by the config file [log] section
+    nohup env RUST_LOG="$rust_log" "$BIN" --conf "$conf" > /dev/null 2>&1 &
     local pid=$!
 
     # Save PID for later use
@@ -109,7 +110,7 @@ start_node() {
     sleep 1
     if ps -p $pid > /dev/null 2>&1; then
         print_success "Node $node started successfully (PID: $pid)"
-        print_info "  Log: ${LOG_DIR}/${node}.log"
+        print_info "  Log: configured in $conf ([log] section)"
         PIDS+=($pid)
         return 0
     else
@@ -170,13 +171,33 @@ check_status() {
     echo ""
 }
 
+# Function to get log file path from config
+get_log_file_from_config() {
+    local node=$1
+    local conf="conf/${node}.toml"
+    
+    # Parse log.file from config file
+    local log_file=$(grep -A 2 '\[log\]' "$conf" 2>/dev/null | grep 'file' | cut -d'=' -f2 | tr -d ' "')
+    
+    if [ -n "$log_file" ]; then
+        echo "$log_file"
+    else
+        echo ""
+    fi
+}
+
 # Function to show logs for a specific node
 show_logs() {
     local node=$1
-    local log_file="${LOG_DIR}/${node}.log"
+    local log_file=$(get_log_file_from_config "$node")
+    
+    if [ -z "$log_file" ]; then
+        print_error "No log file configured for $node (logging to stdout)"
+        return 1
+    fi
 
     if [ ! -f "$log_file" ]; then
-        print_error "Log file for $node not found"
+        print_error "Log file for $node not found: $log_file"
         return 1
     fi
 
@@ -187,8 +208,18 @@ show_logs() {
 
 # Function to clean up logs
 cleanup_logs() {
-    print_info "Cleaning up log files..."
+    print_info "Cleaning up log files and data..."
     rm -rf "$LOG_DIR"
+    # Also clean up log files defined in configs
+    for node in "${NODES[@]}"; do
+        local log_file=$(get_log_file_from_config "$node")
+        if [ -n "$log_file" ]; then
+            rm -f "$log_file"
+            # Remove empty parent directory if exists
+            local log_dir=$(dirname "$log_file")
+            rmdir "$log_dir" 2>/dev/null || true
+        fi
+    done
     print_success "Log files cleaned"
 }
 
@@ -226,7 +257,7 @@ test_cluster() {
 # Main script logic
 case "$1" in
     start)
-        local log_level="$2"
+        log_level="$2"
         if [ -z "$log_level" ]; then
             log_level="$DEFAULT_LOG_LEVEL"
         fi
@@ -260,7 +291,7 @@ case "$1" in
         ;;
 
     restart)
-        local log_level="$2"
+        log_level="$2"
         stop_all_nodes
         sleep 2
         if [ -n "$log_level" ]; then

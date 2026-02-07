@@ -2,7 +2,8 @@ use super::config::{RaftConfig, RocksdbConfig};
 
 pub fn default_raft_config() -> RaftConfig {
   RaftConfig {
-    addr: "127.0.0.1:6682".to_string(),
+    address: "127.0.0.1:6682".to_string(),
+    advertise_host: "localhost".to_string(),
     single: true,
     join: vec![],
   }

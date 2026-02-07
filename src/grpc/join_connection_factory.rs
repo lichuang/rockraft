@@ -40,7 +40,7 @@ impl JoinConnectionFactory {
     }
   }
 
-  pub fn create_rpc_endpoint(
+  fn create_rpc_endpoint(
     addr: impl ToString,
     timeout: Option<Duration>,
     rpc_client_tls_config: Option<RpcClientTlsConfig>,

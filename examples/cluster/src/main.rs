@@ -18,12 +18,38 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+/// Log configuration
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LogConfig {
+  /// Log file path, if not set, logs will be printed to stdout
+  pub file: Option<String>,
+  /// Log level, default is "info"
+  #[serde(default = "default_log_level")]
+  pub level: String,
+}
+
+fn default_log_level() -> String {
+  "info".to_string()
+}
+
+impl Default for LogConfig {
+  fn default() -> Self {
+    Self {
+      file: None,
+      level: default_log_level(),
+    }
+  }
+}
+
 /// Extended configuration with HTTP address
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Config {
   #[serde(flatten)]
   pub base: RockraftConfig,
   pub http_addr: String,
+  /// Log configuration
+  #[serde(default)]
+  pub log: LogConfig,
 }
 
 /// Request for setting a key-value pair
@@ -66,17 +92,44 @@ impl IntoResponse for ErrorResponse {
   }
 }
 
+fn init_logging(config: &LogConfig) -> Result<(), Box<dyn std::error::Error>> {
+  let env_filter = EnvFilter::new(
+    std::env::var("RUST_LOG").unwrap_or_else(|_| config.level.clone())
+  );
+
+  match &config.file {
+    Some(log_file) => {
+      // Ensure parent directory exists
+      if let Some(parent) = std::path::Path::new(log_file).parent() {
+        std::fs::create_dir_all(parent)?;
+      }
+      
+      let file_appender = tracing_appender::rolling::never(
+        std::path::Path::new(log_file).parent().unwrap_or(std::path::Path::new(".")),
+        std::path::Path::new(log_file).file_name().unwrap_or_default()
+      );
+      
+      tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(file_appender))
+        .init();
+      
+      println!("Logging to file: {}", log_file);
+    }
+    None => {
+      tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+    }
+  }
+  
+  Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-  // Initialize tracing
-  tracing_subscriber::registry()
-    .with(EnvFilter::new(std::env::var("RUST_LOG").unwrap_or_else(
-      |_| "rockraft_cluster=info,tower_http=info,axum=info".into(),
-    )))
-    .with(tracing_subscriber::fmt::layer())
-    .init();
-
-  // Parse command line arguments
+  // Parse command line arguments first to get config path
   let args: Vec<String> = env::args().collect();
   let config_path = if args.len() > 2 && args[1] == "--conf" {
     args[2].clone()
@@ -86,15 +139,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::process::exit(1);
   };
 
-  // Load configuration
+  // Load configuration first (without logging)
   let config = load_config(&config_path)?;
+  
+  // Initialize tracing with config
+  init_logging(&config.log)?;
+  
   println!("Configuration loaded:");
   println!("  node_id: {}", config.base.node_id);
-  println!("  raft_addr: {}", config.base.raft.addr);
+  println!("  raft_addr: {}", config.base.raft.address);
   println!("  http_addr: {}", config.http_addr);
   println!("  data_path: {}", config.base.rocksdb.data_path);
   println!("  single: {}", config.base.raft.single);
   println!("  join: {:?}", config.base.raft.join);
+  println!("  log: {:?}", config.log);
 
   // Create Raft node
   println!("\nCreating Raft node...");
@@ -110,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   raft_node
     .raft()
     .wait(timeout)
-    .applied_index(Some(0), "init")
+    .applied_index(Some(1), "init")
     .await?;
   println!("✓ Initial log committed successfully!");
 

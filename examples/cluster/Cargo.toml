@@ -11,7 +11,8 @@ serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "std"] }
+tracing-appender = "0.2"
 tempfile = "3.9"
 rocksdb = "0.24.0"
 

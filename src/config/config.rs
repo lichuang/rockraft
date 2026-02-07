@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -25,7 +27,9 @@ pub struct RocksdbConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct RaftConfig {
-  pub addr: String,
+  pub address: String,
+
+  pub advertise_host: String,
 
   /// Single node raft cluster.
   pub single: bool,
@@ -47,6 +51,11 @@ impl Config {
         .into(),
       );
     }
+
+    let _a: SocketAddr = self.raft.address.parse().map_err(|e| {
+      StartupError::InvalidConfig(format!("{} while parsing {}", e, self.raft.address))
+    })?;
+
     Ok(())
   }
 }

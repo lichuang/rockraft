@@ -2,6 +2,8 @@ use crate::error::APIError;
 use crate::error::ManagementError;
 use crate::error::Result;
 use crate::error::StartupError;
+use crate::grpc::JoinConnectionFactory;
+use crate::raft::protobuf::raft_service_client::RaftServiceClient;
 use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::JoinRequest;
 use anyerror::AnyError;
@@ -12,6 +14,7 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, timeout};
 use tracing::debug;
+use tracing::error;
 use tracing::info;
 
 use std::result::Result as StdResult;
@@ -127,7 +130,7 @@ impl RaftNode {
     if config.raft.single {
       let node = Node {
         node_id: config.node_id,
-        endpoint: Endpoint::parse(&config.raft.addr)?,
+        endpoint: Endpoint::parse(&config.raft.address)?,
       };
       raft_node.init_cluster(node).await?;
     } else {
@@ -139,7 +142,7 @@ impl RaftNode {
 
   /// Start the Raft gRPC service in a separate thread
   async fn start_raft_service(raft_node: Arc<Self>, config: &Config) -> Result<()> {
-    let raft_addr = config.raft.addr.clone();
+    let raft_addr = config.raft.address.clone();
 
     // Subscribe to shutdown signal
     let mut shutdown_rx = raft_node.shutdown_tx.subscribe();
@@ -342,7 +345,7 @@ impl RaftNode {
     let mut errors = vec![];
 
     for addr in addrs {
-      if addr == &conf.addr {
+      if addr == &conf.address {
         continue;
       }
       for _i in 0..3 {
@@ -379,10 +382,20 @@ impl RaftNode {
   }
 
   async fn join_via(&self, conf: &RaftConfig, addr: &String) -> Result<()> {
-    let mut client = self.factory.new_client_with_addr(addr.clone());
+    let timeout = Some(Duration::from_millis(10_000));
+    let chan_result = JoinConnectionFactory::create_rpc_channel(addr, timeout, None).await;
+    let channel = match chan_result {
+      Ok(channel) => channel,
+      Err(e) => {
+        error!("connect to {} join cluster fail: {:?}", addr, e);
+        return Err(e);
+      }
+    };
+    let mut raft_client = RaftServiceClient::new(channel);
+
     let join_req = JoinRequest {
       node_id: self.config.node_id,
-      endpoint: Endpoint::parse(&conf.addr)?,
+      endpoint: Endpoint::parse(&conf.address)?,
     };
 
     let req = ForwardRequest {
@@ -390,7 +403,7 @@ impl RaftNode {
       body: ForwardRequestBody::Join(join_req),
     };
 
-    let response = client.forward(req).await?;
+    let response = raft_client.forward(req).await?;
     Ok(())
   }
 
@@ -398,6 +411,7 @@ impl RaftNode {
     &self,
     request: ForwardRequest,
   ) -> std::result::Result<ForwardResponse, Status> {
+    debug!("recv forward req: {:?}", request);
     Ok(ForwardResponse::Join(()))
   }
 }
