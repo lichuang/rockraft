@@ -316,7 +316,7 @@ mod tests {
   use openraft::Vote;
   use rocksdb::Options;
 
-  use crate::raft::types::{Cmd, KeyValue, LeaderId, LogId, Operation, UpsertKV};
+  use crate::raft::types::{Cmd, KeyValue, LeaderId, LogId, LogEntry, Operation, UpsertKV};
 
   use super::*;
 
@@ -345,10 +345,12 @@ mod tests {
   fn create_entry(term: u64, node_id: u64, index: u64) -> Entry {
     Entry {
       log_id: create_log_id(term, node_id, index),
-      payload: openraft::EntryPayload::Normal(Cmd::UpsertKV(UpsertKV::new(
-        format!("key_{}_{}", term, index),
-        Operation::Update(format!("data_{}_{}", term, index).into_bytes()),
-        None,
+      payload: openraft::EntryPayload::Normal(LogEntry::new(Cmd::UpsertKV(
+        UpsertKV::new(
+          format!("key_{}_{}", term, index),
+          Operation::Update(format!("data_{}_{}", term, index).into_bytes()),
+          None,
+        ),
       ))),
     }
   }

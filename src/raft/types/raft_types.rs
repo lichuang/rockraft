@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use super::cmd::Cmd;
 use super::endpoint::Endpoint;
+use super::log_entry::LogEntry;
 
 pub type SnapshotData = tokio::fs::File;
 
@@ -34,7 +35,7 @@ pub struct KeyValue {
 
 openraft::declare_raft_types!(
     pub TypeConfig:
-        D = Cmd,
+        D = LogEntry,
         R = AppResponseData,
         NodeId = NodeId,
         Node = Node,

@@ -265,7 +265,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
       let response = match entry.payload {
         EntryPayload::Blank => AppResponseData { value: None },
         EntryPayload::Normal(req) => {
-          match req {
+          match req.cmd {
             Cmd::UpsertKV(kv) => {
               let cf_data = &self.cf_sm_data();
               match kv.value {
@@ -283,7 +283,6 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
             Cmd::RemoveNode { node_id } => {
               self.remove_node(node_id)?;
             }
-            _ => {}
           }
 
           AppResponseData { value: None }
