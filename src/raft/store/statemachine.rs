@@ -25,7 +25,7 @@ use super::keys::SM_META_FAMILY;
 use super::snapshot::build_snapshot;
 use super::snapshot::get_current_snapshot;
 use crate::raft::store::snapshot::recover_snapshot;
-use crate::raft::types::AppResponseData;
+use crate::raft::types::AppliedState;
 use crate::raft::types::Cmd;
 use crate::raft::types::LogId;
 use crate::raft::types::Node;
@@ -263,7 +263,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
       last_applied_log_id = Some(entry.log_id);
 
       let response = match entry.payload {
-        EntryPayload::Blank => AppResponseData { value: None },
+        EntryPayload::Blank => AppliedState::None,
         EntryPayload::Normal(req) => {
           match req.cmd {
             Cmd::UpsertKV(kv) => {
@@ -285,11 +285,11 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
             }
           }
 
-          AppResponseData { value: None }
+          AppliedState::None
         }
         EntryPayload::Membership(mem) => {
           last_membership = Some(StoredMembership::new(Some(entry.log_id), mem));
-          AppResponseData { value: None }
+          AppliedState::None
         }
       };
 

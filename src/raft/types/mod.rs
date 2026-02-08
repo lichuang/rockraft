@@ -1,3 +1,4 @@
+mod applied_state;
 mod cmd;
 mod endpoint;
 mod log_entry;
@@ -6,6 +7,7 @@ mod raft_codec;
 mod raft_types;
 mod sys_data;
 
+pub use applied_state::AppliedState;
 pub use cmd::Cmd;
 pub use cmd::Operation;
 pub use cmd::UpsertKV;
@@ -17,7 +19,6 @@ pub use message::ForwardResponse;
 pub use message::JoinRequest;
 pub use raft_codec::RaftCodec;
 pub use raft_codec::read_logs_err;
-pub use raft_types::AppResponseData;
 pub use raft_types::Entry;
 pub use raft_types::ForwardToLeader;
 pub use raft_types::KeyValue;

@@ -1,17 +1,13 @@
 use bytes::Bytes;
+use openraft::error::Infallible;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::cmd::Cmd;
+use super::AppliedState;
 use super::endpoint::Endpoint;
 use super::log_entry::LogEntry;
 
 pub type SnapshotData = tokio::fs::File;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct AppResponseData {
-  pub value: Option<Bytes>,
-}
 
 pub type NodeId = u64;
 
@@ -36,7 +32,7 @@ pub struct KeyValue {
 openraft::declare_raft_types!(
     pub TypeConfig:
         D = LogEntry,
-        R = AppResponseData,
+        R = AppliedState,
         NodeId = NodeId,
         Node = Node,
         SnapshotData = SnapshotData

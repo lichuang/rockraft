@@ -1,5 +1,6 @@
 use crate::error::APIError;
 use crate::error::ManagementError;
+use crate::error::OpenRaft;
 use crate::error::Result;
 use crate::error::StartupError;
 use crate::grpc::JoinConnectionFactory;
@@ -109,7 +110,8 @@ impl RaftNode {
         log_store,
         state_machine.clone(),
       )
-      .await?,
+      .await
+      .map_err(|e| crate::error::OpenRaft::Fatal(e))?,
     );
 
     // Create shutdown channel

@@ -1,14 +1,19 @@
 use crate::error::ManagementError;
+use crate::error::OpenRaft;
 use crate::error::Result;
 use crate::error::RockRaftError;
 use crate::node::RaftNode;
+use crate::raft::types::AppliedState;
 use crate::raft::types::JoinRequest;
+use crate::raft::types::LogEntry;
 use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
 use anyerror::AnyError;
 use openraft::Raft;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use tracing::debug;
+use tracing::error;
 
 /// LeaderHandler provides methods that can only be called on a leader node
 pub struct LeaderHandler<'a> {
@@ -72,5 +77,55 @@ impl<'a> LeaderHandler<'a> {
       .map_err(|e| RockRaftError::Management(ManagementError::Join(AnyError::new(&e))))?;
 
     Ok(())
+  }
+
+  /// Write a log entry to the raft cluster
+  ///
+  /// This function writes a LogEntry to the raft log and waits for it to be applied.
+  /// It can only be called on the leader node.
+  ///
+  /// The `time_ms` field of the entry will be set to the current timestamp before writing.
+  ///
+  /// # Arguments
+  /// * `entry` - The LogEntry to write
+  ///
+  /// # Returns
+  /// * `Ok(AppliedState)` - The result of applying the log entry
+  /// * `Err(RockRaftError)` - If the operation failed or this node is not the leader
+  pub async fn write(&self, mut entry: LogEntry) -> Result<AppliedState> {
+    // Set the current timestamp in milliseconds, safe to unwrap
+    let now = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap_or_default()
+      .as_millis() as u64;
+    entry.time_ms = Some(now);
+
+    let node_id = self.raft().node_id();
+
+    match self.raft().client_write(entry).await {
+      Ok(response) => {
+        debug!(
+          node_id = %node_id,
+          log_id = %response.log_id,
+          "Successfully wrote log entry"
+        );
+        Ok(response.data)
+      }
+      Err(e) => {
+        error!(
+          node_id = %node_id,
+          error = %e,
+          "Failed to write log entry"
+        );
+        match e {
+          openraft::error::RaftError::APIError(api_err) => {
+            Err(RockRaftError::OpenRaft(OpenRaft::ClientWrite(api_err)))
+          }
+          openraft::error::RaftError::Fatal(fatal_err) => {
+            Err(RockRaftError::OpenRaft(OpenRaft::Fatal(fatal_err)))
+          }
+        }
+      }
+    }
   }
 }

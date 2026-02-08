@@ -2,18 +2,18 @@ mod api_error;
 mod grpc_connection_error;
 mod management_error;
 mod network_error;
+mod openraft_error;
 mod startup_error;
 
 pub use api_error::APIError;
 pub use grpc_connection_error::GrpcConnectionError;
 pub use management_error::ManagementError;
 pub use network_error::NetworkError;
+pub use openraft_error::OpenRaft;
 pub use startup_error::StartupError;
 
 use anyerror::AnyError;
 use thiserror::Error;
-
-use crate::raft::types::TypeConfig;
 
 #[derive(Error, Debug)]
 pub enum RockRaftError {
@@ -38,8 +38,11 @@ pub enum RockRaftError {
   #[error("IO error: {0}")]
   Io(#[from] std::io::Error),
 
-  #[error("Fatal Raft error: {0}")]
-  OpenraftFatal(#[from] openraft::error::Fatal<TypeConfig>),
+  #[error("OpenRaft error: {0}")]
+  OpenRaft(#[from] OpenRaft),
+
+  #[error("OpenRaft error: {0}")]
+  Raft(String),
 
   #[error("Storage error: {0}")]
   StorageError(#[from] AnyError),
