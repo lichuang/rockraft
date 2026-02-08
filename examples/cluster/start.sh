@@ -16,6 +16,7 @@ NC='\033[0m' # No Color
 NODES=("node1" "node2" "node3")
 PIDS=()
 LOG_DIR="logs"
+PID_DIR="pids"
 BIN="target/debug/cluster_example"
 DEFAULT_LOG_LEVEL="info"
 
@@ -36,10 +37,40 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Function to get data path from config
+get_data_path_from_config() {
+    local node=$1
+    local conf="conf/${node}.toml"
+    
+    # Parse rocksdb.data_path from config file
+    local data_path=$(grep -A 2 '\[rocksdb\]' "$conf" 2>/dev/null | grep 'data_path' | cut -d'=' -f2 | tr -d ' "')
+    
+    if [ -n "$data_path" ]; then
+        echo "$data_path"
+    else
+        echo ""
+    fi
+}
+
+# Function to get log file path from config
+get_log_file_from_config() {
+    local node=$1
+    local conf="conf/${node}.toml"
+    
+    # Parse log.file from config file
+    local log_file=$(grep -A 2 '\[log\]' "$conf" 2>/dev/null | grep 'file' | cut -d'=' -f2 | tr -d ' "')
+    
+    if [ -n "$log_file" ]; then
+        echo "$log_file"
+    else
+        echo ""
+    fi
+}
+
 # Function to check if a node is already running
 is_node_running() {
     local node=$1
-    local pid_file="${LOG_DIR}/${node}.pid"
+    local pid_file="${PID_DIR}/${node}.pid"
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
         if ps -p "$pid" > /dev/null 2>&1; then
@@ -59,7 +90,7 @@ start_node() {
     local log_level=$2
 
     if is_node_running "$node"; then
-        print_warning "Node $node is already running (PID: $(cat ${LOG_DIR}/${node}.pid))"
+        print_warning "Node $node is already running (PID: $(cat ${PID_DIR}/${node}.pid))"
         return 1
     fi
 
@@ -75,8 +106,15 @@ start_node() {
 
     print_info "Starting node $node (log level: $log_level)..."
 
-    # Create log directory if it doesn't exist
+    # Create necessary directories
     mkdir -p "$LOG_DIR"
+    mkdir -p "$PID_DIR"
+
+    # Ensure data directory exists
+    local data_path=$(get_data_path_from_config "$node")
+    if [ -n "$data_path" ]; then
+        mkdir -p "$data_path"
+    fi
 
     # Build RUST_LOG based on log level
     local rust_log
@@ -104,7 +142,7 @@ start_node() {
     local pid=$!
 
     # Save PID for later use
-    echo $pid > "${LOG_DIR}/${node}.pid"
+    echo $pid > "${PID_DIR}/${node}.pid"
 
     # Wait a bit and check if the process is still running
     sleep 1
@@ -115,7 +153,7 @@ start_node() {
         return 0
     else
         print_error "Failed to start node $node"
-        rm -f "${LOG_DIR}/${node}.pid"
+        rm -f "${PID_DIR}/${node}.pid"
         return 1
     fi
 }
@@ -125,7 +163,7 @@ stop_all_nodes() {
     print_info "Stopping all nodes..."
 
     for node in "${NODES[@]}"; do
-        local pid_file="${LOG_DIR}/${node}.pid"
+        local pid_file="${PID_DIR}/${node}.pid"
         if [ -f "$pid_file" ]; then
             local pid=$(cat "$pid_file")
             if ps -p "$pid" > /dev/null 2>&1; then
@@ -154,7 +192,7 @@ check_status() {
     echo ""
 
     for node in "${NODES[@]}"; do
-        local pid_file="${LOG_DIR}/${node}.pid"
+        local pid_file="${PID_DIR}/${node}.pid"
         if [ -f "$pid_file" ]; then
             local pid=$(cat "$pid_file")
             if ps -p "$pid" > /dev/null 2>&1; then
@@ -169,21 +207,6 @@ check_status() {
         fi
     done
     echo ""
-}
-
-# Function to get log file path from config
-get_log_file_from_config() {
-    local node=$1
-    local conf="conf/${node}.toml"
-    
-    # Parse log.file from config file
-    local log_file=$(grep -A 2 '\[log\]' "$conf" 2>/dev/null | grep 'file' | cut -d'=' -f2 | tr -d ' "')
-    
-    if [ -n "$log_file" ]; then
-        echo "$log_file"
-    else
-        echo ""
-    fi
 }
 
 # Function to show logs for a specific node
@@ -208,7 +231,7 @@ show_logs() {
 
 # Function to clean up logs
 cleanup_logs() {
-    print_info "Cleaning up log files and data..."
+    print_info "Cleaning up log files..."
     rm -rf "$LOG_DIR"
     # Also clean up log files defined in configs
     for node in "${NODES[@]}"; do
@@ -221,6 +244,83 @@ cleanup_logs() {
         fi
     done
     print_success "Log files cleaned"
+}
+
+# Function to clean up RocksDB data directories
+cleanup_data() {
+    print_info "Cleaning up RocksDB data directories..."
+    
+    # First stop all nodes if running
+    local nodes_running=false
+    for node in "${NODES[@]}"; do
+        if is_node_running "$node"; then
+            nodes_running=true
+            break
+        fi
+    done
+    
+    if [ "$nodes_running" = true ]; then
+        print_warning "Some nodes are still running. Stopping them first..."
+        stop_all_nodes
+        sleep 2
+    fi
+    
+    # Clean up data directories
+    for node in "${NODES[@]}"; do
+        local data_path=$(get_data_path_from_config "$node")
+        if [ -n "$data_path" ]; then
+            if [ -d "$data_path" ]; then
+                print_info "Removing $node data directory: $data_path"
+                rm -rf "$data_path"
+            fi
+        fi
+    done
+    
+    print_success "RocksDB data directories cleaned"
+}
+
+# Function to clean up everything (logs + data + pids)
+cleanup_all() {
+    print_info "Cleaning up everything (logs, data, and pid files)..."
+    
+    # Stop all nodes first
+    local nodes_running=false
+    for node in "${NODES[@]}"; do
+        if is_node_running "$node"; then
+            nodes_running=true
+            break
+        fi
+    done
+    
+    if [ "$nodes_running" = true ]; then
+        print_warning "Some nodes are still running. Stopping them first..."
+        stop_all_nodes
+        sleep 2
+    fi
+    
+    # Clean logs
+    rm -rf "$LOG_DIR"
+    for node in "${NODES[@]}"; do
+        local log_file=$(get_log_file_from_config "$node")
+        if [ -n "$log_file" ]; then
+            rm -f "$log_file"
+            local log_dir=$(dirname "$log_file")
+            rmdir "$log_dir" 2>/dev/null || true
+        fi
+    done
+    
+    # Clean data directories
+    for node in "${NODES[@]}"; do
+        local data_path=$(get_data_path_from_config "$node")
+        if [ -n "$data_path" ] && [ -d "$data_path" ]; then
+            rm -rf "$data_path"
+        fi
+    done
+    
+    # Clean pid directory
+    rm -rf "$PID_DIR"
+    
+    print_success "All data cleaned (logs, RocksDB data, and pid files)"
 }
 
 # Function to test the cluster with curl
@@ -329,8 +429,16 @@ case "$1" in
         cleanup_logs
         ;;
 
+    clean-data)
+        cleanup_data
+        ;;
+
+    clean-all)
+        cleanup_all
+        ;;
+
     *)
-        echo "Usage: $0 {start|stop|restart|status|logs|test|clean}"
+        echo "Usage: $0 {start|stop|restart|status|logs|test|clean|clean-data|clean-all}"
         echo ""
         echo "Commands:"
         echo "  start [level]  - Start all cluster nodes (log level: info|debug|trace|warn|error)"
@@ -340,14 +448,17 @@ case "$1" in
         echo "  logs <node>   - Show logs for a specific node (tail -f)"
         echo "  test           - Test the cluster with curl"
         echo "  clean          - Clean up log files"
+        echo "  clean-data     - Clean up RocksDB data directories"
+        echo "  clean-all      - Clean up everything (logs, data, and pid files)"
         echo ""
         echo "Examples:"
         echo "  $0 start              # Start all nodes with info level"
         echo "  $0 start debug        # Start all nodes with debug level"
-        echo "  $0 start trace         # Start all nodes with trace level"
         echo "  $0 status             # Check cluster status"
         echo "  $0 logs node1         # View node1 logs"
         echo "  $0 test               # Test cluster"
+        echo "  $0 clean-data         # Clean RocksDB data directories"
+        echo "  $0 clean-all          # Clean everything for fresh start"
         echo "  $0 stop               # Stop all nodes"
         exit 1
         ;;
