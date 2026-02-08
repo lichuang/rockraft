@@ -5,12 +5,12 @@ http_addr = "127.0.0.1:8002"
 address = "127.0.0.1:7002"
 advertise_host = "localhost"
 single = false
-join = ["127.0.0.1:7001"]
+join = ["localhost:7001", "localhost:7002", "localhost:7003"]
 
 [rocksdb]
 data_path = "/tmp/rockraft_cluster/node2"
 max_open_files = 10000
 
 [log]
-file = ".rockraft_data/node2.log"
+file = "/tmp/rockraft_cluster/logs/node2.log"
 level = "info"

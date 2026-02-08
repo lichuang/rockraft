@@ -26,6 +26,7 @@ use tonic::Status;
 use tonic::transport::Server;
 
 use super::LeaderHandler;
+use super::parsed_config::ParsedConfig;
 use crate::config::Config;
 use crate::config::RaftConfig;
 use crate::engine::RocksDBEngine;
@@ -43,7 +44,7 @@ pub struct RaftNode {
   engine: Arc<RocksDBEngine>,
   raft: Arc<Raft<TypeConfig>>,
 
-  config: Config,
+  config: ParsedConfig,
 
   factory: NetworkFactory,
 
@@ -117,7 +118,7 @@ impl RaftNode {
     Ok(Arc::new(Self {
       engine,
       raft,
-      config: config.clone(),
+      config: ParsedConfig::from(config)?,
       factory,
       state_machine: Arc::new(state_machine),
       shutdown_tx,
@@ -126,23 +127,24 @@ impl RaftNode {
     }))
   }
 
-  pub async fn start(raft_node: Arc<Self>, config: &Config) -> Result<()> {
-    if config.raft.single {
+  pub async fn start(raft_node: Arc<Self>) -> Result<()> {
+    let config = &raft_node.config;
+    if config.raft_single {
       let node = Node {
         node_id: config.node_id,
-        endpoint: Endpoint::parse(&config.raft.address)?,
+        endpoint: config.raft_endpoint.clone(),
       };
       raft_node.init_cluster(node).await?;
     } else {
       raft_node.join_cluster().await?;
     }
 
-    Self::start_raft_service(raft_node, config).await
+    Self::start_raft_service(raft_node).await
   }
 
   /// Start the Raft gRPC service in a separate thread
-  async fn start_raft_service(raft_node: Arc<Self>, config: &Config) -> Result<()> {
-    let raft_addr = config.raft.address.clone();
+  async fn start_raft_service(raft_node: Arc<Self>) -> Result<()> {
+    let raft_endpoint = raft_node.config.raft_endpoint.clone();
 
     // Subscribe to shutdown signal
     let mut shutdown_rx = raft_node.shutdown_tx.subscribe();
@@ -152,21 +154,21 @@ impl RaftNode {
 
     // Spawn gRPC server in a separate thread/task
     let handle = tokio::task::spawn(async move {
-      tracing::info!("Starting Raft gRPC service on {}", raft_addr);
+      tracing::info!("Starting Raft gRPC service on {}", raft_endpoint);
 
       // Create gRPC service instance
       let raft_service = RaftServiceImpl::new(raft_node_for_service);
 
       // Create TCP listener
-      let listener = match TcpListener::bind(&raft_addr).await {
+      let listener = match TcpListener::bind(&raft_endpoint.to_string()).await {
         Ok(l) => l,
         Err(e) => {
-          tracing::error!("Failed to bind gRPC server to {}: {}", raft_addr, e);
+          tracing::error!("Failed to bind gRPC server to {}: {}", raft_endpoint, e);
           return;
         }
       };
 
-      tracing::info!("Raft gRPC service listening on {}", raft_addr);
+      tracing::info!("Raft gRPC service listening on {}", raft_endpoint);
 
       // Run the gRPC server with shutdown handling
       let server_future = Server::builder()
@@ -326,8 +328,8 @@ impl RaftNode {
   }
 
   pub async fn join_cluster(&self) -> Result<()> {
-    let raft_config = &self.config.raft;
-    if raft_config.join.is_empty() {
+    let config = &self.config;
+    if config.raft_join.is_empty() {
       info!("'--join' is empty, do not need joining cluster");
       return Ok(());
     }
@@ -337,24 +339,27 @@ impl RaftNode {
       return Ok(());
     }
 
-    Ok(self.do_join_cluster(raft_config).await?.into())
+    Ok(self.do_join_cluster().await?.into())
   }
 
-  async fn do_join_cluster(&self, conf: &RaftConfig) -> StdResult<(), ManagementError> {
-    let addrs = &conf.join;
+  async fn do_join_cluster(&self) -> StdResult<(), ManagementError> {
+    let config = &self.config;
+    let addrs = &config.raft_join;
     let mut errors = vec![];
+    let raft_address = config.raft_endpoint.to_string();
+    let raft_advertise_address = config.raft_advertise_endpoint.to_string();
 
     for addr in addrs {
-      if addr == &conf.address {
+      if addr == &raft_address || addr == &raft_advertise_address {
+        debug!("ignore join cluster via self node address {}", addr);
         continue;
       }
       for _i in 0..3 {
-        let result = self.join_via(conf, addr).await;
+        let result = self.join_via(addr).await;
         match result {
           Ok(x) => return Ok(x),
           Err(api_error) => {
             let can_retry = api_error.is_retryable();
-            debug!("can_retry: {}", can_retry);
 
             if can_retry {
               debug!("try to connect to addr {} again", addr);
@@ -381,7 +386,8 @@ impl RaftNode {
     ))))
   }
 
-  async fn join_via(&self, conf: &RaftConfig, addr: &String) -> Result<()> {
+  async fn join_via(&self, addr: &String) -> Result<()> {
+    let config = &self.config;
     let timeout = Some(Duration::from_millis(10_000));
     let chan_result = JoinConnectionFactory::create_rpc_channel(addr, timeout, None).await;
     let channel = match chan_result {
@@ -394,8 +400,8 @@ impl RaftNode {
     let mut raft_client = RaftServiceClient::new(channel);
 
     let join_req = JoinRequest {
-      node_id: self.config.node_id,
-      endpoint: Endpoint::parse(&conf.address)?,
+      node_id: config.node_id,
+      endpoint: config.raft_endpoint.clone(),
     };
 
     let req = ForwardRequest {
@@ -428,7 +434,8 @@ mod tests {
     Config {
       node_id,
       raft: crate::config::RaftConfig {
-        addr: addr.to_string(),
+        address: addr.to_string(),
+        advertise_host: "".to_string(),
         single: true,
         join: vec![],
       },

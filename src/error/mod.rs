@@ -64,6 +64,11 @@ impl RockRaftError {
   pub fn is_retryable(&self) -> bool {
     match self {
       RockRaftError::API(api) => api.is_retryable(),
+      RockRaftError::GrpcConnection(err) => {
+        // Connection errors (e.g., Connection refused) are typically transient
+        // and may resolve if the target service is still starting up
+        matches!(err, GrpcConnectionError::CannotConnect { .. })
+      }
       _ => false,
     }
   }

@@ -7,20 +7,24 @@ use crate::error::NetworkError;
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct Endpoint {
-  addr: String,
+  address: String,
   port: u32,
 }
 
 impl Endpoint {
   pub fn new(addr: impl ToString, port: u32) -> Self {
     Self {
-      addr: addr.to_string(),
+      address: addr.to_string(),
       port,
     }
   }
 
+  pub fn to_string(&self) -> String {
+    format!("{}:{}", self.address, self.port)
+  }
+
   pub fn addr(&self) -> &str {
-    &self.addr
+    &self.address
   }
 
   pub fn port(&self) -> u32 {
@@ -48,7 +52,7 @@ impl Endpoint {
 
 impl fmt::Display for Endpoint {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-    write!(f, "{}:{}", self.addr, self.port)
+    write!(f, "{}:{}", self.address, self.port)
   }
 }
 

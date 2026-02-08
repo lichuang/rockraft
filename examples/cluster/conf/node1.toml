@@ -12,5 +12,5 @@ data_path = "/tmp/rockraft_cluster/node1"
 max_open_files = 10000
 
 [log]
-file = ".rockraft_data/node1.log"
+file = "/tmp/rockraft_cluster/logs/node1.log"
 level = "info"

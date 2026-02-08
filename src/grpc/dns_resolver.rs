@@ -105,3 +105,28 @@ impl Future for DNSServiceFuture {
     })
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn test_resolve_localhost() -> Result<()> {
+    let resolver = DNSResolver::instance()?;
+    let addrs = resolver.resolve("localhost").await?;
+
+    assert!(
+      !addrs.is_empty(),
+      "localhost should resolve to at least one IP address"
+    );
+
+    let has_v4_loopback = addrs.iter().any(|addr| matches!(addr, IpAddr::V4(ip) if ip.is_loopback()));
+    assert!(
+      has_v4_loopback,
+      "localhost should resolve to 127.0.0.1 (IPv4 loopback), got: {:?}",
+      addrs
+    );
+
+    Ok(())
+  }
+}

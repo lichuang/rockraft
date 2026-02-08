@@ -11,7 +11,7 @@ impl RaftNodeBuilder {
     config.validate()?;
 
     let raft_node = RaftNode::create(config).await?;
-    RaftNode::start(raft_node.clone(), config).await?;
+    RaftNode::start(raft_node.clone()).await?;
     Ok(raft_node)
   }
 }
