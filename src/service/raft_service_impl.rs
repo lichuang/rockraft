@@ -44,7 +44,7 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
     let forward_req: ForwardRequest = bincode::deserialize(&req.data)
       .map_err(|e| Status::internal(format!("Failed to deserialize forward request: {}", e)))?;
-    let response = self.node.handle_forward(forward_req).await;
+    let response = self.node.handle_forward_request(forward_req).await;
     let reply = Self::result_to_raft_reply(response);
     Ok(Response::new(reply))
   }

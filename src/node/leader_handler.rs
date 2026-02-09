@@ -4,6 +4,7 @@ use crate::error::Result;
 use crate::error::RockRaftError;
 use crate::node::RaftNode;
 use crate::raft::types::AppliedState;
+use crate::raft::types::Cmd;
 use crate::raft::types::JoinRequest;
 use crate::raft::types::LogEntry;
 use crate::raft::types::Node;
@@ -38,8 +39,8 @@ impl<'a> LeaderHandler<'a> {
 
   /// Join a node to the cluster
   ///
-  /// This function adds a node to the raft cluster. It first adds the node as a learner,
-  /// then changes the membership to include the new node as a voter.
+  /// This function adds a node to the raft cluster. It first writes a log entry
+  /// to add the node, then changes the membership to include the new node as a voter.
   ///
   /// # Arguments
   /// * `req` - The JoinRequest containing node_id and endpoint
@@ -49,30 +50,35 @@ impl<'a> LeaderHandler<'a> {
   /// * `Err(RockRaftError)` - If the operation failed
   pub async fn join(&self, req: JoinRequest) -> Result<()> {
     let node_id = req.node_id;
-    let node = Node {
-      node_id,
-      endpoint: req.endpoint,
-    };
 
-    // Add the node as a learner first (non-blocking)
-    self
-      .raft()
-      .add_learner(node_id, node, false)
-      .await
-      .map_err(|e| RockRaftError::Management(ManagementError::Join(AnyError::new(&e))))?;
-
-    // Get current membership and add the new node as voter
+    // Get current membership and check if node already exists
     let metrics = self.raft().metrics().borrow().clone();
     let membership = metrics.membership_config.membership();
 
-    // Build new voter set including existing voters and the new node
-    let mut new_voters: BTreeSet<u64> = membership.voter_ids().collect();
-    new_voters.insert(node_id);
+    let voters: BTreeSet<u64> = membership.voter_ids().collect();
+    if voters.contains(&node_id) {
+      return Ok(());
+    }
 
-    // Change membership to include the new node as voter (retain removed voters as learners)
+    let node = Node {
+      node_id,
+      endpoint: req.endpoint.clone(),
+    };
+
+    // Write a log entry to add the node
+    let entry = LogEntry::new(Cmd::AddNode {
+      node: node.clone(),
+      overriding: false,
+    });
+    self.write(entry).await?;
+
+    // Change membership to add the new node as voter (retain removed voters as learners)
+    let mut add_voters: BTreeSet<u64> = BTreeSet::new();
+    add_voters.insert(node_id);
+
     self
       .raft()
-      .change_membership(new_voters, true)
+      .change_membership(add_voters, false)
       .await
       .map_err(|e| RockRaftError::Management(ManagementError::Join(AnyError::new(&e))))?;
 

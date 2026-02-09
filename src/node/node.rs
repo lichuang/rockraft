@@ -1,10 +1,10 @@
-use crate::error::APIError;
 use crate::error::ManagementError;
-use crate::error::OpenRaft;
 use crate::error::Result;
+use crate::error::RockRaftError;
 use crate::error::StartupError;
 use crate::grpc::JoinConnectionFactory;
 use crate::raft::protobuf::raft_service_client::RaftServiceClient;
+use crate::raft::protobuf as pb;
 use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::JoinRequest;
 use anyerror::AnyError;
@@ -388,18 +388,33 @@ impl RaftNode {
     ))))
   }
 
-  async fn join_via(&self, addr: &String) -> Result<()> {
-    let config = &self.config;
+  async fn send_forward_request(
+    &self,
+    addr: &String,
+    request: ForwardRequest,
+  ) -> std::result::Result<pb::RaftReply, Status> {
     let timeout = Some(Duration::from_millis(10_000));
     let chan_result = JoinConnectionFactory::create_rpc_channel(addr, timeout, None).await;
     let channel = match chan_result {
       Ok(channel) => channel,
       Err(e) => {
-        error!("connect to {} join cluster fail: {:?}", addr, e);
-        return Err(e);
+        error!("Failed to connect to {}: {:?}", addr, e);
+        return Err(Status::internal(format!("Failed to connect: {}", e)));
       }
     };
+
     let mut raft_client = RaftServiceClient::new(channel);
+
+    let response = raft_client
+      .forward(request)
+      .await
+      .map_err(|e| Status::internal(format!("Failed to forward request: {}", e)))?;
+
+    Ok(response.into_inner())
+  }
+
+  async fn join_via(&self, addr: &String) -> Result<()> {
+    let config = &self.config;
 
     let join_req = JoinRequest {
       node_id: config.node_id,
@@ -411,16 +426,89 @@ impl RaftNode {
       body: ForwardRequestBody::Join(join_req),
     };
 
-    let response = raft_client.forward(req).await?;
-    Ok(())
+    let reply = self.send_forward_request(addr, req).await?;
+
+    if reply.error.is_empty() {
+      Ok(())
+    } else {
+      Err(RockRaftError::Raft(format!(
+        "Join failed: {:?}",
+        String::from_utf8_lossy(&reply.error)
+      )))
+    }
   }
 
-  pub async fn handle_forward(
+  async fn handle_join_request(
+    &self,
+    join_req: JoinRequest,
+  ) -> std::result::Result<ForwardResponse, Status> {
+    let leader_handler = LeaderHandler::new(self);
+    match leader_handler.join(join_req).await {
+      Ok(()) => Ok(ForwardResponse::Join(())),
+      Err(e) => {
+        error!("Failed to join node: {:?}", e);
+        Err(Status::internal(format!("Failed to join node: {}", e)))
+      }
+    }
+  }
+
+  async fn forward_request_to_leader(
+    &self,
+    forward_err: ForwardToLeader,
+    request: ForwardRequest,
+  ) -> std::result::Result<ForwardResponse, Status> {
+    match forward_err.leader_id {
+      Some(leader_id) => {
+        // Get leader's endpoint from membership
+        let membership = self
+          .state_machine
+          .get_last_membership()
+          .map_err(|e| Status::internal(format!("Failed to get membership: {}", e)))?;
+
+        let leader_node = membership
+          .membership()
+          .get_node(&leader_id)
+          .ok_or_else(|| Status::internal("Leader id not found in membership"))?;
+
+        let leader_addr = leader_node.endpoint.to_string();
+
+        let reply = self.send_forward_request(&leader_addr, request).await?;
+
+        if reply.error.is_empty() {
+          // Deserialize the response data
+          let forward_response: ForwardResponse = bincode::deserialize(&reply.data)
+            .map_err(|e| Status::internal(format!("Failed to deserialize response: {}", e)))?;
+          Ok(forward_response)
+        } else {
+          Err(Status::internal(format!(
+            "Leader returned error: {:?}",
+            String::from_utf8_lossy(&reply.error)
+          )))
+        }
+      }
+      None => Err(Status::internal("No leader available to forward request")),
+    }
+  }
+
+  pub async fn handle_forward_request(
     &self,
     request: ForwardRequest,
   ) -> std::result::Result<ForwardResponse, Status> {
     debug!("recv forward req: {:?}", request);
-    Ok(ForwardResponse::Join(()))
+
+    // Check if this node is the leader
+    match self.assume_leader().await {
+      Ok(_) => {
+        // This node is leader, handle the request based on body type
+        match request.body {
+          ForwardRequestBody::Join(join_req) => self.handle_join_request(join_req).await,
+        }
+      }
+      Err(forward_err) => {
+        // This node is not the leader, forward the entire request to the leader
+        self.forward_request_to_leader(forward_err, request).await
+      }
+    }
   }
 }
 
