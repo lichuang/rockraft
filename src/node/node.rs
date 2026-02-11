@@ -3,8 +3,8 @@ use crate::error::Result;
 use crate::error::RockRaftError;
 use crate::error::StartupError;
 use crate::grpc::JoinConnectionFactory;
-use crate::raft::protobuf::raft_service_client::RaftServiceClient;
 use crate::raft::protobuf as pb;
+use crate::raft::protobuf::raft_service_client::RaftServiceClient;
 use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::JoinRequest;
 use anyerror::AnyError;
@@ -489,7 +489,8 @@ impl RaftNode {
   fn is_retriable_error(status: &Status) -> bool {
     matches!(
       status.code(),
-      tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
+      //tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
+      tonic::Code::Unavailable
     )
   }
 
@@ -513,45 +514,41 @@ impl RaftNode {
         }
         Err(forward_err) => {
           // This node is not the leader, forward the entire request to the leader
-          match forward_err.leader_id {
+          let retry_reason = match forward_err.leader_id {
             Some(leader_id) => {
-              match self.forward_request_to_leader(leader_id, request.clone()).await {
+              match self
+                .forward_request_to_leader(leader_id, request.clone())
+                .await
+              {
                 Ok(response) => return Ok(response),
                 Err(e) => {
-                  // Check if this is a retriable error (network/connection related)
-                  if Self::is_retriable_error(&e) && attempt < MAX_RETRIES - 1 {
-                    debug!(
-                      "Failed to forward request to leader ({}), retrying {}/{}",
-                      e,
-                      attempt + 1,
-                      MAX_RETRIES
-                    );
-                    sleep(RETRY_INTERVAL).await;
-                    continue;
+                  // Only retry on retriable errors, otherwise return the error
+                  if Self::is_retriable_error(&e) {
+                    Some(format!("Failed to forward request ({e})"))
                   } else {
-                    // Non-retriable error or max retries reached
                     return Err(e);
                   }
                 }
               }
             }
             None => {
-              // No leader available, retry if not the last attempt
-              if attempt < MAX_RETRIES - 1 {
-                debug!(
-                  "No leader available to forward request, retrying {}/{}",
-                  attempt + 1,
-                  MAX_RETRIES
-                );
-                sleep(RETRY_INTERVAL).await;
-                continue;
-              } else {
-                return Err(Status::internal(
-                  "No leader available to forward request after max retries",
-                ));
-              }
+              // No leader available, need to retry
+              Some("No leader available to forward request".to_string())
+            }
+          };
+
+          // Retry if we have a reason and attempts remain
+          if let Some(reason) = retry_reason {
+            if attempt < MAX_RETRIES - 1 {
+              debug!("{}, retrying {}/{}", reason, attempt + 1, MAX_RETRIES);
+              sleep(RETRY_INTERVAL).await;
+              continue;
             }
           }
+
+          return Err(Status::internal(
+            "No leader available to forward request after max retries",
+          ));
         }
       }
     }
