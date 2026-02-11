@@ -454,40 +454,43 @@ impl RaftNode {
 
   async fn forward_request_to_leader(
     &self,
-    forward_err: ForwardToLeader,
+    leader_id: NodeId,
     request: ForwardRequest,
   ) -> std::result::Result<ForwardResponse, Status> {
-    match forward_err.leader_id {
-      Some(leader_id) => {
-        // Get leader's endpoint from membership
-        let membership = self
-          .state_machine
-          .get_last_membership()
-          .map_err(|e| Status::internal(format!("Failed to get membership: {}", e)))?;
+    // Get leader's endpoint from membership
+    let membership = self
+      .state_machine
+      .get_last_membership()
+      .map_err(|e| Status::internal(format!("Failed to get membership: {}", e)))?;
 
-        let leader_node = membership
-          .membership()
-          .get_node(&leader_id)
-          .ok_or_else(|| Status::internal("Leader id not found in membership"))?;
+    let leader_node = membership
+      .membership()
+      .get_node(&leader_id)
+      .ok_or_else(|| Status::internal("Leader id not found in membership"))?;
 
-        let leader_addr = leader_node.endpoint.to_string();
+    let leader_addr = leader_node.endpoint.to_string();
 
-        let reply = self.send_forward_request(&leader_addr, request).await?;
+    let reply = self.send_forward_request(&leader_addr, request).await?;
 
-        if reply.error.is_empty() {
-          // Deserialize the response data
-          let forward_response: ForwardResponse = bincode::deserialize(&reply.data)
-            .map_err(|e| Status::internal(format!("Failed to deserialize response: {}", e)))?;
-          Ok(forward_response)
-        } else {
-          Err(Status::internal(format!(
-            "Leader returned error: {:?}",
-            String::from_utf8_lossy(&reply.error)
-          )))
-        }
-      }
-      None => Err(Status::internal("No leader available to forward request")),
+    if reply.error.is_empty() {
+      // Deserialize the response data
+      let forward_response: ForwardResponse = bincode::deserialize(&reply.data)
+        .map_err(|e| Status::internal(format!("Failed to deserialize response: {}", e)))?;
+      Ok(forward_response)
+    } else {
+      Err(Status::internal(format!(
+        "Leader returned error: {:?}",
+        String::from_utf8_lossy(&reply.error)
+      )))
     }
+  }
+
+  /// Check if the error is retriable (network/connection related)
+  fn is_retriable_error(status: &Status) -> bool {
+    matches!(
+      status.code(),
+      tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
+    )
   }
 
   pub async fn handle_forward_request(
@@ -496,19 +499,66 @@ impl RaftNode {
   ) -> std::result::Result<ForwardResponse, Status> {
     debug!("recv forward req: {:?}", request);
 
-    // Check if this node is the leader
-    match self.assume_leader().await {
-      Ok(_) => {
-        // This node is leader, handle the request based on body type
-        match request.body {
-          ForwardRequestBody::Join(join_req) => self.handle_join_request(join_req).await,
+    const MAX_RETRIES: u32 = 20;
+    const RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+    for attempt in 0..MAX_RETRIES {
+      // Check if this node is the leader
+      match self.assume_leader().await {
+        Ok(_) => {
+          // This node is leader, handle the request based on body type
+          return match &request.body {
+            ForwardRequestBody::Join(join_req) => self.handle_join_request(join_req.clone()).await,
+          };
+        }
+        Err(forward_err) => {
+          // This node is not the leader, forward the entire request to the leader
+          match forward_err.leader_id {
+            Some(leader_id) => {
+              match self.forward_request_to_leader(leader_id, request.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                  // Check if this is a retriable error (network/connection related)
+                  if Self::is_retriable_error(&e) && attempt < MAX_RETRIES - 1 {
+                    debug!(
+                      "Failed to forward request to leader ({}), retrying {}/{}",
+                      e,
+                      attempt + 1,
+                      MAX_RETRIES
+                    );
+                    sleep(RETRY_INTERVAL).await;
+                    continue;
+                  } else {
+                    // Non-retriable error or max retries reached
+                    return Err(e);
+                  }
+                }
+              }
+            }
+            None => {
+              // No leader available, retry if not the last attempt
+              if attempt < MAX_RETRIES - 1 {
+                debug!(
+                  "No leader available to forward request, retrying {}/{}",
+                  attempt + 1,
+                  MAX_RETRIES
+                );
+                sleep(RETRY_INTERVAL).await;
+                continue;
+              } else {
+                return Err(Status::internal(
+                  "No leader available to forward request after max retries",
+                ));
+              }
+            }
+          }
         }
       }
-      Err(forward_err) => {
-        // This node is not the leader, forward the entire request to the leader
-        self.forward_request_to_leader(forward_err, request).await
-      }
     }
+
+    Err(Status::internal(
+      "No leader available to forward request after max retries",
+    ))
   }
 }
 
