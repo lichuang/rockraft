@@ -7,7 +7,7 @@ use axum::{
 };
 use rockraft::config::Config as RockraftConfig;
 use rockraft::node::RaftNodeBuilder;
-use rockraft::raft::types::{Cmd, Endpoint, Node};
+use rockraft::raft::types::{Cmd, GetKVReq, LeaveRequest, LogEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -59,6 +59,12 @@ pub struct SetValueRequest {
   pub value: String,
 }
 
+/// Request for leaving the cluster
+#[derive(Debug, Deserialize)]
+pub struct LeaveRequestHttp {
+  pub node_id: u64,
+}
+
 /// Response for successful operations
 #[derive(Debug, Serialize)]
 pub struct SuccessResponse {
@@ -79,11 +85,10 @@ pub struct ErrorResponse {
   pub error: String,
 }
 
-/// Application state containing RaftNode and RocksDB
+/// Application state containing RaftNode
 #[derive(Clone)]
 pub struct AppState {
   pub raft_node: Arc<rockraft::node::RaftNode>,
-  pub data_path: String,
 }
 
 impl IntoResponse for ErrorResponse {
@@ -159,9 +164,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let raft_node = RaftNodeBuilder::build(&config.base).await?;
   println!("✓ Raft node created successfully!");
 
-  // Initialize cluster if this is node 1
-  let data_path = config.base.rocksdb.data_path.clone();
-
   // Wait for initial log to be applied
   println!("\nWaiting for initial log to be committed...");
   let timeout = Some(std::time::Duration::from_secs(10));
@@ -175,7 +177,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   // Create application state
   let state = AppState {
     raft_node: raft_node.clone(),
-    data_path: data_path.clone(),
   };
 
   // Build HTTP router
@@ -183,6 +184,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .route("/get", get(get_handler))
     .route("/set", post(set_handler))
     .route("/delete", post(delete_handler))
+    .route("/leave", post(leave_handler))
+    .route("/members", get(members_handler))
     .route("/health", get(health_handler))
     .route("/metrics", get(metrics_handler))
     .layer(CorsLayer::permissive())
@@ -203,6 +206,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     http_addr
   );
   println!("  POST http://{}/delete          - Delete a key", http_addr);
+  println!("  POST http://{}/leave           - Remove a node from cluster", http_addr);
+  println!("  GET  http://{}/members         - Get cluster members", http_addr);
   println!("  GET  http://{}/health          - Health check", http_addr);
   println!(
     "  GET  http://{}/metrics         - Cluster metrics",
@@ -236,25 +241,20 @@ async fn get_handler(
     error: "Missing 'key' parameter".to_string(),
   })?;
 
-  // Open RocksDB connection for reading
-  let db = rocksdb::DB::open_default(&state.data_path).map_err(|e| ErrorResponse {
-    error: format!("Failed to open database: {}", e),
-  })?;
-
-  match db.get(key.as_bytes()) {
-    Ok(Some(value)) => {
-      let value_str = String::from_utf8(value).unwrap_or_else(|_| "Invalid UTF-8".to_string());
+  // Use raft_node.read() which handles reading from the state machine
+  let req = GetKVReq { key: key.clone() };
+  match state.raft_node.read(req).await {
+    Ok(value_opt) => {
+      let value_str = value_opt.map(|v| {
+        String::from_utf8(v).unwrap_or_else(|_| "Invalid UTF-8".to_string())
+      });
       Ok(Json(GetResponse {
         key: key.clone(),
-        value: Some(value_str),
+        value: value_str,
       }))
     }
-    Ok(None) => Ok(Json(GetResponse {
-      key: key.clone(),
-      value: None,
-    })),
     Err(e) => Err(ErrorResponse {
-      error: format!("Database error: {}", e),
+      error: format!("Failed to read: {}", e),
     }),
   }
 }
@@ -264,38 +264,25 @@ async fn set_handler(
   State(state): State<AppState>,
   Json(payload): Json<SetValueRequest>,
 ) -> Result<impl IntoResponse, ErrorResponse> {
-  // Use LeaderHandler to write to Raft cluster
-  match state.raft_node.assume_leader().await {
-    Ok(leader_handler) => {
-      // This node is leader, write directly
-      let upsert_kv = Cmd::UpsertKV(rockraft::raft::types::UpsertKV::insert(
-        &payload.key,
-        payload.value.as_bytes(),
-      ));
+  // Create a LogEntry with UpsertKV command
+  let upsert_kv = Cmd::UpsertKV(rockraft::raft::types::UpsertKV::insert(
+    &payload.key,
+    payload.value.as_bytes(),
+  ));
+  let entry = LogEntry::new(upsert_kv);
 
-      match leader_handler.raft().client_write(upsert_kv).await {
-        Ok(response) => {
-          tracing::info!("Write successful: log_id={:?}", response.log_id);
-          Ok(Json(SuccessResponse {
-            success: true,
-            message: format!("Key '{}' set successfully", payload.key),
-          }))
-        }
-        Err(e) => Err(ErrorResponse {
-          error: format!("Failed to write: {}", e),
-        }),
-      }
+  // Use raft_node.write() which handles leader forwarding automatically
+  match state.raft_node.write(entry).await {
+    Ok(_) => {
+      tracing::info!("Write successful: key='{}'", payload.key);
+      Ok(Json(SuccessResponse {
+        success: true,
+        message: format!("Key '{}' set successfully", payload.key),
+      }))
     }
-    Err(forward_err) => {
-      // This node is not leader
-      let leader_id = forward_err
-        .leader_id
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-      Err(ErrorResponse {
-        error: format!("This node is not leader. Current leader: {}", leader_id),
-      })
-    }
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to write: {}", e),
+    }),
   }
 }
 
@@ -308,35 +295,22 @@ async fn delete_handler(
     error: "Missing 'key' field".to_string(),
   })?;
 
-  // Use LeaderHandler to delete from Raft cluster
-  match state.raft_node.assume_leader().await {
-    Ok(leader_handler) => {
-      // Create an UpsertKV with Delete operation
-      let upsert_kv = Cmd::UpsertKV(rockraft::raft::types::UpsertKV::delete(key));
+  // Create an UpsertKV with Delete operation
+  let upsert_kv = Cmd::UpsertKV(rockraft::raft::types::UpsertKV::delete(key));
+  let entry = LogEntry::new(upsert_kv);
 
-      match leader_handler.raft().client_write(upsert_kv).await {
-        Ok(response) => {
-          tracing::info!("Delete successful: log_id={:?}", response.log_id);
-          Ok(Json(SuccessResponse {
-            success: true,
-            message: format!("Key '{}' deleted successfully", key),
-          }))
-        }
-        Err(e) => Err(ErrorResponse {
-          error: format!("Failed to delete: {}", e),
-        }),
-      }
+  // Use raft_node.write() which handles leader forwarding automatically
+  match state.raft_node.write(entry).await {
+    Ok(_) => {
+      tracing::info!("Delete successful: key='{}'", key);
+      Ok(Json(SuccessResponse {
+        success: true,
+        message: format!("Key '{}' deleted successfully", key),
+      }))
     }
-    Err(forward_err) => {
-      // This node is not leader
-      let leader_id = forward_err
-        .leader_id
-        .map(|id| id.to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-      Err(ErrorResponse {
-        error: format!("This node is not leader. Current leader: {}", leader_id),
-      })
-    }
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to delete: {}", e),
+    }),
   }
 }
 
@@ -367,6 +341,54 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     "state": metrics.running_state,
     "membership": metrics.membership_config,
   }))
+}
+
+/// Handler for POST /leave endpoint
+async fn leave_handler(
+  State(state): State<AppState>,
+  Json(payload): Json<LeaveRequestHttp>,
+) -> Result<impl IntoResponse, ErrorResponse> {
+  let req = LeaveRequest {
+    node_id: payload.node_id,
+  };
+
+  match state.raft_node.leave(req).await {
+    Ok(()) => Ok(Json(SuccessResponse {
+      success: true,
+      message: format!("Node {} left the cluster successfully", payload.node_id),
+    })),
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to leave cluster: {}", e),
+    }),
+  }
+}
+
+/// Handler for GET /members endpoint
+async fn members_handler(State(state): State<AppState>) -> Result<impl IntoResponse, ErrorResponse> {
+  let req = rockraft::raft::types::GetMembersReq {};
+
+  match state.raft_node.get_members(req).await {
+    Ok(members) => {
+      let members_json: BTreeMap<String, serde_json::Value> = members
+        .into_iter()
+        .map(|(id, node)| {
+          let node_json = serde_json::json!({
+            "node_id": node.node_id,
+            "endpoint": format!("{}", node.endpoint),
+          });
+          (id.to_string(), node_json)
+        })
+        .collect();
+      Ok(Json(serde_json::json!({
+        "success": true,
+        "members": members_json,
+        "count": members_json.len(),
+      })))
+    }
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to get members: {}", e),
+    }),
+  }
 }
 
 /// Load configuration from TOML file
