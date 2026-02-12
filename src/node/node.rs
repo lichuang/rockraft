@@ -38,7 +38,7 @@ use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::store::column_family_list;
 use crate::raft::types::{AppliedState, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig};
-use crate::raft::types::{ForwardToLeader, GetKVReq, GetKVReply, LeaveRequest, NodeId};
+use crate::raft::types::{ForwardToLeader, GetKVReq, GetKVReply, GetMembersReq, GetMembersReply, LeaveRequest, NodeId};
 use crate::service::RaftServiceImpl;
 
 pub struct RaftNode {
@@ -521,6 +521,32 @@ impl RaftNode {
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::Leave(())) => Ok(()),
       Ok(_) => Err(Status::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
+    }
+  }
+
+  /// Get the current cluster members
+  ///
+  /// This function returns the current cluster members.
+  /// It can be called on any node, not just the leader.
+  ///
+  /// # Arguments
+  /// * `req` - The GetMembersReq (empty)
+  ///
+  /// # Returns
+  /// * `Ok(GetMembersReply)` - A map of node_id to Node containing all cluster members
+  /// * `Err(Status)` - If the operation failed
+  pub async fn get_members(
+    &self,
+    req: GetMembersReq,
+  ) -> std::result::Result<GetMembersReply, Status> {
+    debug!("get members: {:?}", req);
+
+    // This operation can be handled by any node, use LeaderHandler for code reuse
+    let leader_handler = LeaderHandler::new(self);
+    match leader_handler.handle(ForwardRequestBody::GetMembers(req)).await {
+      Ok(ForwardResponse::GetMembers(members)) => Ok(members),
+      Ok(_) => Err(Status::internal("Unexpected response type")),
       Err(e) => Err(e),
     }
   }

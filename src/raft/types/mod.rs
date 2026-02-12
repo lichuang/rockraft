@@ -18,6 +18,8 @@ pub use message::ForwardRequestBody;
 pub use message::ForwardResponse;
 pub use message::GetKVReply;
 pub use message::GetKVReq;
+pub use message::GetMembersReply;
+pub use message::GetMembersReq;
 pub use message::JoinRequest;
 pub use message::LeaveRequest;
 pub use raft_codec::RaftCodec;

@@ -7,6 +7,7 @@ use crate::raft::types::Cmd;
 use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::ForwardResponse;
 use crate::raft::types::GetKVReq;
+use crate::raft::types::GetMembersReq;
 use crate::raft::types::JoinRequest;
 use crate::raft::types::LeaveRequest;
 use crate::raft::types::LogEntry;
@@ -58,6 +59,7 @@ impl<'a> LeaderHandler<'a> {
     match body {
       ForwardRequestBody::Join(req) => self.handle_join(req).await,
       ForwardRequestBody::Leave(req) => self.handle_leave(req).await,
+      ForwardRequestBody::GetMembers(req) => self.handle_get_members(req).await,
       ForwardRequestBody::Write(entry) => self.handle_write(entry).await,
       ForwardRequestBody::GetKV(req) => self.handle_get_kv(req).await,
     }
@@ -173,6 +175,30 @@ impl<'a> LeaderHandler<'a> {
       Err(e) => {
         error!("Failed to get kv: {:?}", e);
         Err(Status::internal(format!("Failed to get kv: {}", e)))
+      }
+    }
+  }
+
+  /// Handle get_members request
+  ///
+  /// This function returns the current cluster members.
+  /// Note: This operation can be handled by any node, not just the leader.
+  async fn handle_get_members(
+    &self,
+    _req: GetMembersReq,
+  ) -> std::result::Result<ForwardResponse, Status> {
+    match self.node.state_machine().get_last_membership() {
+      Ok(membership) => {
+        let nodes: std::collections::BTreeMap<u64, Node> = membership
+          .membership()
+          .nodes()
+          .map(|(id, node)| (*id, node.clone()))
+          .collect();
+        Ok(ForwardResponse::GetMembers(nodes))
+      }
+      Err(e) => {
+        error!("Failed to get members: {:?}", e);
+        Err(Status::internal(format!("Failed to get members: {}", e)))
       }
     }
   }

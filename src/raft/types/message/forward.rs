@@ -1,6 +1,8 @@
 use crate::raft::protobuf as pb;
 use crate::raft::types::AppliedState;
 use crate::raft::types::LogEntry;
+use crate::raft::types::message::GetMembersReq;
+use crate::raft::types::message::GetMembersReply;
 use crate::raft::types::message::JoinRequest;
 use crate::raft::types::message::LeaveRequest;
 use serde::Deserialize;
@@ -17,6 +19,7 @@ pub type GetKVReply = Option<Vec<u8>>;
 pub enum ForwardRequestBody {
   Join(JoinRequest),
   Leave(LeaveRequest),
+  GetMembers(GetMembersReq),
   Write(LogEntry),
   GetKV(GetKVReq),
 }
@@ -31,6 +34,7 @@ pub struct ForwardRequest {
 pub enum ForwardResponse {
   Join(()),
   Leave(()),
+  GetMembers(GetMembersReply),
   Write(AppliedState),
   GetKV(GetKVReply),
 }
