@@ -1,11 +1,22 @@
 use crate::raft::protobuf as pb;
+use crate::raft::types::AppliedState;
+use crate::raft::types::LogEntry;
 use crate::raft::types::message::JoinRequest;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct GetKVReq {
+  pub key: String,
+}
+
+pub type GetKVReply = Option<Vec<u8>>;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ForwardRequestBody {
   Join(JoinRequest),
+  Write(LogEntry),
+  GetKV(GetKVReq),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -17,6 +28,8 @@ pub struct ForwardRequest {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ForwardResponse {
   Join(()),
+  Write(AppliedState),
+  GetKV(GetKVReply),
 }
 
 impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {

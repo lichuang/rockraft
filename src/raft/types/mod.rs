@@ -16,6 +16,8 @@ pub use log_entry::LogEntry;
 pub use message::ForwardRequest;
 pub use message::ForwardRequestBody;
 pub use message::ForwardResponse;
+pub use message::GetKVReply;
+pub use message::GetKVReq;
 pub use message::JoinRequest;
 pub use raft_codec::RaftCodec;
 pub use raft_codec::read_logs_err;

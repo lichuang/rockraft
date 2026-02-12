@@ -161,6 +161,14 @@ impl RocksStateMachine {
     */
   }
 
+  /// Get a value from the KV store by key
+  pub fn get_kv(&self, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
+    self
+      .db
+      .get_cf(&self.cf_sm_data(), key.as_bytes())
+      .map_err(read_logs_err)
+  }
+
   fn set_last_applied_log_id(&self, log_id: Option<LogId>) -> Result<(), io::Error> {
     let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
 

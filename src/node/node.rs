@@ -37,8 +37,8 @@ use crate::raft::protobuf::raft_service_server::RaftServiceServer;
 use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::store::column_family_list;
-use crate::raft::types::{Endpoint, ForwardRequest, ForwardResponse, Node, TypeConfig};
-use crate::raft::types::{ForwardToLeader, NodeId};
+use crate::raft::types::{AppliedState, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig};
+use crate::raft::types::{ForwardToLeader, GetKVReq, GetKVReply, NodeId};
 use crate::service::RaftServiceImpl;
 
 pub struct RaftNode {
@@ -60,6 +60,11 @@ impl RaftNode {
   /// Get a reference to the underlying Raft instance
   pub fn raft(&self) -> &Arc<Raft<TypeConfig>> {
     &self.raft
+  }
+
+  /// Get a reference to the state machine
+  pub fn state_machine(&self) -> &Arc<RocksStateMachine> {
+    &self.state_machine
   }
 
   /// Shutdown raft thread
@@ -202,7 +207,7 @@ impl RaftNode {
     Ok(())
   }
 
-  pub async fn get_leader(&self) -> Result<Option<NodeId>> {
+  async fn get_leader(&self) -> Result<Option<NodeId>> {
     let deadline = Duration::from_millis(2000);
     let mut metrics_rx = self.raft.metrics();
 
@@ -234,7 +239,7 @@ impl RaftNode {
   /// Assume's current node is a leader
   /// Returns Ok(LeaderHandler) if this node is the current leader
   /// Returns Err(ForwardToLeader) with the current leader information if this node is not a leader
-  pub async fn assume_leader(&self) -> std::result::Result<LeaderHandler<'_>, ForwardToLeader> {
+  async fn assume_leader(&self) -> std::result::Result<LeaderHandler<'_>, ForwardToLeader> {
     let current_node_id = *self.raft.node_id();
 
     match self.get_leader().await {
@@ -266,7 +271,7 @@ impl RaftNode {
   }
 
   /// Check if this node is in the cluster membership
-  pub fn is_in_cluster(&self) -> Result<bool> {
+  fn is_in_cluster(&self) -> Result<bool> {
     let last_membership = self
       .state_machine
       .get_last_membership()
@@ -438,17 +443,59 @@ impl RaftNode {
     }
   }
 
-  async fn handle_join_request(
+  /// Write a log entry to the raft cluster
+  ///
+  /// This function writes a LogEntry to the raft log. If this node is the leader,
+  /// it writes directly. Otherwise, it forwards the request to the leader.
+  ///
+  /// # Arguments
+  /// * `entry` - The LogEntry to write
+  ///
+  /// # Returns
+  /// * `Ok(AppliedState)` - The result of applying the log entry
+  /// * `Err(Status)` - If the operation failed
+  pub async fn write(&self, entry: LogEntry) -> std::result::Result<AppliedState, Status> {
+    debug!("write log entry: {:?}", entry);
+
+    let request = ForwardRequest {
+      forward_to_leader: 1,
+      body: ForwardRequestBody::Write(entry),
+    };
+
+    match self.handle_forward_request(request).await {
+      Ok(ForwardResponse::Write(applied_state)) => Ok(applied_state),
+      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
+    }
+  }
+
+  /// Read a value from the KV store
+  ///
+  /// This function reads a value from the KV store. If this node is the leader,
+  /// it reads directly from the state machine. Otherwise, it forwards the request
+  /// to the leader.
+  ///
+  /// # Arguments
+  /// * `req` - The GetKVReq containing the key to read
+  ///
+  /// # Returns
+  /// * `Ok(GetKVReply)` - The value associated with the key, or None if not found
+  /// * `Err(Status)` - If the operation failed
+  pub async fn read(
     &self,
-    join_req: JoinRequest,
-  ) -> std::result::Result<ForwardResponse, Status> {
-    let leader_handler = LeaderHandler::new(self);
-    match leader_handler.join(join_req).await {
-      Ok(()) => Ok(ForwardResponse::Join(())),
-      Err(e) => {
-        error!("Failed to join node: {:?}", e);
-        Err(Status::internal(format!("Failed to join node: {}", e)))
-      }
+    req: GetKVReq,
+  ) -> std::result::Result<GetKVReply, Status> {
+    debug!("read kv: {:?}", req);
+
+    let request = ForwardRequest {
+      forward_to_leader: 1,
+      body: ForwardRequestBody::GetKV(req),
+    };
+
+    match self.handle_forward_request(request).await {
+      Ok(ForwardResponse::GetKV(value)) => Ok(value),
+      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
     }
   }
 
@@ -507,10 +554,9 @@ impl RaftNode {
       // Check if this node is the leader
       match self.assume_leader().await {
         Ok(_) => {
-          // This node is leader, handle the request based on body type
-          return match &request.body {
-            ForwardRequestBody::Join(join_req) => self.handle_join_request(join_req.clone()).await,
-          };
+          // This node is leader, handle the request using LeaderHandler
+          let leader_handler = LeaderHandler::new(self);
+          return leader_handler.handle(request.body.clone()).await;
         }
         Err(forward_err) => {
           // This node is not the leader, forward the entire request to the leader

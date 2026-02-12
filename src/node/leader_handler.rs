@@ -1,18 +1,20 @@
-use crate::error::ManagementError;
 use crate::error::OpenRaft;
 use crate::error::Result;
 use crate::error::RockRaftError;
 use crate::node::RaftNode;
 use crate::raft::types::AppliedState;
 use crate::raft::types::Cmd;
+use crate::raft::types::ForwardRequestBody;
+use crate::raft::types::ForwardResponse;
+use crate::raft::types::GetKVReq;
 use crate::raft::types::JoinRequest;
 use crate::raft::types::LogEntry;
 use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
-use anyerror::AnyError;
 use openraft::Raft;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use tonic::Status;
 use tracing::debug;
 use tracing::error;
 
@@ -37,18 +39,33 @@ impl<'a> LeaderHandler<'a> {
     self.node.raft()
   }
 
-  /// Join a node to the cluster
+  /// Handle a forward request body
+  ///
+  /// This function handles different types of forward requests based on the body type.
+  /// It can only be called on the leader node.
+  ///
+  /// # Arguments
+  /// * `body` - The ForwardRequestBody to handle
+  ///
+  /// # Returns
+  /// * `Ok(ForwardResponse)` - The response to the request
+  /// * `Err(Status)` - If the operation failed
+  pub async fn handle(
+    &self,
+    body: ForwardRequestBody,
+  ) -> std::result::Result<ForwardResponse, Status> {
+    match body {
+      ForwardRequestBody::Join(req) => self.handle_join(req).await,
+      ForwardRequestBody::Write(entry) => self.handle_write(entry).await,
+      ForwardRequestBody::GetKV(req) => self.handle_get_kv(req).await,
+    }
+  }
+
+  /// Handle join request
   ///
   /// This function adds a node to the raft cluster. It first writes a log entry
   /// to add the node, then changes the membership to include the new node as a voter.
-  ///
-  /// # Arguments
-  /// * `req` - The JoinRequest containing node_id and endpoint
-  ///
-  /// # Returns
-  /// * `Ok(())` - If the node was successfully added to the cluster
-  /// * `Err(RockRaftError)` - If the operation failed
-  pub async fn join(&self, req: JoinRequest) -> Result<()> {
+  async fn handle_join(&self, req: JoinRequest) -> std::result::Result<ForwardResponse, Status> {
     let node_id = req.node_id;
 
     // Get current membership and check if node already exists
@@ -57,7 +74,7 @@ impl<'a> LeaderHandler<'a> {
 
     let voters: BTreeSet<u64> = membership.voter_ids().collect();
     if voters.contains(&node_id) {
-      return Ok(());
+      return Ok(ForwardResponse::Join(()));
     }
 
     let node = Node {
@@ -70,19 +87,51 @@ impl<'a> LeaderHandler<'a> {
       node: node.clone(),
       overriding: false,
     });
-    self.write(entry).await?;
+    
+    if let Err(e) = self.write(entry).await {
+      error!("Failed to join node: {:?}", e);
+      return Err(Status::internal(format!("Failed to join node: {}", e)));
+    }
 
     // Change membership to add the new node as voter (retain removed voters as learners)
     let mut add_voters: BTreeSet<u64> = BTreeSet::new();
     add_voters.insert(node_id);
 
-    self
+    if let Err(e) = self
       .raft()
       .change_membership(add_voters, false)
       .await
-      .map_err(|e| RockRaftError::Management(ManagementError::Join(AnyError::new(&e))))?;
+    {
+      error!("Failed to join node: {:?}", e);
+      return Err(Status::internal(format!("Failed to join node: {}", e)));
+    }
 
-    Ok(())
+    Ok(ForwardResponse::Join(()))
+  }
+
+  /// Handle write request
+  async fn handle_write(&self, entry: LogEntry) -> std::result::Result<ForwardResponse, Status> {
+    match self.write(entry).await {
+      Ok(applied_state) => Ok(ForwardResponse::Write(applied_state)),
+      Err(e) => {
+        error!("Failed to write log entry: {:?}", e);
+        Err(Status::internal(format!(
+          "Failed to write log entry: {}",
+          e
+        )))
+      }
+    }
+  }
+
+  /// Handle get_kv request
+  async fn handle_get_kv(&self, req: GetKVReq) -> std::result::Result<ForwardResponse, Status> {
+    match self.node.state_machine().get_kv(&req.key) {
+      Ok(value) => Ok(ForwardResponse::GetKV(value)),
+      Err(e) => {
+        error!("Failed to get kv: {:?}", e);
+        Err(Status::internal(format!("Failed to get kv: {}", e)))
+      }
+    }
   }
 
   /// Write a log entry to the raft cluster
