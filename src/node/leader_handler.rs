@@ -8,6 +8,7 @@ use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::ForwardResponse;
 use crate::raft::types::GetKVReq;
 use crate::raft::types::JoinRequest;
+use crate::raft::types::LeaveRequest;
 use crate::raft::types::LogEntry;
 use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
@@ -56,6 +57,7 @@ impl<'a> LeaderHandler<'a> {
   ) -> std::result::Result<ForwardResponse, Status> {
     match body {
       ForwardRequestBody::Join(req) => self.handle_join(req).await,
+      ForwardRequestBody::Leave(req) => self.handle_leave(req).await,
       ForwardRequestBody::Write(entry) => self.handle_write(entry).await,
       ForwardRequestBody::GetKV(req) => self.handle_get_kv(req).await,
     }
@@ -107,6 +109,47 @@ impl<'a> LeaderHandler<'a> {
     }
 
     Ok(ForwardResponse::Join(()))
+  }
+
+  /// Handle leave request
+  ///
+  /// This function removes a node from the raft cluster. It first writes a log entry
+  /// to remove the node, then changes the membership to exclude the node.
+  async fn handle_leave(&self, req: LeaveRequest) -> std::result::Result<ForwardResponse, Status> {
+    let node_id = req.node_id;
+
+    // Get current membership and check if node exists
+    let metrics = self.raft().metrics().borrow().clone();
+    let membership = metrics.membership_config.membership();
+
+    let voters: BTreeSet<u64> = membership.voter_ids().collect();
+    if !voters.contains(&node_id) {
+      // Node not in cluster, consider it already left
+      return Ok(ForwardResponse::Leave(()));
+    }
+
+    // Write a log entry to remove the node
+    let entry = LogEntry::new(Cmd::RemoveNode { node_id });
+    
+    if let Err(e) = self.write(entry).await {
+      error!("Failed to leave node: {:?}", e);
+      return Err(Status::internal(format!("Failed to leave node: {}", e)));
+    }
+
+    // Change membership to remove the node
+    let mut remove_voters: BTreeSet<u64> = BTreeSet::new();
+    remove_voters.insert(node_id);
+
+    if let Err(e) = self
+      .raft()
+      .change_membership(remove_voters, true)
+      .await
+    {
+      error!("Failed to leave node: {:?}", e);
+      return Err(Status::internal(format!("Failed to leave node: {}", e)));
+    }
+
+    Ok(ForwardResponse::Leave(()))
   }
 
   /// Handle write request

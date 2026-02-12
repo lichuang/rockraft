@@ -38,7 +38,7 @@ use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::store::column_family_list;
 use crate::raft::types::{AppliedState, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig};
-use crate::raft::types::{ForwardToLeader, GetKVReq, GetKVReply, NodeId};
+use crate::raft::types::{ForwardToLeader, GetKVReq, GetKVReply, LeaveRequest, NodeId};
 use crate::service::RaftServiceImpl;
 
 pub struct RaftNode {
@@ -494,6 +494,32 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::GetKV(value)) => Ok(value),
+      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
+    }
+  }
+
+  /// Remove a node from the raft cluster
+  ///
+  /// This function removes a node from the raft cluster. If this node is the leader,
+  /// it handles the request directly. Otherwise, it forwards the request to the leader.
+  ///
+  /// # Arguments
+  /// * `req` - The LeaveRequest containing the node_id to remove
+  ///
+  /// # Returns
+  /// * `Ok(())` - If the node was successfully removed from the cluster
+  /// * `Err(Status)` - If the operation failed
+  pub async fn leave(&self, req: LeaveRequest) -> std::result::Result<(), Status> {
+    debug!("leave node: {:?}", req);
+
+    let request = ForwardRequest {
+      forward_to_leader: 1,
+      body: ForwardRequestBody::Leave(req),
+    };
+
+    match self.handle_forward_request(request).await {
+      Ok(ForwardResponse::Leave(())) => Ok(()),
       Ok(_) => Err(Status::internal("Unexpected response type from leader")),
       Err(e) => Err(e),
     }
