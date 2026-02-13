@@ -13,7 +13,9 @@ use crate::raft::types::LeaveRequest;
 use crate::raft::types::LogEntry;
 use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
+use openraft::ChangeMembers;
 use openraft::Raft;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tonic::Status;
@@ -91,21 +93,18 @@ impl<'a> LeaderHandler<'a> {
       node: node.clone(),
       overriding: false,
     });
-    
+
     if let Err(e) = self.write(entry).await {
       error!("Failed to join node: {:?}", e);
       return Err(Status::internal(format!("Failed to join node: {}", e)));
     }
 
     // Change membership to add the new node as voter (retain removed voters as learners)
-    let mut add_voters: BTreeSet<u64> = BTreeSet::new();
-    add_voters.insert(node_id);
+    let mut add_voters = BTreeMap::new();
+    add_voters.insert(node_id, node);
 
-    if let Err(e) = self
-      .raft()
-      .change_membership(add_voters, false)
-      .await
-    {
+    let msg = ChangeMembers::AddVoters(add_voters);
+    if let Err(e) = self.raft().change_membership(msg, false).await {
       error!("Failed to join node: {:?}", e);
       return Err(Status::internal(format!("Failed to join node: {}", e)));
     }
@@ -132,7 +131,7 @@ impl<'a> LeaderHandler<'a> {
 
     // Write a log entry to remove the node
     let entry = LogEntry::new(Cmd::RemoveNode { node_id });
-    
+
     if let Err(e) = self.write(entry).await {
       error!("Failed to leave node: {:?}", e);
       return Err(Status::internal(format!("Failed to leave node: {}", e)));
@@ -142,11 +141,7 @@ impl<'a> LeaderHandler<'a> {
     let mut remove_voters: BTreeSet<u64> = BTreeSet::new();
     remove_voters.insert(node_id);
 
-    if let Err(e) = self
-      .raft()
-      .change_membership(remove_voters, true)
-      .await
-    {
+    if let Err(e) = self.raft().change_membership(remove_voters, true).await {
       error!("Failed to leave node: {:?}", e);
       return Err(Status::internal(format!("Failed to leave node: {}", e)));
     }
