@@ -37,8 +37,12 @@ use crate::raft::protobuf::raft_service_server::RaftServiceServer;
 use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::store::column_family_list;
-use crate::raft::types::{AppliedState, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig};
-use crate::raft::types::{ForwardToLeader, GetKVReq, GetKVReply, GetMembersReq, GetMembersReply, LeaveRequest, NodeId};
+use crate::raft::types::{
+  AppliedState, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig,
+};
+use crate::raft::types::{
+  ForwardToLeader, GetKVReply, GetKVReq, GetMembersReply, GetMembersReq, LeaveRequest, NodeId,
+};
 use crate::service::RaftServiceImpl;
 
 pub struct RaftNode {
@@ -397,14 +401,14 @@ impl RaftNode {
     &self,
     addr: &String,
     request: ForwardRequest,
-  ) -> std::result::Result<pb::RaftReply, Status> {
+  ) -> Result<pb::RaftReply> {
     let timeout = Some(Duration::from_millis(10_000));
     let chan_result = JoinConnectionFactory::create_rpc_channel(addr, timeout, None).await;
     let channel = match chan_result {
       Ok(channel) => channel,
       Err(e) => {
         error!("Failed to connect to {}: {:?}", addr, e);
-        return Err(Status::internal(format!("Failed to connect: {}", e)));
+        return Err(e);
       }
     };
 
@@ -465,7 +469,7 @@ impl RaftNode {
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::Write(applied_state)) => Ok(applied_state),
       Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+      Err(e) => Err(Self::error_to_status(e)),
     }
   }
 
@@ -481,10 +485,7 @@ impl RaftNode {
   /// # Returns
   /// * `Ok(GetKVReply)` - The value associated with the key, or None if not found
   /// * `Err(Status)` - If the operation failed
-  pub async fn read(
-    &self,
-    req: GetKVReq,
-  ) -> std::result::Result<GetKVReply, Status> {
+  pub async fn read(&self, req: GetKVReq) -> std::result::Result<GetKVReply, Status> {
     debug!("read kv: {:?}", req);
 
     let request = ForwardRequest {
@@ -495,7 +496,7 @@ impl RaftNode {
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::GetKV(value)) => Ok(value),
       Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+      Err(e) => Err(Self::error_to_status(e)),
     }
   }
 
@@ -521,7 +522,7 @@ impl RaftNode {
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::Leave(())) => Ok(()),
       Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+      Err(e) => Err(Self::error_to_status(e)),
     }
   }
 
@@ -544,10 +545,13 @@ impl RaftNode {
 
     // This operation can be handled by any node, use LeaderHandler for code reuse
     let leader_handler = LeaderHandler::new(self);
-    match leader_handler.handle(ForwardRequestBody::GetMembers(req)).await {
+    match leader_handler
+      .handle(ForwardRequestBody::GetMembers(req))
+      .await
+    {
       Ok(ForwardResponse::GetMembers(members)) => Ok(members),
       Ok(_) => Err(Status::internal("Unexpected response type")),
-      Err(e) => Err(e),
+      Err(e) => Err(Self::error_to_status(e)),
     }
   }
 
@@ -555,17 +559,18 @@ impl RaftNode {
     &self,
     leader_id: NodeId,
     request: ForwardRequest,
-  ) -> std::result::Result<ForwardResponse, Status> {
+  ) -> Result<ForwardResponse> {
     // Get leader's endpoint from membership
-    let membership = self
-      .state_machine
-      .get_last_membership()
-      .map_err(|e| Status::internal(format!("Failed to get membership: {}", e)))?;
+    let membership = self.state_machine.get_last_membership().map_err(|e| {
+      RockRaftError::TonicStatus(Status::internal(format!("Failed to get membership: {}", e)))
+    })?;
 
     let leader_node = membership
       .membership()
       .get_node(&leader_id)
-      .ok_or_else(|| Status::internal("Leader id not found in membership"))?;
+      .ok_or_else(|| {
+        RockRaftError::TonicStatus(Status::internal("Leader id not found in membership"))
+      })?;
 
     let leader_addr = leader_node.endpoint.to_string();
 
@@ -573,30 +578,40 @@ impl RaftNode {
 
     if reply.error.is_empty() {
       // Deserialize the response data
-      let forward_response: ForwardResponse = bincode::deserialize(&reply.data)
-        .map_err(|e| Status::internal(format!("Failed to deserialize response: {}", e)))?;
+      let forward_response: ForwardResponse = bincode::deserialize(&reply.data).map_err(|e| {
+        RockRaftError::TonicStatus(Status::internal(format!(
+          "Failed to deserialize response: {}",
+          e
+        )))
+      })?;
       Ok(forward_response)
     } else {
-      Err(Status::internal(format!(
+      Err(RockRaftError::TonicStatus(Status::internal(format!(
         "Leader returned error: {:?}",
         String::from_utf8_lossy(&reply.error)
-      )))
+      ))))
+    }
+  }
+
+  /// Convert RockRaftError to tonic::Status
+  fn error_to_status(error: RockRaftError) -> Status {
+    match error {
+      RockRaftError::TonicStatus(status) => status,
+      _ => Status::internal(error.to_string()),
     }
   }
 
   /// Check if the error is retriable (network/connection related)
-  fn is_retriable_error(status: &Status) -> bool {
-    matches!(
-      status.code(),
-      //tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
-      tonic::Code::Unavailable
-    )
+  fn is_retriable_error(error: &RockRaftError) -> bool {
+    match error {
+      RockRaftError::TonicStatus(status) => {
+        matches!(status.code(), tonic::Code::Unavailable)
+      }
+      _ => error.is_retryable(),
+    }
   }
 
-  pub async fn handle_forward_request(
-    &self,
-    request: ForwardRequest,
-  ) -> std::result::Result<ForwardResponse, Status> {
+  pub async fn handle_forward_request(&self, request: ForwardRequest) -> Result<ForwardResponse> {
     debug!("recv forward req: {:?}", request);
 
     const MAX_RETRIES: u32 = 20;
@@ -644,16 +659,16 @@ impl RaftNode {
             }
           }
 
-          return Err(Status::internal(
+          return Err(RockRaftError::TonicStatus(Status::internal(
             "No leader available to forward request after max retries",
-          ));
+          )));
         }
       }
     }
 
-    Err(Status::internal(
+    Err(RockRaftError::TonicStatus(Status::internal(
       "No leader available to forward request after max retries",
-    ))
+    )))
   }
 }
 

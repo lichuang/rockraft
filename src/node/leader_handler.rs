@@ -54,10 +54,7 @@ impl<'a> LeaderHandler<'a> {
   /// # Returns
   /// * `Ok(ForwardResponse)` - The response to the request
   /// * `Err(Status)` - If the operation failed
-  pub async fn handle(
-    &self,
-    body: ForwardRequestBody,
-  ) -> std::result::Result<ForwardResponse, Status> {
+  pub async fn handle(&self, body: ForwardRequestBody) -> Result<ForwardResponse> {
     match body {
       ForwardRequestBody::Join(req) => self.handle_join(req).await,
       ForwardRequestBody::Leave(req) => self.handle_leave(req).await,
@@ -71,7 +68,7 @@ impl<'a> LeaderHandler<'a> {
   ///
   /// This function adds a node to the raft cluster. It first writes a log entry
   /// to add the node, then changes the membership to include the new node as a voter.
-  async fn handle_join(&self, req: JoinRequest) -> std::result::Result<ForwardResponse, Status> {
+  async fn handle_join(&self, req: JoinRequest) -> Result<ForwardResponse> {
     let node_id = req.node_id;
 
     // Get current membership and check if node already exists
@@ -96,7 +93,10 @@ impl<'a> LeaderHandler<'a> {
 
     if let Err(e) = self.write(entry).await {
       error!("Failed to join node: {:?}", e);
-      return Err(Status::internal(format!("Failed to join node: {}", e)));
+      return Err(RockRaftError::TonicStatus(Status::internal(format!(
+        "Failed to join node: {}",
+        e
+      ))));
     }
 
     // Change membership to add the new node as voter (retain removed voters as learners)
@@ -106,7 +106,10 @@ impl<'a> LeaderHandler<'a> {
     let msg = ChangeMembers::AddVoters(add_voters);
     if let Err(e) = self.raft().change_membership(msg, false).await {
       error!("Failed to join node: {:?}", e);
-      return Err(Status::internal(format!("Failed to join node: {}", e)));
+      return Err(RockRaftError::TonicStatus(Status::internal(format!(
+        "Failed to join node: {}",
+        e
+      ))));
     }
 
     Ok(ForwardResponse::Join(()))
@@ -116,7 +119,7 @@ impl<'a> LeaderHandler<'a> {
   ///
   /// This function removes a node from the raft cluster. It first writes a log entry
   /// to remove the node, then changes the membership to exclude the node.
-  async fn handle_leave(&self, req: LeaveRequest) -> std::result::Result<ForwardResponse, Status> {
+  async fn handle_leave(&self, req: LeaveRequest) -> Result<ForwardResponse> {
     let node_id = req.node_id;
 
     // Get current membership and check if node exists
@@ -134,7 +137,10 @@ impl<'a> LeaderHandler<'a> {
 
     if let Err(e) = self.write(entry).await {
       error!("Failed to leave node: {:?}", e);
-      return Err(Status::internal(format!("Failed to leave node: {}", e)));
+      return Err(RockRaftError::TonicStatus(Status::internal(format!(
+        "Failed to leave node: {}",
+        e
+      ))));
     }
 
     // Change membership to remove the node
@@ -143,33 +149,39 @@ impl<'a> LeaderHandler<'a> {
 
     if let Err(e) = self.raft().change_membership(remove_voters, true).await {
       error!("Failed to leave node: {:?}", e);
-      return Err(Status::internal(format!("Failed to leave node: {}", e)));
+      return Err(RockRaftError::TonicStatus(Status::internal(format!(
+        "Failed to leave node: {}",
+        e
+      ))));
     }
 
     Ok(ForwardResponse::Leave(()))
   }
 
   /// Handle write request
-  async fn handle_write(&self, entry: LogEntry) -> std::result::Result<ForwardResponse, Status> {
+  async fn handle_write(&self, entry: LogEntry) -> Result<ForwardResponse> {
     match self.write(entry).await {
       Ok(applied_state) => Ok(ForwardResponse::Write(applied_state)),
       Err(e) => {
         error!("Failed to write log entry: {:?}", e);
-        Err(Status::internal(format!(
+        Err(RockRaftError::TonicStatus(Status::internal(format!(
           "Failed to write log entry: {}",
           e
-        )))
+        ))))
       }
     }
   }
 
   /// Handle get_kv request
-  async fn handle_get_kv(&self, req: GetKVReq) -> std::result::Result<ForwardResponse, Status> {
+  async fn handle_get_kv(&self, req: GetKVReq) -> Result<ForwardResponse> {
     match self.node.state_machine().get_kv(&req.key) {
       Ok(value) => Ok(ForwardResponse::GetKV(value)),
       Err(e) => {
         error!("Failed to get kv: {:?}", e);
-        Err(Status::internal(format!("Failed to get kv: {}", e)))
+        Err(RockRaftError::TonicStatus(Status::internal(format!(
+          "Failed to get kv: {}",
+          e
+        ))))
       }
     }
   }
@@ -178,10 +190,7 @@ impl<'a> LeaderHandler<'a> {
   ///
   /// This function returns the current cluster members.
   /// Note: This operation can be handled by any node, not just the leader.
-  async fn handle_get_members(
-    &self,
-    _req: GetMembersReq,
-  ) -> std::result::Result<ForwardResponse, Status> {
+  async fn handle_get_members(&self, _req: GetMembersReq) -> Result<ForwardResponse> {
     match self.node.state_machine().get_last_membership() {
       Ok(membership) => {
         let nodes: std::collections::BTreeMap<u64, Node> = membership
@@ -193,7 +202,10 @@ impl<'a> LeaderHandler<'a> {
       }
       Err(e) => {
         error!("Failed to get members: {:?}", e);
-        Err(Status::internal(format!("Failed to get members: {}", e)))
+        Err(RockRaftError::TonicStatus(Status::internal(format!(
+          "Failed to get members: {}",
+          e
+        ))))
       }
     }
   }

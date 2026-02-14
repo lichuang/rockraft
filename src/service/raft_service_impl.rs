@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
+use crate::error::RockRaftError;
 use crate::raft::protobuf as pb;
 
 use crate::node::RaftNode;
@@ -18,7 +19,7 @@ impl RaftServiceImpl {
     Self { node }
   }
 
-  fn result_to_raft_reply(result: Result<ForwardResponse, Status>) -> pb::RaftReply {
+  fn result_to_raft_reply(result: Result<ForwardResponse, RockRaftError>) -> pb::RaftReply {
     match result {
       Ok(response) => {
         let data = bincode::serialize(&response).expect("Failed to serialize ForwardResponse");
@@ -27,10 +28,16 @@ impl RaftServiceImpl {
           error: String::new().into(),
         }
       }
-      Err(status) => pb::RaftReply {
-        data: Vec::new(),
-        error: status.to_string().into(),
-      },
+      Err(err) => {
+        let error_msg = match err {
+          RockRaftError::TonicStatus(status) => status.to_string(),
+          _ => err.to_string(),
+        };
+        pb::RaftReply {
+          data: Vec::new(),
+          error: error_msg.into(),
+        }
+      }
     }
   }
 }
