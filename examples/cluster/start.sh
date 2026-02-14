@@ -120,16 +120,16 @@ start_node() {
     local rust_log
     case "$log_level" in
         debug|trace)
-            rust_log="rockraft=${log_level},rockraft_cluster=${log_level},tower_http=info,axum=info"
+            rust_log="rockraft=${log_level},cluster_example=${log_level},tower_http=info,axum=info"
             ;;
         info)
-            rust_log="rockraft=info,rockraft_cluster=info,tower_http=info,axum=info"
+            rust_log="rockraft=info,cluster_example=info,tower_http=info,axum=info"
             ;;
         warn|warning)
-            rust_log="rockraft=warn,rockraft_cluster=warn,tower_http=warn,axum=warn"
+            rust_log="rockraft=warn,cluster_example=warn,tower_http=warn,axum=warn"
             ;;
         error)
-            rust_log="rockraft=error,rockraft_cluster=error,tower_http=error,axum=error"
+            rust_log="rockraft=error,cluster_example=error,tower_http=error,axum=error"
             ;;
         *)
             rust_log="$log_level"

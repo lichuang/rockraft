@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tokio::signal;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+use tracing::info;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Log configuration
@@ -98,9 +99,11 @@ impl IntoResponse for ErrorResponse {
 }
 
 fn init_logging(config: &LogConfig) -> Result<(), Box<dyn std::error::Error>> {
-  let env_filter = EnvFilter::new(
-    std::env::var("RUST_LOG").unwrap_or_else(|_| config.level.clone())
-  );
+  let env_filter = if std::env::var("RUST_LOG").is_ok() {
+    EnvFilter::from_default_env()
+  } else {
+    EnvFilter::new(&config.level)
+  };
 
   match &config.file {
     Some(log_file) => {
@@ -108,17 +111,21 @@ fn init_logging(config: &LogConfig) -> Result<(), Box<dyn std::error::Error>> {
       if let Some(parent) = std::path::Path::new(log_file).parent() {
         std::fs::create_dir_all(parent)?;
       }
-      
+
       let file_appender = tracing_appender::rolling::never(
-        std::path::Path::new(log_file).parent().unwrap_or(std::path::Path::new(".")),
-        std::path::Path::new(log_file).file_name().unwrap_or_default()
+        std::path::Path::new(log_file)
+          .parent()
+          .unwrap_or(std::path::Path::new(".")),
+        std::path::Path::new(log_file)
+          .file_name()
+          .unwrap_or_default(),
       );
-      
+
       tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer().with_writer(file_appender))
         .init();
-      
+
       println!("Logging to file: {}", log_file);
     }
     None => {
@@ -128,7 +135,7 @@ fn init_logging(config: &LogConfig) -> Result<(), Box<dyn std::error::Error>> {
         .init();
     }
   }
-  
+
   Ok(())
 }
 
@@ -146,10 +153,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   // Load configuration first (without logging)
   let config = load_config(&config_path)?;
-  
+
   // Initialize tracing with config
   init_logging(&config.log)?;
-  
+
   println!("Configuration loaded:");
   println!("  node_id: {}", config.base.node_id);
   println!("  raft_addr: {}", config.base.raft.address);
@@ -160,19 +167,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   println!("  log: {:?}", config.log);
 
   // Create Raft node
-  println!("\nCreating Raft node...");
+  info!("Creating Raft node...");
   let raft_node = RaftNodeBuilder::build(&config.base).await?;
-  println!("✓ Raft node created successfully!");
+  info!("Raft node created successfully");
 
-  // Wait for initial log to be applied
-  println!("\nWaiting for initial log to be committed...");
-  let timeout = Some(std::time::Duration::from_secs(10));
-  raft_node
-    .raft()
-    .wait(timeout)
-    .applied_index(Some(1), "init")
-    .await?;
-  println!("✓ Initial log committed successfully!");
+  /*
+    // Wait for initial log to be applied
+    info!("Waiting for initial log to be committed...");
+    let timeout = Some(std::time::Duration::from_secs(10));
+    raft_node
+      .raft()
+      .wait(timeout)
+      .applied_index(Some(1), "init")
+      .await?;
+    info!("Initial log committed successfully");
+  */
 
   // Create application state
   let state = AppState {
@@ -195,21 +204,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   // Start HTTP server
   let http_addr = config.http_addr.clone();
   let listener = tokio::net::TcpListener::bind(&http_addr).await?;
-  println!("\nHTTP server listening on http://{}", http_addr);
-  println!("\nAvailable endpoints:");
-  println!(
+  info!("HTTP server listening on http://{}", http_addr);
+  info!("Available endpoints:");
+  info!(
     "  GET  http://{}/get?key=<key>    - Get a value by key",
     http_addr
   );
-  println!(
+  info!(
     "  POST http://{}/set             - Set a key-value pair",
     http_addr
   );
-  println!("  POST http://{}/delete          - Delete a key", http_addr);
-  println!("  POST http://{}/leave           - Remove a node from cluster", http_addr);
-  println!("  GET  http://{}/members         - Get cluster members", http_addr);
-  println!("  GET  http://{}/health          - Health check", http_addr);
-  println!(
+  info!("  POST http://{}/delete          - Delete a key", http_addr);
+  info!(
+    "  POST http://{}/leave           - Remove a node from cluster",
+    http_addr
+  );
+  info!(
+    "  GET  http://{}/members         - Get cluster members",
+    http_addr
+  );
+  info!("  GET  http://{}/health          - Health check", http_addr);
+  info!(
     "  GET  http://{}/metrics         - Cluster metrics",
     http_addr
   );
@@ -218,17 +233,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let http_server = tokio::spawn(async move { axum::serve(listener, app).await });
 
   // Wait for Ctrl+C
-  println!("\nPress Ctrl+C to shutdown...");
+  info!("Press Ctrl+C to shutdown...");
   signal::ctrl_c().await?;
 
-  println!("\nShutting down Raft node...");
+  info!("Shutting down Raft node...");
   raft_node.shutdown().await?;
-  println!("✓ Raft node shutdown successfully!");
+  info!("Raft node shutdown successfully");
 
   // Abort HTTP server
   http_server.abort();
 
-  println!("\nServer shutdown complete!");
+  info!("Server shutdown complete");
   Ok(())
 }
 
@@ -245,9 +260,8 @@ async fn get_handler(
   let req = GetKVReq { key: key.clone() };
   match state.raft_node.read(req).await {
     Ok(value_opt) => {
-      let value_str = value_opt.map(|v| {
-        String::from_utf8(v).unwrap_or_else(|_| "Invalid UTF-8".to_string())
-      });
+      let value_str =
+        value_opt.map(|v| String::from_utf8(v).unwrap_or_else(|_| "Invalid UTF-8".to_string()));
       Ok(Json(GetResponse {
         key: key.clone(),
         value: value_str,
@@ -274,7 +288,7 @@ async fn set_handler(
   // Use raft_node.write() which handles leader forwarding automatically
   match state.raft_node.write(entry).await {
     Ok(_) => {
-      tracing::info!("Write successful: key='{}'", payload.key);
+      info!("Write successful: key='{}'", payload.key);
       Ok(Json(SuccessResponse {
         success: true,
         message: format!("Key '{}' set successfully", payload.key),
@@ -302,7 +316,7 @@ async fn delete_handler(
   // Use raft_node.write() which handles leader forwarding automatically
   match state.raft_node.write(entry).await {
     Ok(_) => {
-      tracing::info!("Delete successful: key='{}'", key);
+      info!("Delete successful: key='{}'", key);
       Ok(Json(SuccessResponse {
         success: true,
         message: format!("Key '{}' deleted successfully", key),
@@ -364,7 +378,9 @@ async fn leave_handler(
 }
 
 /// Handler for GET /members endpoint
-async fn members_handler(State(state): State<AppState>) -> Result<impl IntoResponse, ErrorResponse> {
+async fn members_handler(
+  State(state): State<AppState>,
+) -> Result<impl IntoResponse, ErrorResponse> {
   let req = rockraft::raft::types::GetMembersReq {};
 
   match state.raft_node.get_members(req).await {

@@ -12,7 +12,7 @@ use openraft::error::{InitializeError, RaftError};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tokio::time::{Duration, timeout};
 use tracing::debug;
 use tracing::error;
@@ -140,6 +140,9 @@ impl RaftNode {
 
   pub async fn start(raft_node: Arc<Self>) -> Result<()> {
     let config = &raft_node.config;
+
+    Self::start_raft_service(raft_node.clone()).await?;
+
     if config.raft_single {
       let node = Node {
         node_id: config.node_id,
@@ -150,10 +153,13 @@ impl RaftNode {
       raft_node.join_cluster().await?;
     }
 
-    Self::start_raft_service(raft_node).await
+    Ok(())
   }
 
   /// Start the Raft gRPC service in a separate thread
+  ///
+  /// This function spawns the gRPC server in a background task and waits for
+  /// the service to successfully bind to the endpoint before returning.
   async fn start_raft_service(raft_node: Arc<Self>) -> Result<()> {
     let raft_endpoint = raft_node.config.raft_endpoint.clone();
 
@@ -162,6 +168,9 @@ impl RaftNode {
 
     // Clone raft_node for the spawned task
     let raft_node_for_service = raft_node.clone();
+
+    // Create oneshot channel to signal startup completion
+    let (startup_tx, startup_rx) = oneshot::channel::<StdResult<(), String>>();
 
     // Spawn gRPC server in a separate thread/task
     let handle = tokio::task::spawn(async move {
@@ -174,12 +183,21 @@ impl RaftNode {
       let listener = match TcpListener::bind(&raft_endpoint.to_string()).await {
         Ok(l) => l,
         Err(e) => {
-          tracing::error!("Failed to bind gRPC server to {}: {}", raft_endpoint, e);
+          let err_msg = format!("Failed to bind gRPC server to {}: {}", raft_endpoint, e);
+          tracing::error!("{}", err_msg);
+          // Signal startup failure
+          let _ = startup_tx.send(Err(err_msg));
           return;
         }
       };
 
-      tracing::info!("Raft gRPC service listening on {}", raft_endpoint);
+      // Signal startup success
+      if startup_tx.send(Ok(())).is_err() {
+        error!("Failed to signal startup completion");
+        return;
+      }
+
+      info!("Raft gRPC service listening on {}", raft_endpoint);
 
       // Run the gRPC server with shutdown handling
       let server_future = Server::builder()
@@ -189,26 +207,42 @@ impl RaftNode {
       tokio::select! {
         // Wait for shutdown signal
         _ = shutdown_rx.recv() => {
-          tracing::info!("Raft gRPC service received shutdown signal, shutting down...");
+          info!("Raft gRPC service received shutdown signal, shutting down...");
         }
 
         // Wait for server to finish (if it errors)
         result = server_future => {
           match result {
-            Ok(_) => tracing::info!("Raft gRPC service finished normally"),
-            Err(e) => tracing::error!("Raft gRPC service error: {}", e),
+            Ok(_) => info!("Raft gRPC service finished normally"),
+            Err(e) => error!("Raft gRPC service error: {}", e),
           }
         }
       }
 
-      tracing::info!("Raft gRPC service stopped");
+      info!("Raft gRPC service stopped");
     });
 
-    // Store the handle in RaftNode
-    *raft_node.service_handle.lock().unwrap() = Some(handle);
-    tracing::info!("Raft gRPC service started");
-
-    Ok(())
+    // Wait for startup completion signal
+    match startup_rx.await {
+      Ok(Ok(())) => {
+        // Store the handle in RaftNode
+        *raft_node.service_handle.lock().unwrap() = Some(handle);
+        info!("Raft gRPC service started successfully");
+        Ok(())
+      }
+      Ok(Err(err_msg)) => {
+        // Wait for the task to finish to ensure proper cleanup
+        let _ = handle.await;
+        Err(RockRaftError::Startup(StartupError::OtherError(err_msg)))
+      }
+      Err(_) => {
+        // Channel closed unexpectedly (task panicked)
+        let _ = handle.await;
+        Err(RockRaftError::Startup(StartupError::OtherError(
+          "gRPC service startup task failed unexpectedly".to_string(),
+        )))
+      }
+    }
   }
 
   async fn get_leader(&self) -> Result<Option<NodeId>> {
@@ -367,6 +401,8 @@ impl RaftNode {
       }
       for _i in 0..3 {
         let result = self.join_via(addr).await;
+        info!("join cluster via {} result: {:?}", addr, result);
+
         match result {
           Ok(x) => return Ok(x),
           Err(api_error) => {
