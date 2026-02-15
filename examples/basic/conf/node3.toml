@@ -1,9 +1,0 @@
-# Node 3 Configuration
-
-[node]
-node_id = 3
-raft_addr = "127.0.0.1:6684"
-
-[rocksdb]
-data_path = "/tmp/rockraft/node3"
-max_open_files = 10000
