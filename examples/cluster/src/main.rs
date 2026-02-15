@@ -171,18 +171,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let raft_node = RaftNodeBuilder::build(&config.base).await?;
   info!("Raft node created successfully");
 
-  /*
-    // Wait for initial log to be applied
-    info!("Waiting for initial log to be committed...");
-    let timeout = Some(std::time::Duration::from_secs(10));
-    raft_node
-      .raft()
-      .wait(timeout)
-      .applied_index(Some(1), "init")
-      .await?;
-    info!("Initial log committed successfully");
-  */
-
   // Create application state
   let state = AppState {
     raft_node: raft_node.clone(),
@@ -398,7 +386,6 @@ async fn members_handler(
       Ok(Json(serde_json::json!({
         "success": true,
         "members": members_json,
-        "count": members_json.len(),
       })))
     }
     Err(e) => Err(ErrorResponse {
