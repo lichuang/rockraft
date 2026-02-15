@@ -2,3 +2,5 @@
 /logs
 /pids
 .rockraft_data/
+.pyc
+__pycache__
