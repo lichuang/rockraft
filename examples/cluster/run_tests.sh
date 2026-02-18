@@ -108,7 +108,7 @@ main() {
     print_info "Running tests with pytest..."
     cd "$SCRIPT_DIR"
     
-    if python3 -m pytest test/test_cluster_members.py $verbose; then
+    if python3 -m pytest test/test_cluster.py $verbose; then
         print_success "All tests passed!"
         exit 0
     else

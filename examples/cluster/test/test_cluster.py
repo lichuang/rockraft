@@ -16,6 +16,7 @@ import time
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 import pytest
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -106,6 +107,27 @@ class ClusterClient:
                 return json.loads(response.read().decode())
         except Exception as e:
             raise RuntimeError(f"Failed to query members on port {port}: {e}")
+    
+    def set_value(self, port: int, key: str, value: str, timeout: int = 5) -> Dict[str, Any]:
+        """Set a key-value pair via the /set endpoint."""
+        url = f"http://127.0.0.1:{port}/set"
+        data = json.dumps({"key": key, "value": value}).encode()
+        headers = {"Content-Type": "application/json"}
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            raise RuntimeError(f"Failed to set value on port {port}: {e}")
+    
+    def get_value(self, port: int, key: str, timeout: int = 5) -> Dict[str, Any]:
+        """Get a value by key via the /get endpoint."""
+        url = f"http://127.0.0.1:{port}/get?key={urllib.parse.quote(key)}"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            raise RuntimeError(f"Failed to get value on port {port}: {e}")
     
     def wait_for_nodes(self, max_retries: int = 30, retry_interval: float = 1.0) -> None:
         """Wait for all nodes to be ready."""
@@ -213,6 +235,121 @@ class TestClusterMembers:
             assert first_members == members, (
                 f"Membership mismatch between {NODES[0]} and {NODES[i]}"
             )
+
+
+class TestClusterData:
+    """Test data read/write functionality."""
+    
+    def test_write_and_read_on_same_node(self, cluster: ClusterClient):
+        """Test writing and reading on the same node."""
+        test_key = "test_key_1"
+        test_value = "test_value_1"
+        
+        # Write on node1
+        result = cluster.set_value(HTTP_PORTS[0], test_key, test_value)
+        assert result.get("success") is True, f"Write failed: {result}"
+        
+        # Read on the same node
+        result = cluster.get_value(HTTP_PORTS[0], test_key)
+        assert result.get("key") == test_key, f"Key mismatch: {result}"
+        assert result.get("value") == test_value, f"Value mismatch: expected {test_value}, got {result.get('value')}"
+    
+    def test_write_and_read_across_nodes(self, cluster: ClusterClient):
+        """Test writing on one node and reading from another."""
+        test_key = "test_key_2"
+        test_value = "test_value_2"
+        
+        # Write on node1
+        result = cluster.set_value(HTTP_PORTS[0], test_key, test_value)
+        assert result.get("success") is True, f"Write failed: {result}"
+        
+        # Read from node2 and node3
+        for i, port in enumerate(HTTP_PORTS[1:], 1):
+            result = cluster.get_value(port, test_key)
+            assert result.get("key") == test_key, f"Key mismatch on {NODES[i]}: {result}"
+            assert result.get("value") == test_value, (
+                f"Value mismatch on {NODES[i]}: expected {test_value}, got {result.get('value')}"
+            )
+    
+    def test_data_consistency_across_all_nodes(self, cluster: ClusterClient):
+        """Test that written data is consistent across all nodes."""
+        test_data = {
+            "key_a": "value_a",
+            "key_b": "value_b",
+            "key_c": "value_c",
+        }
+        
+        # Write all data on node1
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True, f"Failed to write {key}: {result}"
+        
+        # Read from all nodes and verify consistency
+        for port in HTTP_PORTS:
+            for key, expected_value in test_data.items():
+                result = cluster.get_value(port, key)
+                assert result.get("key") == key, f"Key mismatch on port {port}: {result}"
+                assert result.get("value") == expected_value, (
+                    f"Value mismatch for {key} on port {port}: expected {expected_value}, got {result.get('value')}"
+                )
+    
+    def test_read_nonexistent_key(self, cluster: ClusterClient):
+        """Test reading a key that doesn't exist."""
+        test_key = "nonexistent_key_xyz"
+        
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, test_key)
+            assert result.get("key") == test_key, f"Key mismatch: {result}"
+            assert result.get("value") is None, f"Expected None for non-existent key, got {result.get('value')}"
+    
+    def test_overwrite_existing_key(self, cluster: ClusterClient):
+        """Test overwriting an existing key with a new value."""
+        test_key = "overwrite_key"
+        first_value = "first_value"
+        second_value = "second_value"
+        
+        # Write initial value
+        result = cluster.set_value(HTTP_PORTS[0], test_key, first_value)
+        assert result.get("success") is True, f"Initial write failed: {result}"
+        
+        # Verify initial value
+        result = cluster.get_value(HTTP_PORTS[0], test_key)
+        assert result.get("value") == first_value, f"Initial value mismatch: {result}"
+        
+        # Overwrite with new value
+        result = cluster.set_value(HTTP_PORTS[1], test_key, second_value)
+        assert result.get("success") is True, f"Overwrite failed: {result}"
+        
+        # Verify new value from all nodes
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, test_key)
+            assert result.get("value") == second_value, (
+                f"Overwritten value mismatch on port {port}: expected {second_value}, got {result.get('value')}"
+            )
+    
+    def test_write_special_characters(self, cluster: ClusterClient):
+        """Test writing and reading values with special characters."""
+        test_cases = [
+            ("special_key_1", "Hello, 世界! 🌍"),
+            ("special_key_2", "Line1\nLine2\nLine3"),
+            ("special_key_3", "Tab\tSeparated\tValues"),
+            ("special_key_4", "Quotes: \"single\" and 'double'"),
+            ("special_key_5", "Symbols: !@#$%^&*()_+-=[]{}|;':\",./<>?"),
+        ]
+        
+        for key, value in test_cases:
+            # Write on a random node
+            write_port = HTTP_PORTS[hash(key) % len(HTTP_PORTS)]
+            result = cluster.set_value(write_port, key, value)
+            assert result.get("success") is True, f"Failed to write {key}: {result}"
+            
+            # Read from all nodes
+            for read_port in HTTP_PORTS:
+                result = cluster.get_value(read_port, key)
+                assert result.get("key") == key, f"Key mismatch on port {read_port}: {result}"
+                assert result.get("value") == value, (
+                    f"Value mismatch for {key} on port {read_port}: expected {repr(value)}, got {repr(result.get('value'))}"
+                )
 
 
 def main():
