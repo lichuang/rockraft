@@ -8,17 +8,18 @@ use bincode::serialize;
 use futures::Stream;
 use futures::TryStreamExt;
 use openraft::EntryPayload;
+use openraft::Membership;
 use openraft::OptionalSend;
 use openraft::RaftSnapshotBuilder;
 use openraft::alias::SnapshotDataOf;
 use openraft::storage::EntryResponder;
 use openraft::storage::RaftStateMachine;
 use rocksdb::BoundColumnFamily;
+use tracing::info;
 
 use rocksdb::DB;
 
 use super::keys::LAST_APPLIED_LOG_KEY;
-use super::keys::LAST_MEMBERSHIP_KEY;
 use super::keys::NODES_KEY;
 use super::keys::SM_DATA_FAMILY;
 use super::keys::SM_META_FAMILY;
@@ -31,7 +32,6 @@ use crate::raft::types::LogId;
 use crate::raft::types::Node;
 use crate::raft::types::NodeId;
 use crate::raft::types::Operation;
-use crate::raft::types::RaftCodec as _;
 use crate::raft::types::Snapshot;
 use crate::raft::types::SnapshotMeta;
 use crate::raft::types::StoredMembership;
@@ -44,7 +44,7 @@ pub struct RocksStateMachine {
   db: Arc<DB>,
   snapshot_dir: PathBuf,
 
-  sys_data: Mutex<SysData>,
+  sys_data: Arc<Mutex<SysData>>,
 }
 
 /// Convert Mutex lock error to io::Error
@@ -57,7 +57,7 @@ impl Clone for RocksStateMachine {
     Self {
       db: self.db.clone(),
       snapshot_dir: self.snapshot_dir.clone(),
-      sys_data: Mutex::new(SysData::default()),
+      sys_data: self.sys_data.clone(),
     }
   }
 }
@@ -75,7 +75,7 @@ impl RocksStateMachine {
     Ok(Self {
       db,
       snapshot_dir,
-      sys_data: Mutex::new(sys_data),
+      sys_data: Arc::new(Mutex::new(sys_data)),
     })
   }
 
@@ -102,14 +102,6 @@ impl RocksStateMachine {
       Err(e) => return Err(io::Error::other(e)),
     };
 
-    // Recover last_membership
-    let last_membership = db
-      .get_cf(&cf_meta, LAST_MEMBERSHIP_KEY)
-      .map_err(read_logs_err)?
-      .map(|bytes| StoredMembership::decode_from(&bytes))
-      .transpose()?
-      .unwrap_or_default();
-
     // Recover nodes
     let nodes = db
       .get_cf(&cf_meta, NODES_KEY)
@@ -120,45 +112,35 @@ impl RocksStateMachine {
 
     Ok(SysData {
       last_applied,
-      last_membership,
       nodes,
     })
   }
 
   fn get_last_applied_log_id(&self) -> Result<Option<LogId>, io::Error> {
     Ok(self.sys_data.lock().map_err(mutex_lock_err)?.last_applied)
-    /*
-    match self.db.get_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY) {
-      Ok(Some(v)) => {
-        let log_id = deserialize(&v).map_err(read_logs_err)?;
-        Ok(Some(log_id))
-      }
-      Ok(None) => Ok(None),
-      Err(e) => Err(io::Error::other(e)),
-    }
-    */
   }
 
+  /// Get last membership (constructed from nodes)
   pub fn get_last_membership(&self) -> Result<StoredMembership, io::Error> {
-    Ok(
-      self
-        .sys_data
-        .lock()
-        .map_err(mutex_lock_err)?
-        .last_membership
-        .clone(),
-    )
-    /*
-    Ok(
-      self
-        .db
-        .get_cf(&self.cf_sm_meta(), LAST_MEMBERSHIP_KEY)
-        .map_err(read_logs_err)?
-        .map(|bytes| StoredMembership::decode_from(&bytes))
-        .transpose()?
-        .unwrap_or_default(),
-    )
-    */
+    self.build_membership_from_nodes()
+  }
+
+  /// Build StoredMembership from current nodes
+  fn build_membership_from_nodes(&self) -> Result<StoredMembership, io::Error> {
+    let sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
+    let node_ids: std::collections::BTreeSet<NodeId> = sys_data.nodes.keys().cloned().collect();
+    let nodes = sys_data.nodes.clone();
+
+    // If no nodes, return default membership
+    if node_ids.is_empty() {
+      return Ok(StoredMembership::default());
+    }
+
+    // Create membership with all nodes as voters
+    let membership = Membership::new(vec![node_ids], nodes)
+      .map_err(|e| io::Error::other(format!("Failed to create membership: {}", e)))?;
+
+    Ok(StoredMembership::new(None, membership))
   }
 
   /// Get a value from the KV store by key
@@ -192,19 +174,12 @@ impl RocksStateMachine {
     Ok(())
   }
 
-  pub fn set_last_membership(&self, membership: &StoredMembership) -> Result<(), io::Error> {
-    let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
-
-    let data = serialize(membership).map_err(read_logs_err)?;
-    self
-      .db
-      .put_cf(&self.cf_sm_meta(), LAST_MEMBERSHIP_KEY, data)
-      .map_err(read_logs_err)?;
-    sys_data.last_membership = membership.clone();
-    Ok(())
+  /// Get all nodes from the state machine
+  pub fn get_nodes(&self) -> Result<std::collections::BTreeMap<NodeId, Node>, io::Error> {
+    Ok(self.sys_data.lock().map_err(mutex_lock_err)?.nodes.clone())
   }
 
-  fn add_node(&self, node: Node) -> Result<(), io::Error> {
+  pub fn add_node(&self, node: Node) -> Result<(), io::Error> {
     let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
 
     sys_data.nodes.insert(node.node_id, node);
@@ -264,7 +239,6 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
   {
     let mut batch = rocksdb::WriteBatch::default();
     let mut last_applied_log_id = None;
-    let mut last_membership = None;
     let mut responses = Vec::new();
 
     while let Some((entry, responder)) = entries.try_next().await? {
@@ -286,7 +260,13 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
               }
             }
             Cmd::AddNode { node, .. } => {
+              let node_id = node.node_id;
+              info!(
+                "Applying AddNode command for node {} in state machine",
+                node_id
+              );
               self.add_node(node)?;
+              info!("AddNode command applied successfully for node {}", node_id);
             }
             Cmd::RemoveNode { node_id } => {
               self.remove_node(node_id)?;
@@ -295,8 +275,10 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
           AppliedState::None
         }
-        EntryPayload::Membership(mem) => {
-          last_membership = Some(StoredMembership::new(Some(entry.log_id), mem));
+        EntryPayload::Membership(membership) => {
+          // Membership changes are handled by AddNode/RemoveNode commands
+          // which update the nodes map directly
+          info!("applying membership: {:?}", membership);
           AppliedState::None
         }
       };
@@ -306,8 +288,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
       }
     }
 
-    // Atomic write of all data + metadata - fail fast before sending any responses
-    // Add metadata writes to the batch for atomic commit
+    // Atomic write of all data
     self
       .db
       .write(batch)
@@ -315,10 +296,6 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
     if let Some(last_applied_log_id) = last_applied_log_id {
       self.set_last_applied_log_id(Some(last_applied_log_id))?;
-    }
-
-    if let Some(last_membership) = last_membership {
-      self.set_last_membership(&last_membership)?;
     }
 
     // Only send responses after successful write
@@ -375,9 +352,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
 #[cfg(test)]
 mod tests {
-  use std::collections::{BTreeMap, BTreeSet};
-
-  use openraft::Membership;
+  use std::collections::BTreeSet;
 
   use crate::{
     engine::RocksDBEngine,
@@ -410,23 +385,6 @@ mod tests {
     }
   }
 
-  fn create_stored_membership(log_id: LogId) -> StoredMembership {
-    let mut nodes = BTreeSet::new();
-    nodes.insert(1);
-
-    let mut node_map = BTreeMap::new();
-    node_map.insert(
-      1,
-      Node {
-        node_id: 1,
-        endpoint: Endpoint::new("127.0.0.1", 1228),
-      },
-    );
-
-    let membership = Membership::new(vec![nodes], node_map).unwrap();
-    StoredMembership::new(Some(log_id), membership)
-  }
-
   #[tokio::test]
   async fn test_set_and_get_last_applied() -> Result<(), io::Error> {
     let sm = create_test_state_machine().await;
@@ -451,34 +409,6 @@ mod tests {
 
     sm.set_last_applied_log_id(None)?;
     assert!(sm.get_last_applied_log_id()?.is_none());
-
-    Ok(())
-  }
-
-  #[tokio::test]
-  async fn test_set_and_get_last_membership() -> Result<(), io::Error> {
-    let sm = create_test_state_machine().await;
-
-    assert!(sm.get_last_membership()?.log_id().is_none());
-
-    let log_id = create_log_id(1, 1, 100);
-    let membership = create_stored_membership(log_id);
-    sm.set_last_membership(&membership)?;
-
-    let retrieved = sm.get_last_membership()?;
-    assert_eq!(retrieved.log_id(), membership.log_id());
-    assert_eq!(
-      retrieved.membership().get_joint_config().len(),
-      membership.membership().get_joint_config().len()
-    );
-
-    let new_log_id = create_log_id(2, 2, 200);
-    let new_membership = create_stored_membership(new_log_id);
-    sm.set_last_membership(&new_membership)?;
-
-    let updated = sm.get_last_membership()?;
-    assert_eq!(updated.log_id().unwrap().leader_id.term, 2);
-    assert_eq!(updated.log_id().unwrap().index, 200);
 
     Ok(())
   }
@@ -531,61 +461,6 @@ mod tests {
     assert_eq!(updated.leader_id.term, 4);
     assert_eq!(updated.leader_id.node_id, 6);
     assert_eq!(updated.index, 400);
-
-    Ok(())
-  }
-
-  #[tokio::test]
-  async fn test_recover_sys_data_last_membership() -> Result<(), io::Error> {
-    let temp_data_dir = tempfile::tempdir().unwrap().keep();
-    let engine = RocksDBEngine::new(
-      &temp_data_dir
-        .clone()
-        .into_os_string()
-        .into_string()
-        .unwrap(),
-      1024,
-      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
-    );
-
-    // Create state machine and write data
-    let sm1 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
-      .await
-      .unwrap();
-
-    let log_id = create_log_id(5, 7, 500);
-    let membership = create_stored_membership(log_id);
-    sm1.set_last_membership(&membership)?;
-
-    // Create a new state machine instance from the same database
-    let sm2 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
-      .await
-      .unwrap();
-
-    let recovered = sm2.get_last_membership()?;
-    assert!(recovered.log_id().is_some());
-
-    assert_eq!(recovered.log_id().unwrap().leader_id.term, 5);
-    assert_eq!(recovered.log_id().unwrap().index, 500);
-
-    // Verify membership content
-    let voter_ids: BTreeSet<_> = recovered.membership().voter_ids().collect();
-    assert_eq!(voter_ids.len(), 1);
-    assert!(voter_ids.contains(&1));
-
-    // Update with new membership
-    let new_log_id = create_log_id(6, 8, 600);
-    let new_membership = create_stored_membership(new_log_id);
-    sm2.set_last_membership(&new_membership)?;
-
-    // Create another instance and verify
-    let sm3 = RocksStateMachine::new(engine.db.clone(), temp_data_dir)
-      .await
-      .unwrap();
-
-    let updated = sm3.get_last_membership()?;
-    assert_eq!(updated.log_id().unwrap().leader_id.term, 6);
-    assert_eq!(updated.log_id().unwrap().index, 600);
 
     Ok(())
   }
@@ -686,10 +561,6 @@ mod tests {
     let log_id = create_log_id(7, 9, 700);
     sm1.set_last_applied_log_id(Some(log_id))?;
 
-    // Write last_membership
-    let membership = create_stored_membership(log_id);
-    sm1.set_last_membership(&membership)?;
-
     // Write nodes
     let node1 = Node {
       node_id: 1,
@@ -720,11 +591,13 @@ mod tests {
     assert_eq!(recovered_log_id.leader_id.node_id, 9);
     assert_eq!(recovered_log_id.index, 700);
 
-    // Verify last_membership
+    // Verify membership is constructed from nodes
     let recovered_membership = sm2.get_last_membership()?;
-    assert_eq!(recovered_membership.log_id().unwrap().index, 700);
     let voter_ids: BTreeSet<_> = recovered_membership.membership().voter_ids().collect();
-    assert_eq!(voter_ids.len(), 1);
+    assert_eq!(voter_ids.len(), 3);
+    assert!(voter_ids.contains(&1));
+    assert!(voter_ids.contains(&2));
+    assert!(voter_ids.contains(&3));
 
     // Verify nodes
     let sys_data = sm2

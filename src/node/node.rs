@@ -29,7 +29,6 @@ use tonic::transport::Server;
 use super::LeaderHandler;
 use super::parsed_config::ParsedConfig;
 use crate::config::Config;
-use crate::config::RaftConfig;
 use crate::engine::RocksDBEngine;
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::network::NetworkFactory;
@@ -345,6 +344,14 @@ impl RaftNode {
       let err = StartupError::invalid_config("Node endpoint address cannot be empty");
       return Err(crate::error::RockRaftError::from(err));
     }
+
+    // Add current node to state machine first
+    info!("Adding node {} to state machine", node.node_id);
+    self.state_machine.add_node(node.clone()).map_err(|e| {
+      error!("Failed to add node: {}", e);
+      StartupError::OtherError(format!("Failed to add node: {}", e))
+    })?;
+    info!("Node {} added to state machine successfully", node.node_id);
 
     // Initialize cluster with the node
     let node_id = node.node_id;
@@ -732,33 +739,17 @@ mod tests {
     }
   }
 
-  /// Helper function to set up membership for testing
-  async fn setup_membership(raft_node: &RaftNode, node_ids: Vec<u64>) {
+  /// Helper function to set up nodes for testing
+  async fn setup_nodes(raft_node: &RaftNode, node_ids: Vec<u64>) {
     let sm = &raft_node.state_machine;
-    let mut nodes = BTreeMap::new();
 
     for node_id in node_ids {
-      nodes.insert(
+      let node = crate::raft::types::Node {
         node_id,
-        crate::raft::types::Node {
-          node_id,
-          endpoint: crate::raft::types::Endpoint::new("127.0.0.1", 1000 + node_id as u32),
-        },
-      );
+        endpoint: crate::raft::types::Endpoint::new("127.0.0.1", 1000 + node_id as u32),
+      };
+      sm.add_node(node).unwrap();
     }
-
-    let voter_ids: BTreeSet<u64> = nodes.keys().cloned().collect();
-    let membership = openraft::Membership::new(vec![voter_ids], nodes).unwrap();
-    let log_id = crate::raft::types::LogId {
-      leader_id: crate::raft::types::LeaderId {
-        term: 1,
-        node_id: 1,
-      },
-      index: 1,
-    };
-
-    let stored_membership = openraft::StoredMembership::new(Some(log_id), membership);
-    sm.set_last_membership(&stored_membership).unwrap();
   }
 
   #[tokio::test]
@@ -770,8 +761,8 @@ mod tests {
     let config = create_test_config(&data_path, 1, "127.0.0.1:5001");
     let raft_node = RaftNode::create(&config).await?;
 
-    // Set up membership with node 1
-    setup_membership(&raft_node, vec![1, 2, 3]).await;
+    // Set up nodes with node 1, 2, 3
+    setup_nodes(&raft_node, vec![1, 2, 3]).await;
 
     // Check if node 1 is in cluster
     let result = raft_node.is_in_cluster()?;
@@ -789,8 +780,8 @@ mod tests {
     let config = create_test_config(&data_path, 4, "127.0.0.1:5004");
     let raft_node = RaftNode::create(&config).await?;
 
-    // Set up membership with nodes 1, 2, 3 (not including node 4)
-    setup_membership(&raft_node, vec![1, 2, 3]).await;
+    // Set up nodes 1, 2, 3 (not including node 4)
+    setup_nodes(&raft_node, vec![1, 2, 3]).await;
 
     // Check if node 4 is in cluster
     let result = raft_node.is_in_cluster()?;

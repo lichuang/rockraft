@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tonic::Status;
 use tracing::debug;
 use tracing::error;
+use tracing::info;
 
 /// LeaderHandler provides methods that can only be called on a leader node
 pub struct LeaderHandler<'a> {
@@ -70,6 +71,7 @@ impl<'a> LeaderHandler<'a> {
   /// to add the node, then changes the membership to include the new node as a voter.
   async fn handle_join(&self, req: JoinRequest) -> Result<ForwardResponse> {
     let node_id = req.node_id;
+    info!("Handling join request for node {}", node_id);
 
     // Get current membership and check if node already exists
     let metrics = self.raft().metrics().borrow().clone();
@@ -77,7 +79,25 @@ impl<'a> LeaderHandler<'a> {
 
     let voters: BTreeSet<u64> = membership.voter_ids().collect();
     if voters.contains(&node_id) {
+      info!("Node {} already in membership, skipping join", node_id);
       return Ok(ForwardResponse::Join(()));
+    }
+
+    // First, sync all existing nodes to state machine (to ensure new node gets all node info)
+    info!("Syncing existing nodes to state machine");
+    for (id, node) in membership.nodes() {
+      info!("Syncing node {} to state machine", id);
+      let entry = LogEntry::new(Cmd::AddNode {
+        node: node.clone(),
+        overriding: true,
+      });
+      if let Err(e) = self.write(entry).await {
+        error!("Failed to sync node {}: {:?}", id, e);
+        return Err(RockRaftError::TonicStatus(Status::internal(format!(
+          "Failed to sync node {}: {}",
+          id, e
+        ))));
+      }
     }
 
     let node = Node {
@@ -85,32 +105,36 @@ impl<'a> LeaderHandler<'a> {
       endpoint: req.endpoint.clone(),
     };
 
-    // Write a log entry to add the node
+    // Write a log entry to add the new node
+    info!("Writing AddNode command for node {}", node_id);
     let entry = LogEntry::new(Cmd::AddNode {
       node: node.clone(),
       overriding: false,
     });
 
     if let Err(e) = self.write(entry).await {
-      error!("Failed to join node: {:?}", e);
+      error!("Failed to write AddNode entry: {:?}", e);
       return Err(RockRaftError::TonicStatus(Status::internal(format!(
         "Failed to join node: {}",
         e
       ))));
     }
+    info!("AddNode command written successfully for node {}", node_id);
 
     // Change membership to add the new node as voter (retain removed voters as learners)
+    info!("Changing membership to add node {} as voter", node_id);
     let mut add_voters = BTreeMap::new();
     add_voters.insert(node_id, node);
 
     let msg = ChangeMembers::AddVoters(add_voters);
     if let Err(e) = self.raft().change_membership(msg, false).await {
-      error!("Failed to join node: {:?}", e);
+      error!("Failed to change membership: {:?}", e);
       return Err(RockRaftError::TonicStatus(Status::internal(format!(
         "Failed to join node: {}",
         e
       ))));
     }
+    info!("Node {} joined successfully", node_id);
 
     Ok(ForwardResponse::Join(()))
   }
@@ -191,15 +215,8 @@ impl<'a> LeaderHandler<'a> {
   /// This function returns the current cluster members.
   /// Note: This operation can be handled by any node, not just the leader.
   async fn handle_get_members(&self, _req: GetMembersReq) -> Result<ForwardResponse> {
-    match self.node.state_machine().get_last_membership() {
-      Ok(membership) => {
-        let nodes: std::collections::BTreeMap<u64, Node> = membership
-          .membership()
-          .nodes()
-          .map(|(id, node)| (*id, node.clone()))
-          .collect();
-        Ok(ForwardResponse::GetMembers(nodes))
-      }
+    match self.node.state_machine().get_nodes() {
+      Ok(nodes) => Ok(ForwardResponse::GetMembers(nodes)),
       Err(e) => {
         error!("Failed to get members: {:?}", e);
         Err(RockRaftError::TonicStatus(Status::internal(format!(
