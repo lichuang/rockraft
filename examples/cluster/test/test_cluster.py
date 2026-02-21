@@ -352,6 +352,278 @@ class TestClusterData:
                 )
 
 
+class TestClusterRestart:
+    """Test cluster restart and data persistence functionality."""
+    
+    def test_restart_cluster_with_data_persistence(self):
+        """
+        Test the full lifecycle: start -> modify data -> stop -> restart -> verify members and data.
+        
+        This test verifies:
+        1. Cluster starts successfully
+        2. Data can be written to the cluster
+        3. Cluster stops gracefully
+        4. Cluster restarts successfully
+        5. All nodes report consistent membership
+        6. Previously written data persists after restart
+        """
+        cluster_mgr = ClusterManager(BASE_DIR, START_SCRIPT)
+        
+        # Phase 1: Start the cluster
+        print("\n" + "="*60)
+        print("PHASE 1: Starting cluster for the first time...")
+        print("="*60)
+        cluster_mgr.clean()
+        cluster_mgr.build()
+        cluster_mgr.start()
+        
+        try:
+            client = ClusterClient(HTTP_PORTS)
+            client.wait_for_nodes()
+            client.wait_for_members_sync(expected_count=3)
+            print("[PHASE 1] Cluster started successfully")
+            
+            # Phase 2: Write test data
+            print("\n" + "="*60)
+            print("PHASE 2: Writing test data...")
+            print("="*60)
+            test_data = {
+                "persist_key_1": "persist_value_1",
+                "persist_key_2": "persist_value_2",
+                "persist_key_3": "persist_value_3",
+            }
+            
+            for key, value in test_data.items():
+                result = client.set_value(HTTP_PORTS[0], key, value)
+                assert result.get("success") is True, f"Failed to write {key}: {result}"
+                print(f"  Written: {key} = {value}")
+            print("[PHASE 2] Data written successfully")
+            
+            # Verify data is readable before stop
+            print("\n  Verifying data before stop...")
+            for key, expected_value in test_data.items():
+                result = client.get_value(HTTP_PORTS[0], key)
+                assert result.get("value") == expected_value, (
+                    f"Value mismatch for {key}: expected {expected_value}, got {result.get('value')}"
+                )
+            print("  Data verified before stop")
+            
+            # Verify members before stop
+            print("\n  Verifying members before stop...")
+            expected_ids = {"1", "2", "3"}
+            for port in HTTP_PORTS:
+                result = client.query_members(port)
+                members = result.get("members", {})
+                actual_ids = set(members.keys())
+                assert actual_ids == expected_ids, (
+                    f"Membership mismatch before stop: expected {expected_ids}, got {actual_ids}"
+                )
+            print("  Members verified before stop")
+            
+        finally:
+            # Phase 3: Stop the cluster
+            print("\n" + "="*60)
+            print("PHASE 3: Stopping cluster...")
+            print("="*60)
+            cluster_mgr.stop()
+            print("[PHASE 3] Cluster stopped")
+            
+            # Wait a bit to ensure all processes are terminated
+            time.sleep(2)
+        
+        # Phase 4: Restart the cluster
+        print("\n" + "="*60)
+        print("PHASE 4: Restarting cluster...")
+        print("="*60)
+        cluster_mgr.start()
+        
+        try:
+            client = ClusterClient(HTTP_PORTS)
+            client.wait_for_nodes()
+            client.wait_for_members_sync(expected_count=3)
+            print("[PHASE 4] Cluster restarted successfully")
+            
+            # Phase 5: Verify members after restart
+            print("\n" + "="*60)
+            print("PHASE 5: Verifying members after restart...")
+            print("="*60)
+            for i, port in enumerate(HTTP_PORTS):
+                result = client.query_members(port)
+                
+                assert result.get("success") is True, f"Expected success=true for {NODES[i]}"
+                assert "members" in result, f"Expected 'members' field for {NODES[i]}"
+                
+                members = result.get("members", {})
+                actual_ids = set(members.keys())
+                
+                assert actual_ids == expected_ids, (
+                    f"{NODES[i]}: Expected members {expected_ids}, got {actual_ids}"
+                )
+                
+                # Verify member details
+                for node_id, node_info in members.items():
+                    assert "node_id" in node_info, f"Missing node_id for member {node_id}"
+                    assert "endpoint" in node_info, f"Missing endpoint for member {node_id}"
+                    assert node_info["node_id"] == int(node_id), (
+                        f"node_id mismatch for member {node_id}"
+                    )
+                
+                print(f"  {NODES[i]} (port {port}): members = {actual_ids}")
+            
+            # Verify membership consistency across nodes
+            all_members = []
+            for port in HTTP_PORTS:
+                result = client.query_members(port)
+                all_members.append(result.get("members", {}))
+            
+            first_members = all_members[0]
+            for i, members in enumerate(all_members[1:], 1):
+                assert first_members == members, (
+                    f"Membership mismatch after restart between {NODES[0]} and {NODES[i]}"
+                )
+            print("[PHASE 5] All members verified and consistent")
+            
+            # Phase 6: Verify persisted data
+            print("\n" + "="*60)
+            print("PHASE 6: Verifying persisted data...")
+            print("="*60)
+            
+            # Read data from all nodes and verify
+            for port in HTTP_PORTS:
+                print(f"\n  Reading from port {port}:")
+                for key, expected_value in test_data.items():
+                    result = client.get_value(port, key)
+                    assert result.get("key") == key, f"Key mismatch on port {port}: {result}"
+                    assert result.get("value") == expected_value, (
+                        f"Data persistence failed for {key} on port {port}: "
+                        f"expected {expected_value}, got {result.get('value')}"
+                    )
+                    print(f"    {key} = {result.get('value')}")
+            
+            print("[PHASE 6] All data persisted correctly after restart")
+            
+            print("\n" + "="*60)
+            print("TEST PASSED: Cluster restart with data persistence")
+            print("="*60)
+            
+        finally:
+            # Cleanup
+            print("\n[CLEANUP] Stopping cluster...")
+            cluster_mgr.stop()
+    
+    def test_restart_cluster_with_leader_failover(self):
+        """
+        Test cluster restart and leader election after restart.
+        
+        This test verifies:
+        1. Cluster starts and elects a leader
+        2. Data is written to the leader
+        3. Cluster stops gracefully
+        4. Cluster restarts successfully
+        5. A new leader is elected
+        6. New data can be written after restart
+        7. Both old and new data are accessible
+        """
+        cluster_mgr = ClusterManager(BASE_DIR, START_SCRIPT)
+        
+        # Phase 1: Start cluster and write initial data
+        print("\n" + "="*60)
+        print("PHASE 1: Starting cluster and writing initial data...")
+        print("="*60)
+        cluster_mgr.clean()
+        cluster_mgr.build()
+        cluster_mgr.start()
+        
+        try:
+            client = ClusterClient(HTTP_PORTS)
+            client.wait_for_nodes()
+            client.wait_for_members_sync(expected_count=3)
+            
+            initial_data = {
+                "initial_key_1": "initial_value_1",
+                "initial_key_2": "initial_value_2",
+            }
+            
+            for key, value in initial_data.items():
+                result = client.set_value(HTTP_PORTS[0], key, value)
+                assert result.get("success") is True, f"Failed to write {key}: {result}"
+            print("[PHASE 1] Initial data written")
+            
+        finally:
+            # Stop cluster
+            print("\nStopping cluster...")
+            cluster_mgr.stop()
+            time.sleep(2)
+        
+        # Phase 2: Restart cluster
+        print("\n" + "="*60)
+        print("PHASE 2: Restarting cluster...")
+        print("="*60)
+        cluster_mgr.start()
+        
+        try:
+            client = ClusterClient(HTTP_PORTS)
+            client.wait_for_nodes()
+            client.wait_for_members_sync(expected_count=3)
+            
+            # Find the leader
+            leader_port = None
+            for port in HTTP_PORTS:
+                url = f"http://127.0.0.1:{port}/health"
+                try:
+                    with urllib.request.urlopen(url, timeout=2) as response:
+                        health = json.loads(response.read().decode())
+                        if health.get("is_leader"):
+                            leader_port = port
+                            print(f"  Leader found on port {port}")
+                            break
+                except Exception:
+                    pass
+            
+            assert leader_port is not None, "No leader found after restart"
+            
+            # Phase 3: Write new data after restart
+            print("\n" + "="*60)
+            print("PHASE 3: Writing new data after restart...")
+            print("="*60)
+            new_data = {
+                "new_key_1": "new_value_1",
+                "new_key_2": "new_value_2",
+            }
+            
+            for key, value in new_data.items():
+                result = client.set_value(leader_port, key, value)
+                assert result.get("success") is True, f"Failed to write {key} after restart: {result}"
+            print("[PHASE 3] New data written")
+            
+            # Phase 4: Verify all data (initial + new)
+            print("\n" + "="*60)
+            print("PHASE 4: Verifying all data...")
+            print("="*60)
+            all_data = {**initial_data, **new_data}
+            
+            for port in HTTP_PORTS:
+                print(f"\n  Reading from port {port}:")
+                for key, expected_value in all_data.items():
+                    result = client.get_value(port, key)
+                    assert result.get("value") == expected_value, (
+                        f"Data mismatch for {key} on port {port}: "
+                        f"expected {expected_value}, got {result.get('value')}"
+                    )
+                    print(f"    {key} = {result.get('value')}")
+            
+            print("[PHASE 4] All data verified successfully")
+            
+            print("\n" + "="*60)
+            print("TEST PASSED: Cluster restart with leader failover")
+            print("="*60)
+            
+        finally:
+            # Cleanup
+            print("\n[CLEANUP] Stopping cluster...")
+            cluster_mgr.stop()
+
+
 def main():
     """Main entry point for direct execution."""
     pytest.main([__file__, "-v"])
