@@ -45,11 +45,13 @@ use crate::raft::types::{
 use crate::service::RaftServiceImpl;
 
 pub struct RaftNode {
+  #[allow(dead_code)]
   engine: Arc<RocksDBEngine>,
   raft: Arc<Raft<TypeConfig>>,
 
   config: ParsedConfig,
 
+  #[allow(dead_code)]
   factory: NetworkFactory,
 
   state_machine: Arc<RocksStateMachine>,
@@ -719,7 +721,6 @@ impl RaftNode {
 mod tests {
   use super::*;
   use crate::config::Config;
-  use std::collections::{BTreeMap, BTreeSet};
   use tempfile::tempdir;
 
   /// Helper function to create a test config

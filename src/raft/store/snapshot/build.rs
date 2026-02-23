@@ -20,7 +20,6 @@ use crate::raft::store::snapshot::util::snapshot_id_dir;
 use crate::raft::types::LogId;
 use crate::raft::types::Snapshot;
 use crate::raft::types::StoredMembership;
-use crate::raft::types::TypeConfig;
 use crate::raft::types::read_logs_err;
 use crate::utils::now_millis;
 
@@ -218,7 +217,7 @@ pub async fn build_snapshot(
 ///   - TODO: Should iterate snapshot_dir, find all snapshot IDs, and remove all except last_snapshot_id
 ///
 /// Note: This is called asynchronously in the background, so errors are logged but not propagated
-fn vacuum_snapshot_files(snapshot_dir: PathBuf, last_snapshot_id: String) -> Result<(), io::Error> {
+fn vacuum_snapshot_files(_snapshot_dir: PathBuf, _last_snapshot_id: String) -> Result<(), io::Error> {
   Ok(())
 }
 

@@ -13,6 +13,7 @@ impl RpcClientTlsConfig {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct RpcClientConf {
   pub embedded_dir: Option<String>,
   pub endpoints: Vec<String>,
@@ -35,15 +36,18 @@ impl RpcClientConf {
   ///
   /// If endpoints is configured(non-empty), use remote metasrv.
   /// Otherwise, use a local embedded meta
+  #[allow(dead_code)]
   pub fn local_mode(&self) -> bool {
     self.endpoints.is_empty()
   }
 
   /// Returns a list of endpoints.
+  #[allow(dead_code)]
   pub fn get_endpoints(&self) -> Vec<String> {
     self.endpoints.clone()
   }
 
+  #[allow(dead_code)]
   pub fn empty() -> Self {
     Self {
       embedded_dir: None,

@@ -103,31 +103,37 @@ impl Sub for Interval {
   PartialOrd,
   Ord,
 )]
+#[allow(dead_code)]
 pub struct Time {
   pub(crate) time: Interval,
 }
 
 impl Time {
+  #[allow(dead_code)]
   pub fn from_millis(millis: u64) -> Self {
     Self {
       time: Interval::from_millis(millis),
     }
   }
 
+  #[allow(dead_code)]
   pub fn from_secs(secs: u64) -> Self {
     Self {
       time: Interval::from_secs(secs),
     }
   }
 
+  #[allow(dead_code)]
   pub fn to_duration(&self) -> Duration {
     self.time.to_duration()
   }
 
+  #[allow(dead_code)]
   pub fn millis(&self) -> u64 {
     self.time.millis()
   }
 
+  #[allow(dead_code)]
   pub fn seconds(&self) -> u64 {
     self.time.seconds()
   }

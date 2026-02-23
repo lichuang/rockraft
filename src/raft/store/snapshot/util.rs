@@ -1,5 +1,4 @@
 use std::io::ErrorKind;
-use std::io::{self};
 use std::path::PathBuf;
 
 use bincode::deserialize;
@@ -11,7 +10,6 @@ use tracing::info;
 
 use crate::raft::types::Snapshot;
 use crate::raft::types::SnapshotMeta;
-use crate::raft::types::TypeConfig;
 
 /// Construct the path to the snapshot dump file for a given snapshot ID directory.
 ///
@@ -356,6 +354,7 @@ pub async fn get_current_snapshot(snapshot_dir: &PathBuf) -> std::io::Result<Opt
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::raft::types::TypeConfig;
   use openraft::Membership;
   use openraft::SnapshotMeta;
   use openraft::StoredMembership;

@@ -10,7 +10,6 @@ use tonic::transport::Channel;
 use tonic::transport::ClientTlsConfig;
 use tonic::transport::Endpoint;
 use tonic::transport::Uri;
-use tracing::debug;
 use tracing::info;
 
 pub struct JoinConnectionFactory;

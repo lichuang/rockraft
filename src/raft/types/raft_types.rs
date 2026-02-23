@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use openraft::error::Infallible;
 use serde::Deserialize;
 use serde::Serialize;
 

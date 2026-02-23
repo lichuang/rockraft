@@ -116,6 +116,7 @@ impl RocksLogStore<TypeConfig> {
     self.get_meta::<super::meta::Vote>()
   }
 
+  #[allow(dead_code)]
   fn set_vote(&mut self, vote: &VoteOf<TypeConfig>) -> Result<(), io::Error> {
     self.put_meta::<super::meta::Vote>(vote)
   }
@@ -312,11 +313,10 @@ fn bin_to_id(buf: &[u8]) -> std::io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-  use bytes::Bytes;
   use openraft::Vote;
   use rocksdb::Options;
 
-  use crate::raft::types::{Cmd, KeyValue, LeaderId, LogId, LogEntry, Operation, UpsertKV};
+  use crate::raft::types::{Cmd, LeaderId, LogId, LogEntry, Operation, UpsertKV};
 
   use super::*;
 

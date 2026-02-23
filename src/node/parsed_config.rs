@@ -13,8 +13,10 @@ pub struct ParsedConfig {
 
   pub raft_join: Vec<String>,
 
+  #[allow(dead_code)]
   pub rocksdb_data_path: String,
 
+  #[allow(dead_code)]
   pub rocksdb_max_open_files: i32,
 }
 
