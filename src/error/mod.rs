@@ -32,6 +32,9 @@ pub enum RockRaftError {
   #[error("Bincode serialization/deserialization error: {0}")]
   BincodeSerialize(#[from] bincode::Error),
 
+  #[error("Serialization error: {0}")]
+  Serialize(#[from] postcard::Error),
+
   #[error("Connection pool has no connection information available. {0}")]
   NoAvailableGrpcConnection(String),
 

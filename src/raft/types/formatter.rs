@@ -1,12 +1,13 @@
-//! Serialization and deserialization utilities using bincode.
+//! Serialization and deserialization utilities using postcard.
 //!
-//! This module provides thin wrappers around bincode's serialize and deserialize
+//! This module provides thin wrappers around postcard's serialize and deserialize
 //! functions to centralize encoding/decoding logic throughout the codebase.
 
+use crate::error::Result;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-/// Serialize a value into a byte vector using bincode.
+/// Serialize a value into a byte vector using postcard.
 ///
 /// # Arguments
 ///
@@ -15,15 +16,15 @@ use serde::Serialize;
 /// # Returns
 ///
 /// Returns a `Result` containing the serialized bytes on success,
-/// or a `bincode::Error` on failure.
-pub fn encode<T>(val: &T) -> bincode::Result<Vec<u8>>
+/// or a serialization error on failure.
+pub fn encode<T>(val: &T) -> Result<Vec<u8>>
 where
   T: Serialize,
 {
-  bincode::serialize(val)
+  Ok(postcard::to_allocvec(val)?)
 }
 
-/// Deserialize a value from a byte slice using bincode.
+/// Deserialize a value from a byte slice using postcard.
 ///
 /// # Arguments
 ///
@@ -32,10 +33,10 @@ where
 /// # Returns
 ///
 /// Returns a `Result` containing the deserialized value on success,
-/// or a `bincode::Error` on failure.
-pub fn decode<T>(bytes: &[u8]) -> bincode::Result<T>
+/// or a deserialization error on failure.
+pub fn decode<T>(bytes: &[u8]) -> Result<T>
 where
   T: DeserializeOwned,
 {
-  bincode::deserialize(bytes)
+  Ok(postcard::from_bytes(bytes)?)
 }
