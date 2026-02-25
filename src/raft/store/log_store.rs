@@ -4,8 +4,7 @@ use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
-use bincode::deserialize;
-use bincode::serialize;
+use crate::raft::types::{decode, encode};
 use byteorder::BigEndian;
 use byteorder::ReadBytesExt as _;
 use byteorder::WriteBytesExt as _;
@@ -160,7 +159,7 @@ impl RaftLogReader<TypeConfig> for RocksLogStore<TypeConfig> {
         break;
       }
 
-      let entry: Entry = deserialize(&val).map_err(read_logs_err)?;
+      let entry: Entry = decode(&val).map_err(read_logs_err)?;
 
       entries.push(entry);
     }
@@ -186,7 +185,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
       None => None,
       Some(res) => {
         let (_log_index, val) = res.map_err(read_logs_err)?;
-        let entry: Entry = deserialize(val.as_ref()).map_err(read_logs_err)?;
+        let entry: Entry = decode(val.as_ref()).map_err(read_logs_err)?;
         Some(entry.log_id)
       }
     };
@@ -247,7 +246,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
         .put_cf(
           &self.cf_logs(),
           id,
-          serialize(&entry).map_err(read_logs_err)?,
+          encode(&entry).map_err(read_logs_err)?,
         )
         .map_err(read_logs_err)?;
     }

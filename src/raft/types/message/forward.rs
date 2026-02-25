@@ -1,4 +1,5 @@
 use crate::raft::protobuf as pb;
+use crate::raft::types::encode;
 use crate::raft::types::AppliedState;
 use crate::raft::types::LogEntry;
 use crate::raft::types::message::GetMembersReq;
@@ -41,7 +42,7 @@ pub enum ForwardResponse {
 
 impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {
   fn into_request(self) -> tonic::Request<pb::RaftRequest> {
-    let data = bincode::serialize(&self).expect("fail to serialize ForwardRequest");
+    let data = encode(&self).expect("fail to serialize ForwardRequest");
     let req = pb::RaftRequest { data };
     tonic::Request::new(req)
   }

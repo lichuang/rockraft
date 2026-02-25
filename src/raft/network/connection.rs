@@ -22,6 +22,8 @@ use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
 use crate::raft::protobuf::VoteRequest as PbVoteRequest;
 use crate::raft::types::ForwardRequest;
 use crate::raft::types::ForwardResponse;
+use crate::raft::types::decode;
+use crate::raft::types::encode;
 use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
 
@@ -49,7 +51,7 @@ impl NetworkConnection {
 
     self.serialize_buf.clear();
 
-    bincode::serialize_into(&mut self.serialize_buf, &req)?;
+    encode(&req).map(|data| self.serialize_buf.extend_from_slice(&data)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(RaftRequest {
       data: self.serialize_buf.clone(),
@@ -60,10 +62,10 @@ impl NetworkConnection {
     let reply: RaftReply = grpc_response.into_inner();
 
     if !reply.error.is_empty() {
-      let error: APIError = bincode::deserialize(&reply.error)?;
+      let error: APIError = decode(&reply.error)?;
       Err(error.into())
     } else {
-      let result: ForwardResponse = bincode::deserialize(&reply.data)?;
+      let result: ForwardResponse = decode(&reply.data)?;
       Ok(result)
     }
   }
@@ -78,7 +80,7 @@ impl NetworkConnection {
 
     self.serialize_buf.clear();
 
-    bincode::serialize_into(&mut self.serialize_buf, &req)?;
+    encode(&req).map(|data| self.serialize_buf.extend_from_slice(&data)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(AppendRequest {
       value: self.serialize_buf.clone(),
@@ -88,7 +90,7 @@ impl NetworkConnection {
 
     let append_reply = grpc_response.into_inner();
 
-    let result: AppendEntriesResponse<TypeConfig> = bincode::deserialize(&append_reply.value)?;
+    let result: AppendEntriesResponse<TypeConfig> = decode(&append_reply.value)?;
 
     Ok(result)
   }
@@ -103,7 +105,7 @@ impl NetworkConnection {
 
     self.serialize_buf.clear();
 
-    bincode::serialize_into(&mut self.serialize_buf, &req)?;
+    encode(&req).map(|data| self.serialize_buf.extend_from_slice(&data)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(PbVoteRequest {
       value: self.serialize_buf.clone(),
@@ -113,7 +115,7 @@ impl NetworkConnection {
 
     let vote_reply = grpc_response.into_inner();
 
-    let result: VoteResponse<TypeConfig> = bincode::deserialize(&vote_reply.value)?;
+    let result: VoteResponse<TypeConfig> = decode(&vote_reply.value)?;
 
     Ok(result)
   }
@@ -128,7 +130,7 @@ impl NetworkConnection {
 
     self.serialize_buf.clear();
 
-    bincode::serialize_into(&mut self.serialize_buf, &req)?;
+    encode(&req).map(|data| self.serialize_buf.extend_from_slice(&data)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(PbSnapshotRequest {
       value: self.serialize_buf.clone(),
@@ -138,7 +140,7 @@ impl NetworkConnection {
 
     let snapshot_reply = grpc_response.into_inner();
 
-    let result: InstallSnapshotResponse<TypeConfig> = bincode::deserialize(&snapshot_reply.value)?;
+    let result: InstallSnapshotResponse<TypeConfig> = decode(&snapshot_reply.value)?;
 
     Ok(result)
   }

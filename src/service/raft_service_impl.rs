@@ -6,7 +6,7 @@ use crate::error::RockRaftError;
 use crate::raft::protobuf as pb;
 
 use crate::node::RaftNode;
-use crate::raft::types::{ForwardRequest, ForwardResponse, TypeConfig};
+use crate::raft::types::{ForwardRequest, ForwardResponse, TypeConfig, decode, encode};
 use openraft::raft;
 use pb::raft_service_server::RaftService;
 
@@ -22,7 +22,7 @@ impl RaftServiceImpl {
   fn result_to_raft_reply(result: Result<ForwardResponse, RockRaftError>) -> pb::RaftReply {
     match result {
       Ok(response) => {
-        let data = bincode::serialize(&response).expect("Failed to serialize ForwardResponse");
+        let data = encode(&response).expect("Failed to serialize ForwardResponse");
         pb::RaftReply {
           data,
           error: String::new().into(),
@@ -49,7 +49,7 @@ impl RaftService for RaftServiceImpl {
     request: Request<pb::RaftRequest>,
   ) -> Result<Response<pb::RaftReply>, Status> {
     let req = request.into_inner();
-    let forward_req: ForwardRequest = bincode::deserialize(&req.data)
+    let forward_req: ForwardRequest = decode(&req.data)
       .map_err(|e| Status::internal(format!("Failed to deserialize forward request: {}", e)))?;
     let response = self.node.handle_forward_request(forward_req).await;
     let reply = Self::result_to_raft_reply(response);
@@ -64,7 +64,7 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
 
     // Deserialize the request
-    let append_req: raft::AppendEntriesRequest<TypeConfig> = bincode::deserialize(&req.value)
+    let append_req: raft::AppendEntriesRequest<TypeConfig> = decode(&req.value)
       .map_err(|e| Status::internal(format!("Failed to deserialize append request: {}", e)))?;
 
     // Forward to Raft instance
@@ -76,7 +76,7 @@ impl RaftService for RaftServiceImpl {
       .map_err(|e| Status::internal(format!("AppendEntries failed: {}", e)))?;
 
     // Serialize the response
-    let response_data = bincode::serialize(&result)
+    let response_data = encode(&result)
       .map_err(|e| Status::internal(format!("Failed to serialize append response: {}", e)))?;
 
     let reply = pb::AppendReply {
@@ -94,7 +94,7 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
 
     // Deserialize the request
-    let vote_req: raft::VoteRequest<TypeConfig> = bincode::deserialize(&req.value)
+    let vote_req: raft::VoteRequest<TypeConfig> = decode(&req.value)
       .map_err(|e| Status::internal(format!("Failed to deserialize vote request: {}", e)))?;
 
     // Forward to Raft instance
@@ -106,7 +106,7 @@ impl RaftService for RaftServiceImpl {
       .map_err(|e| Status::internal(format!("Vote failed: {}", e)))?;
 
     // Serialize the response
-    let response_data = bincode::serialize(&result)
+    let response_data = encode(&result)
       .map_err(|e| Status::internal(format!("Failed to serialize vote response: {}", e)))?;
 
     let reply = pb::VoteReply {
@@ -125,7 +125,7 @@ impl RaftService for RaftServiceImpl {
 
     // Deserialize the request
     let snapshot_req: raft::InstallSnapshotRequest<TypeConfig> =
-      bincode::deserialize(&req.value)
+      decode(&req.value)
         .map_err(|e| Status::internal(format!("Failed to deserialize snapshot request: {}", e)))?;
 
     // Forward to Raft instance
@@ -137,7 +137,7 @@ impl RaftService for RaftServiceImpl {
       .map_err(|e| Status::internal(format!("InstallSnapshot failed: {}", e)))?;
 
     // Serialize the response
-    let response_data = bincode::serialize(&result)
+    let response_data = encode(&result)
       .map_err(|e| Status::internal(format!("Failed to serialize snapshot response: {}", e)))?;
 
     let reply = pb::SnapshotReply {

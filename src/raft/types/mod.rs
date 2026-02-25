@@ -1,6 +1,7 @@
 mod applied_state;
 mod cmd;
 mod endpoint;
+mod formatter;
 mod log_entry;
 mod message;
 mod raft_codec;
@@ -12,6 +13,8 @@ pub use cmd::Cmd;
 pub use cmd::Operation;
 pub use cmd::UpsertKV;
 pub use endpoint::Endpoint;
+pub use formatter::decode;
+pub use formatter::encode;
 pub use log_entry::LogEntry;
 pub use message::ForwardRequest;
 pub use message::ForwardRequestBody;

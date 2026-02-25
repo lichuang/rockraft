@@ -2,8 +2,7 @@ use std::error::Error;
 use std::io;
 
 use crate::raft::types::StoredMembership;
-use bincode::deserialize;
-use bincode::serialize;
+use crate::raft::types::{decode, encode};
 use openraft::alias::LogIdOf;
 use openraft::alias::VoteOf;
 
@@ -21,11 +20,11 @@ impl RaftCodec for LogIdOf<TypeConfig> {
   where
     Self: Sized,
   {
-    Ok(deserialize(buf).map_err(read_logs_err)?)
+    Ok(decode(buf).map_err(read_logs_err)?)
   }
 
   fn encode_to(&self) -> Result<Vec<u8>, io::Error> {
-    Ok(serialize(self).map_err(read_logs_err)?)
+    Ok(encode(self).map_err(read_logs_err)?)
   }
 }
 
@@ -34,11 +33,11 @@ impl RaftCodec for VoteOf<TypeConfig> {
   where
     Self: Sized,
   {
-    Ok(deserialize(buf).map_err(read_logs_err)?)
+    Ok(decode(buf).map_err(read_logs_err)?)
   }
 
   fn encode_to(&self) -> Result<Vec<u8>, io::Error> {
-    Ok(serialize(self).map_err(read_logs_err)?)
+    Ok(encode(self).map_err(read_logs_err)?)
   }
 }
 
@@ -47,11 +46,11 @@ impl RaftCodec for StoredMembership {
   where
     Self: Sized,
   {
-    Ok(deserialize(buf).map_err(read_logs_err)?)
+    Ok(decode(buf).map_err(read_logs_err)?)
   }
 
   fn encode_to(&self) -> Result<Vec<u8>, io::Error> {
-    Ok(serialize(self).map_err(read_logs_err)?)
+    Ok(encode(self).map_err(read_logs_err)?)
   }
 }
 

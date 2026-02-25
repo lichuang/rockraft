@@ -3,8 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use bincode::deserialize;
-use bincode::serialize;
+use crate::raft::types::{decode, encode};
 use futures::Stream;
 use futures::TryStreamExt;
 use openraft::EntryPayload;
@@ -95,7 +94,7 @@ impl RocksStateMachine {
     // Recover last_applied
     let last_applied = match db.get_cf(&cf_meta, LAST_APPLIED_LOG_KEY) {
       Ok(Some(v)) => {
-        let log_id = deserialize(&v).map_err(read_logs_err)?;
+        let log_id = decode(&v).map_err(read_logs_err)?;
         Some(log_id)
       }
       Ok(None) => None,
@@ -106,7 +105,7 @@ impl RocksStateMachine {
     let nodes = db
       .get_cf(&cf_meta, NODES_KEY)
       .map_err(read_logs_err)?
-      .map(|bytes| deserialize(&bytes).map_err(read_logs_err))
+      .map(|bytes| decode(&bytes).map_err(read_logs_err))
       .transpose()?
       .unwrap_or_default();
 
@@ -156,7 +155,7 @@ impl RocksStateMachine {
 
     match log_id {
       Some(id) => {
-        let data = serialize(&id).map_err(read_logs_err)?;
+        let data = encode(&id).map_err(read_logs_err)?;
         self
           .db
           .put_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY, data)
@@ -184,7 +183,7 @@ impl RocksStateMachine {
 
     sys_data.nodes.insert(node.node_id, node);
 
-    let data = serialize(&sys_data.nodes).map_err(read_logs_err)?;
+    let data = encode(&sys_data.nodes).map_err(read_logs_err)?;
     self
       .db
       .put_cf(&self.cf_sm_meta(), NODES_KEY, data)
@@ -198,7 +197,7 @@ impl RocksStateMachine {
 
     sys_data.nodes.remove(&node_id);
 
-    let data = serialize(&sys_data.nodes).map_err(read_logs_err)?;
+    let data = encode(&sys_data.nodes).map_err(read_logs_err)?;
     self
       .db
       .put_cf(&self.cf_sm_meta(), NODES_KEY, data)

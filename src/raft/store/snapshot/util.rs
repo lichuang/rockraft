@@ -1,8 +1,7 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use bincode::deserialize;
-use bincode::serialize;
+use crate::raft::types::{decode, encode};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt as _;
@@ -233,7 +232,7 @@ pub async fn save_snapshot_meta(
 ) -> std::io::Result<()> {
   let meta_file = snapshot_meta_file(snapshot_id_dir);
 
-  let data = serialize(&meta).map_err(|e| {
+  let data = encode(&meta).map_err(|e| {
     std::io::Error::new(
       ErrorKind::InvalidData,
       format!("Serialize meta data error: {}", e),
@@ -273,7 +272,7 @@ pub async fn get_snapshot_meta(snapshot_id_dir: &PathBuf) -> std::io::Result<Sna
   let mut data = Vec::new();
   file.read_to_end(&mut data).await?;
 
-  deserialize(&data)
+  decode(&data)
     .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, format!("Deserialize error: {}", e)))
 }
 

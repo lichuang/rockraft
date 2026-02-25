@@ -37,7 +37,7 @@ use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::store::column_family_list;
 use crate::raft::types::{
-  AppliedState, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig,
+  AppliedState, decode, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig,
 };
 use crate::raft::types::{
   ForwardToLeader, GetKVReply, GetKVReq, GetMembersReply, GetMembersReq, LeaveRequest, NodeId,
@@ -623,7 +623,7 @@ impl RaftNode {
 
     if reply.error.is_empty() {
       // Deserialize the response data
-      let forward_response: ForwardResponse = bincode::deserialize(&reply.data).map_err(|e| {
+      let forward_response: ForwardResponse = decode(&reply.data).map_err(|e| {
         RockRaftError::TonicStatus(Status::internal(format!(
           "Failed to deserialize response: {}",
           e
