@@ -204,7 +204,7 @@ pub(crate) async fn get_last_snapshot_id(snapshot_dir: &PathBuf) -> std::io::Res
 
 /// Save snapshot metadata to the snapshot ID directory.
 ///
-/// This function serializes the provided snapshot metadata using bincode and writes it
+/// This function serializes the provided snapshot metadata using encoder and writes it
 /// to the "meta" file in the specified snapshot ID directory. The metadata includes information
 /// such as the snapshot ID, term, membership configuration, and other Raft-related metadata.
 ///
@@ -249,7 +249,7 @@ pub async fn save_snapshot_meta(
 /// Retrieve and deserialize snapshot metadata from a file.
 ///
 /// This function reads the serialized snapshot metadata from the specified file path,
-/// deserializes it using bincode, and returns the `SnapshotMeta` object.
+/// deserializes it using encoder, and returns the `SnapshotMeta` object.
 ///
 /// # Arguments
 ///
@@ -265,7 +265,7 @@ pub async fn save_snapshot_meta(
 /// This function will return an error if:
 /// - The metadata file doesn't exist (ErrorKind::NotFound)
 /// - There are insufficient permissions to read the file
-/// - The file contains invalid or corrupted bincode data (ErrorKind::InvalidData)
+/// - The file contains invalid or corrupted data (ErrorKind::InvalidData)
 /// - The file system experiences an I/O error
 pub async fn get_snapshot_meta(snapshot_id_dir: &PathBuf) -> std::io::Result<SnapshotMeta> {
   let mut file = File::open(snapshot_id_dir).await?;

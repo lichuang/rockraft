@@ -29,9 +29,6 @@ pub enum RockRaftError {
   #[error("Tonic RPC status error: {0}")]
   TonicStatus(#[from] tonic::Status),
 
-  #[error("Bincode serialization/deserialization error: {0}")]
-  BincodeSerialize(#[from] bincode::Error),
-
   #[error("Serialization error: {0}")]
   Serialize(#[from] postcard::Error),
 
