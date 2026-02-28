@@ -243,11 +243,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
       let id = id_to_bin(entry.index());
       self
         .db
-        .put_cf(
-          &self.cf_logs(),
-          id,
-          encode(&entry).map_err(read_logs_err)?,
-        )
+        .put_cf(&self.cf_logs(), id, encode(&entry).map_err(read_logs_err)?)
         .map_err(read_logs_err)?;
     }
 
@@ -315,7 +311,7 @@ mod tests {
   use openraft::Vote;
   use rocksdb::Options;
 
-  use crate::raft::types::{Cmd, LeaderId, LogId, LogEntry, Operation, UpsertKV};
+  use crate::raft::types::{Cmd, LeaderId, LogEntry, LogId, Operation, UpsertKV};
 
   use super::*;
 
@@ -344,13 +340,11 @@ mod tests {
   fn create_entry(term: u64, node_id: u64, index: u64) -> Entry {
     Entry {
       log_id: create_log_id(term, node_id, index),
-      payload: openraft::EntryPayload::Normal(LogEntry::new(Cmd::UpsertKV(
-        UpsertKV::new(
-          format!("key_{}_{}", term, index),
-          Operation::Update(format!("data_{}_{}", term, index).into_bytes()),
-          None,
-        ),
-      ))),
+      payload: openraft::EntryPayload::Normal(LogEntry::new(Cmd::UpsertKV(UpsertKV::new(
+        format!("key_{}_{}", term, index),
+        Operation::Update(format!("data_{}_{}", term, index).into_bytes()),
+        None,
+      )))),
     }
   }
 

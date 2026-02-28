@@ -124,9 +124,8 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
 
     // Deserialize the request
-    let snapshot_req: raft::InstallSnapshotRequest<TypeConfig> =
-      decode(&req.value)
-        .map_err(|e| Status::internal(format!("Failed to deserialize snapshot request: {}", e)))?;
+    let snapshot_req: raft::InstallSnapshotRequest<TypeConfig> = decode(&req.value)
+      .map_err(|e| Status::internal(format!("Failed to deserialize snapshot request: {}", e)))?;
 
     // Forward to Raft instance
     let result = self

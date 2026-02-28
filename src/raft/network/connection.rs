@@ -22,10 +22,10 @@ use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
 use crate::raft::protobuf::VoteRequest as PbVoteRequest;
 use crate::raft::types::ForwardRequest;
 use crate::raft::types::ForwardResponse;
-use crate::raft::types::decode;
-use crate::raft::types::encode;
 use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
+use crate::raft::types::decode;
+use crate::raft::types::encode;
 
 /// Represents a network connection to a specific Raft node.
 ///
@@ -51,7 +51,9 @@ impl NetworkConnection {
 
     self.serialize_buf.clear();
 
-    encode(&req).map(|data| self.serialize_buf.extend_from_slice(&data)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    encode(&req)
+      .map(|data| self.serialize_buf.extend_from_slice(&data))
+      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(RaftRequest {
       data: self.serialize_buf.clone(),
@@ -80,7 +82,9 @@ impl NetworkConnection {
 
     self.serialize_buf.clear();
 
-    encode(&req).map(|data| self.serialize_buf.extend_from_slice(&data)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    encode(&req)
+      .map(|data| self.serialize_buf.extend_from_slice(&data))
+      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(AppendRequest {
       value: self.serialize_buf.clone(),
@@ -105,7 +109,9 @@ impl NetworkConnection {
 
     self.serialize_buf.clear();
 
-    encode(&req).map(|data| self.serialize_buf.extend_from_slice(&data)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    encode(&req)
+      .map(|data| self.serialize_buf.extend_from_slice(&data))
+      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(PbVoteRequest {
       value: self.serialize_buf.clone(),
@@ -130,7 +136,9 @@ impl NetworkConnection {
 
     self.serialize_buf.clear();
 
-    encode(&req).map(|data| self.serialize_buf.extend_from_slice(&data)).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    encode(&req)
+      .map(|data| self.serialize_buf.extend_from_slice(&data))
+      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(PbSnapshotRequest {
       value: self.serialize_buf.clone(),

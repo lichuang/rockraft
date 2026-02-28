@@ -4,8 +4,8 @@
 //! functions to centralize encoding/decoding logic throughout the codebase.
 
 use crate::error::Result;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// Serialize a value into a byte vector using postcard.
 ///

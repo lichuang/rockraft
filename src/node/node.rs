@@ -37,7 +37,7 @@ use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::store::column_family_list;
 use crate::raft::types::{
-  AppliedState, decode, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig,
+  AppliedState, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig, decode,
 };
 use crate::raft::types::{
   ForwardToLeader, GetKVReply, GetKVReq, GetMembersReply, GetMembersReq, LeaveRequest, NodeId,

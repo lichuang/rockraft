@@ -2,8 +2,11 @@
 name = "rockraft"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 description = "A strong consistency KV service library base on Raft and Rocksdb"
 keywords = ["raft", "consensus", "rocksdb"]
+readme = "README.md"
+repository = "https://github.com/lichuang/rockraft"
 
 [dependencies]
 anyerror = { version = "=0.1.13" }

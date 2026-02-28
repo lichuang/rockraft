@@ -1,9 +1,9 @@
 use crate::raft::protobuf as pb;
-use crate::raft::types::encode;
 use crate::raft::types::AppliedState;
 use crate::raft::types::LogEntry;
-use crate::raft::types::message::GetMembersReq;
+use crate::raft::types::encode;
 use crate::raft::types::message::GetMembersReply;
+use crate::raft::types::message::GetMembersReq;
 use crate::raft::types::message::JoinRequest;
 use crate::raft::types::message::LeaveRequest;
 use serde::Deserialize;
