@@ -3,7 +3,7 @@
 A strongly consistent distributed key-value store library built on Raft consensus protocol and RocksDB.
 
 [![Rust](https://img.shields.io/badge/rust-2024+-dea584.svg?logo=rust)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 ## Overview
 
