@@ -1,9 +1,9 @@
-use openraft::AnyError;
 use openraft::ErrorSubject;
 use openraft::ErrorVerb;
 use openraft::StorageError;
 use openraft::alias::LogIdOf;
 use openraft::alias::VoteOf;
+use openraft::errors::ErrorSource;
 
 use crate::raft::types::RaftCodec;
 use crate::raft::types::TypeConfig;
@@ -20,15 +20,27 @@ pub trait StoreMeta {
   fn subject(v: Option<&Self::Value>) -> ErrorSubject<TypeConfig>;
 
   fn read_err(e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
-    StorageError::new(Self::subject(None), ErrorVerb::Read, AnyError::new(&e))
+    StorageError::new(
+      Self::subject(None),
+      ErrorVerb::Read,
+      openraft::impls::BoxedErrorSource::from_error(&e),
+    )
   }
 
   fn write_err(v: &Self::Value, e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
-    StorageError::new(Self::subject(Some(v)), ErrorVerb::Write, AnyError::new(&e))
+    StorageError::new(
+      Self::subject(Some(v)),
+      ErrorVerb::Write,
+      openraft::impls::BoxedErrorSource::from_error(&e),
+    )
   }
 
   fn delete_err(e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
-    StorageError::new(Self::subject(None), ErrorVerb::Delete, AnyError::new(&e))
+    StorageError::new(
+      Self::subject(None),
+      ErrorVerb::Delete,
+      openraft::impls::BoxedErrorSource::from_error(&e),
+    )
   }
 }
 

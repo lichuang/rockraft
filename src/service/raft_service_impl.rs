@@ -1,22 +1,38 @@
+use std::collections::HashMap;
+use std::io::SeekFrom;
 use std::sync::Arc;
 
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
 use crate::error::RockRaftError;
 use crate::raft::protobuf as pb;
 
 use crate::node::RaftNode;
-use crate::raft::types::{ForwardRequest, ForwardResponse, TypeConfig, decode, encode};
+use crate::raft::types::{ForwardRequest, ForwardResponse, Snapshot, TypeConfig, decode, encode};
+use openraft::async_runtime::watch::WatchReceiver;
 use openraft::raft;
 use pb::raft_service_server::RaftService;
 
+/// State for receiving a snapshot chunk
+struct StreamingSnapshot {
+  snapshot_id: String,
+  data: tokio::fs::File,
+}
+
 pub struct RaftServiceImpl {
   node: Arc<RaftNode>,
+  /// Store ongoing snapshot streaming operations
+  streaming_snapshots: Mutex<HashMap<String, StreamingSnapshot>>,
 }
 
 impl RaftServiceImpl {
   pub fn new(node: Arc<RaftNode>) -> Self {
-    Self { node }
+    Self {
+      node,
+      streaming_snapshots: Mutex::new(HashMap::new()),
+    }
   }
 
   fn result_to_raft_reply(result: Result<ForwardResponse, RockRaftError>) -> pb::RaftReply {
@@ -117,6 +133,9 @@ impl RaftService for RaftServiceImpl {
   }
 
   /// Handle InstallSnapshot RPC from other Raft nodes
+  ///
+  /// This method receives snapshot chunks and assembles them into a complete snapshot.
+  /// When all chunks are received (done=true), it installs the snapshot via install_full_snapshot.
   async fn snapshot(
     &self,
     request: Request<pb::SnapshotRequest>,
@@ -127,16 +146,104 @@ impl RaftService for RaftServiceImpl {
     let snapshot_req: raft::InstallSnapshotRequest<TypeConfig> = decode(&req.value)
       .map_err(|e| Status::internal(format!("Failed to deserialize snapshot request: {}", e)))?;
 
-    // Forward to Raft instance
-    let result = self
-      .node
-      .raft()
-      .install_snapshot(snapshot_req)
-      .await
-      .map_err(|e| Status::internal(format!("InstallSnapshot failed: {}", e)))?;
+    let vote = snapshot_req.vote.clone();
+    let snapshot_id = snapshot_req.meta.snapshot_id.clone();
+    let snapshot_meta = snapshot_req.meta.clone();
+    let offset = snapshot_req.offset;
+    let done = snapshot_req.done;
 
-    // Serialize the response
-    let response_data = encode(&result)
+    let mut streaming_guard = self.streaming_snapshots.lock().await;
+
+    // Check if this is a new snapshot or continuation
+    let curr_id = streaming_guard
+      .get(&snapshot_id)
+      .map(|s| s.snapshot_id.clone());
+
+    if curr_id != Some(snapshot_id.clone()) {
+      // New snapshot - must start at offset 0
+      if offset != 0 {
+        return Err(Status::internal(format!(
+          "Snapshot mismatch: expected offset 0 for new snapshot {}, got {}",
+          snapshot_id, offset
+        )));
+      }
+
+      // Create a temporary file for receiving the snapshot
+      let std_file = std::fs::File::create(
+        std::env::temp_dir().join(format!("rockraft_snapshot_{}", snapshot_id)),
+      )
+      .map_err(|e| Status::internal(format!("Failed to create temp file: {}", e)))?;
+      let tokio_file = tokio::fs::File::from_std(std_file);
+
+      streaming_guard.insert(
+        snapshot_id.clone(),
+        StreamingSnapshot {
+          snapshot_id: snapshot_id.clone(),
+          data: tokio_file,
+        },
+      );
+    }
+
+    // Get the streaming snapshot entry and write the chunk
+    let streaming = streaming_guard
+      .get_mut(&snapshot_id)
+      .ok_or_else(|| Status::internal("Streaming snapshot not found"))?;
+
+    // Seek to the correct position and write the data
+    streaming
+      .data
+      .seek(SeekFrom::Start(offset))
+      .await
+      .map_err(|e| Status::internal(format!("Failed to seek: {}", e)))?;
+
+    streaming
+      .data
+      .write_all(&snapshot_req.data)
+      .await
+      .map_err(|e| Status::internal(format!("Failed to write snapshot data: {}", e)))?;
+
+    // If done, finalize the snapshot
+    if done {
+      let streaming = streaming_guard
+        .remove(&snapshot_id)
+        .ok_or_else(|| Status::internal("Streaming snapshot not found"))?;
+
+      let mut data = streaming.data;
+
+      // Sync data to disk
+      data
+        .shutdown()
+        .await
+        .map_err(|e| Status::internal(format!("Failed to shutdown file: {}", e)))?;
+
+      // Create the snapshot and install it
+      let snapshot = Snapshot {
+        meta: snapshot_meta,
+        snapshot: data,
+      };
+
+      let result = self
+        .node
+        .raft()
+        .install_full_snapshot(vote, snapshot)
+        .await
+        .map_err(|e| Status::internal(format!("InstallFullSnapshot failed: {}", e)))?;
+
+      // Serialize the response
+      let response_data = encode(&result)
+        .map_err(|e| Status::internal(format!("Failed to serialize snapshot response: {}", e)))?;
+
+      let reply = pb::SnapshotReply {
+        value: response_data,
+      };
+
+      return Ok(Response::new(reply));
+    }
+
+    // Return intermediate response with current vote
+    let my_vote = WatchReceiver::borrow_watched(&self.node.raft().metrics()).vote;
+    let resp = raft::InstallSnapshotResponse::<TypeConfig> { vote: my_vote };
+    let response_data = encode(&resp)
       .map_err(|e| Status::internal(format!("Failed to serialize snapshot response: {}", e)))?;
 
     let reply = pb::SnapshotReply {

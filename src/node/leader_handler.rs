@@ -15,6 +15,7 @@ use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
 use openraft::ChangeMembers;
 use openraft::Raft;
+use openraft::async_runtime::watch::WatchReceiver;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -74,7 +75,7 @@ impl<'a> LeaderHandler<'a> {
     info!("Handling join request for node {}", node_id);
 
     // Get current membership and check if node already exists
-    let metrics = self.raft().metrics().borrow().clone();
+    let metrics = self.raft().metrics().borrow_watched().clone();
     let membership = metrics.membership_config.membership();
 
     let voters: BTreeSet<u64> = membership.voter_ids().collect();
@@ -147,7 +148,7 @@ impl<'a> LeaderHandler<'a> {
     let node_id = req.node_id;
 
     // Get current membership and check if node exists
-    let metrics = self.raft().metrics().borrow().clone();
+    let metrics = self.raft().metrics().borrow_watched().clone();
     let membership = metrics.membership_config.membership();
 
     let voters: BTreeSet<u64> = membership.voter_ids().collect();

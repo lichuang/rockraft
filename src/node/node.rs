@@ -23,6 +23,7 @@ use tokio::time::sleep;
 
 use openraft::Config as OpenRaftConfig;
 use openraft::Raft;
+use openraft::async_runtime::watch::WatchReceiver;
 use tonic::Status;
 use tonic::transport::Server;
 
@@ -252,10 +253,10 @@ impl RaftNode {
 
     let result = timeout(deadline, async {
       loop {
-        if let Some(leader) = metrics_rx.borrow().current_leader {
+        if let Some(leader) = metrics_rx.borrow_watched().current_leader {
           return Ok(Some(leader));
         }
-        if let Err(e) = metrics_rx.changed().await {
+        if let Err(e) = WatchReceiver::changed(&mut metrics_rx).await {
           // If changed() returns an error, the watch channel is closed
           // or receiver lagged. Return the error to the caller
           let error_msg = format!("Metrics watch error: {:?}", e);

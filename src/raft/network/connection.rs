@@ -1,16 +1,23 @@
-use openraft::error::InstallSnapshotError;
 use openraft::error::NetworkError;
 use openraft::error::RPCError;
-use openraft::error::RaftError;
+
+use openraft::errors::ReplicationClosed;
+use openraft::errors::StreamingError;
 use openraft::network::RPCOption;
-use openraft::network::RaftNetwork;
+use openraft::network::RaftNetworkV2;
 use openraft::raft::AppendEntriesRequest;
 use openraft::raft::AppendEntriesResponse;
 use openraft::raft::InstallSnapshotRequest;
-use openraft::raft::InstallSnapshotResponse;
+use openraft::raft::SnapshotResponse;
 use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
+use openraft::storage::Snapshot;
+use openraft::type_config::alias::VoteOf;
+use std::future::Future;
+use std::io::SeekFrom;
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 
 use crate::error::APIError;
 use crate::error::Result;
@@ -131,7 +138,7 @@ impl NetworkConnection {
   async fn install_snapshot_internal(
     &mut self,
     req: InstallSnapshotRequest<TypeConfig>,
-  ) -> Result<InstallSnapshotResponse<TypeConfig>> {
+  ) -> Result<SnapshotResponse<TypeConfig>> {
     let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
 
     self.serialize_buf.clear();
@@ -148,37 +155,105 @@ impl NetworkConnection {
 
     let snapshot_reply = grpc_response.into_inner();
 
-    let result: InstallSnapshotResponse<TypeConfig> = decode(&snapshot_reply.value)?;
+    let result: SnapshotResponse<TypeConfig> = decode(&snapshot_reply.value)?;
 
     Ok(result)
   }
+
+  /// Send a snapshot in chunks to the target node.
+  /// This implements the full_snapshot functionality by splitting the snapshot into chunks
+  /// and sending them via install_snapshot RPCs.
+  async fn send_snapshot_in_chunks(
+    &mut self,
+    vote: VoteOf<TypeConfig>,
+    snapshot: Snapshot<TypeConfig>,
+    cancel: impl Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
+    option: RPCOption,
+  ) -> std::result::Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
+    use futures::FutureExt;
+
+    // Pin the cancel future
+    let mut cancel = std::pin::pin!(cancel);
+
+    // Get snapshot size by seeking to end
+    let mut snapshot_data = snapshot.snapshot;
+    let end = snapshot_data
+      .seek(SeekFrom::End(0))
+      .await
+      .map_err(|e| StreamingError::from(openraft::error::Unreachable::new(&e)))?;
+
+    // Seek back to beginning
+    snapshot_data
+      .seek(SeekFrom::Start(0))
+      .await
+      .map_err(|e| StreamingError::from(openraft::error::Unreachable::new(&e)))?;
+
+    let mut offset = 0u64;
+    // Use default chunk size of 64KB if not specified
+    let chunk_size = option.snapshot_chunk_size().unwrap_or(64 * 1024);
+
+    loop {
+      // Check if cancelled
+      if let Some(err) = cancel.as_mut().now_or_never() {
+        return Err(err.into());
+      }
+
+      // Read chunk
+      let mut buf = Vec::with_capacity(chunk_size);
+      while buf.len() < chunk_size {
+        let n = snapshot_data
+          .read_buf(&mut buf)
+          .await
+          .map_err(|e| StreamingError::from(openraft::error::Unreachable::new(&e)))?;
+        if n == 0 {
+          break;
+        }
+      }
+
+      let n_read = buf.len();
+      let done = (offset + n_read as u64) >= end;
+
+      let req = InstallSnapshotRequest {
+        vote: vote.clone(),
+        meta: snapshot.meta.clone(),
+        offset,
+        data: buf,
+        done,
+      };
+
+      // Send chunk using internal method
+      match self.install_snapshot_internal(req).await {
+        Ok(resp) => {
+          if resp.vote != vote {
+            // Higher vote received
+            return Ok(resp);
+          }
+          if done {
+            return Ok(resp);
+          }
+        }
+        Err(err) => {
+          // Convert RockRaftError to RPCError
+          let io_err = std::io::Error::new(std::io::ErrorKind::Other, err.to_string());
+          return Err(StreamingError::from(openraft::error::Unreachable::new(
+            &io_err,
+          )));
+        }
+      }
+
+      offset += n_read as u64;
+    }
+  }
 }
 
-impl RaftNetwork<TypeConfig> for NetworkConnection {
+impl RaftNetworkV2<TypeConfig> for NetworkConnection {
   async fn append_entries(
     &mut self,
     rpc: AppendEntriesRequest<TypeConfig>,
     _option: RPCOption,
-  ) -> std::result::Result<
-    AppendEntriesResponse<TypeConfig>,
-    RPCError<TypeConfig, RaftError<TypeConfig>>,
-  > {
+  ) -> std::result::Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
     self
       .append_entries_internal(rpc)
-      .await
-      .map_err(|e| RPCError::Network(NetworkError::new(&e)))
-  }
-
-  async fn install_snapshot(
-    &mut self,
-    rpc: InstallSnapshotRequest<TypeConfig>,
-    _option: RPCOption,
-  ) -> std::result::Result<
-    InstallSnapshotResponse<TypeConfig>,
-    RPCError<TypeConfig, RaftError<TypeConfig, InstallSnapshotError>>,
-  > {
-    self
-      .install_snapshot_internal(rpc)
       .await
       .map_err(|e| RPCError::Network(NetworkError::new(&e)))
   }
@@ -187,12 +262,24 @@ impl RaftNetwork<TypeConfig> for NetworkConnection {
     &mut self,
     rpc: VoteRequest<TypeConfig>,
     _option: RPCOption,
-  ) -> std::result::Result<VoteResponse<TypeConfig>, RPCError<TypeConfig, RaftError<TypeConfig>>>
-  {
+  ) -> std::result::Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
     self
       .vote_internal(rpc)
       .await
       .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+  }
+
+  async fn full_snapshot(
+    &mut self,
+    vote: VoteOf<TypeConfig>,
+    snapshot: Snapshot<TypeConfig>,
+    cancel: impl Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
+    option: RPCOption,
+  ) -> std::result::Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
+    // Send snapshot in chunks using our internal method
+    self
+      .send_snapshot_in_chunks(vote, snapshot, cancel, option)
+      .await
   }
 }
 

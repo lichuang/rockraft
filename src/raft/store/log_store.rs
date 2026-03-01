@@ -262,10 +262,14 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
     Ok(())
   }
 
-  async fn truncate(&mut self, log_id: LogIdOf<TypeConfig>) -> Result<(), io::Error> {
-    tracing::debug!("truncate: [{:?}, +oo)", log_id);
+  async fn truncate_after(&mut self, log_id: Option<LogIdOf<TypeConfig>>) -> Result<(), io::Error> {
+    tracing::debug!("truncate_after: [{:?}, +oo)", log_id);
 
-    let from = id_to_bin(log_id.index());
+    // If log_id is None, truncate everything
+    let from = match log_id {
+      Some(ref id) => id_to_bin(id.index()),
+      None => id_to_bin(0),
+    };
     let to = id_to_bin(u64::MAX);
     self
       .db
@@ -374,7 +378,9 @@ mod tests {
     append_entries(&mut log_store, more).await?;
     assert_eq!(log_store.try_get_log_entries(1..=15).await?.len(), 15);
 
-    log_store.truncate(create_log_id(1, 1, 11)).await?;
+    log_store
+      .truncate_after(Some(create_log_id(1, 1, 11)))
+      .await?;
     assert_eq!(log_store.try_get_log_entries(1..=15).await?.len(), 10);
     assert_eq!(log_store.try_get_log_entries(11..=15).await?.len(), 0);
 

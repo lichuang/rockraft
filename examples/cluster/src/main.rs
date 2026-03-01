@@ -5,6 +5,7 @@ use axum::{
   response::{IntoResponse, Json},
   routing::{get, post},
 };
+use openraft::async_runtime::watch::WatchReceiver;
 use rockraft::config::Config as RockraftConfig;
 use rockraft::node::RaftNodeBuilder;
 use rockraft::raft::types::{Cmd, GetKVReq, LeaveRequest, LogEntry};
@@ -318,7 +319,7 @@ async fn delete_handler(
 
 /// Handler for GET /health endpoint
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
-  let metrics = state.raft_node.raft().metrics().borrow().clone();
+  let metrics = state.raft_node.raft().metrics().borrow_watched().clone();
 
   Json(serde_json::json!({
     "status": "ok",
@@ -332,7 +333,7 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Handler for GET /metrics endpoint
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
-  let metrics = state.raft_node.raft().metrics().borrow().clone();
+  let metrics = state.raft_node.raft().metrics().borrow_watched().clone();
 
   Json(serde_json::json!({
     "node_id": state.raft_node.raft().node_id(),
