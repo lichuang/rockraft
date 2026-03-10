@@ -4,10 +4,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   config.protoc_arg("--experimental_allow_proto3_optional");
   let proto_files = ["src/raft/proto/raft.proto"];
 
-  tonic_build::configure()
-    .btree_map(["."])
-    .type_attribute("raftpb.AppendRequest", "#[derive(Eq)]")
-    .type_attribute("raftpb.AppendReply", "#[derive(Eq)]")
-    .compile_protos_with_config(config, &proto_files, &["proto"])?;
+  tonic_prost_build::configure()
+    .btree_map(".")
+    .compile_with_config(config, &proto_files, &["proto"])?;
   Ok(())
 }
