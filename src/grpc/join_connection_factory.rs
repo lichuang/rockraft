@@ -2,7 +2,6 @@ use super::{client_config::RpcClientTlsConfig, dns_resolver::DNSService};
 use crate::error::GrpcConnectionError;
 use crate::error::Result;
 use crate::error::RockRaftError;
-use anyerror::AnyError;
 use hyper_util::client::legacy::connect::HttpConnector;
 use std::time::Duration;
 use tonic::transport::Certificate;
@@ -34,7 +33,7 @@ impl JoinConnectionFactory {
       Err(error) => Err(RockRaftError::GrpcConnection(
         GrpcConnectionError::CannotConnect {
           uri: endpoint.uri().to_string(),
-          source: AnyError::new(&error),
+          msg: error.to_string(),
         },
       )),
     }
@@ -54,7 +53,7 @@ impl JoinConnectionFactory {
       Err(error) => Err(RockRaftError::GrpcConnection(
         GrpcConnectionError::InvalidUri {
           uri: addr.to_string(),
-          source: AnyError::new(&error),
+          msg: error.to_string(),
         },
       )),
       Ok(uri) => {
@@ -64,12 +63,12 @@ impl JoinConnectionFactory {
           let client_tls_config =
             Self::client_tls_config(&conf).map_err(|e| GrpcConnectionError::TLSConfigError {
               action: "loading".to_string(),
-              source: AnyError::new(&e),
+              msg: e.to_string(),
             })?;
           builder.tls_config(client_tls_config).map_err(|e| {
             GrpcConnectionError::TLSConfigError {
               action: "building".to_string(),
-              source: AnyError::new(&e),
+              msg: e.to_string(),
             }
           })?
         } else {

@@ -1,25 +1,13 @@
-use anyerror::AnyError;
+use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum GrpcConnectionError {
-  #[error("invalid uri: {uri}, error: {source}")]
-  InvalidUri {
-    uri: String,
-    #[source]
-    source: AnyError,
-  },
+  #[error("invalid uri: {uri}, error: {msg}")]
+  InvalidUri { uri: String, msg: String },
 
-  #[error("{action} client tls config, error: {source}")]
-  TLSConfigError {
-    action: String,
-    #[source]
-    source: AnyError,
-  },
+  #[error("{action} client tls config, error: {msg}")]
+  TLSConfigError { action: String, msg: String },
 
-  #[error("can not connect to {uri}, error: {source}")]
-  CannotConnect {
-    uri: String,
-    #[source]
-    source: AnyError,
-  },
+  #[error("can not connect to {uri}, error: {msg}")]
+  CannotConnect { uri: String, msg: String },
 }
