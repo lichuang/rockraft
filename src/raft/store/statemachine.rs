@@ -150,6 +150,32 @@ impl RocksStateMachine {
       .map_err(read_logs_err)
   }
 
+  /// Scan all key-value pairs with the given prefix from the KV store
+  pub fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, io::Error> {
+    let cf = self.cf_sm_data();
+    let mut results = Vec::new();
+
+    // Use iterator starting from the prefix
+    // This works regardless of the prefix extractor configuration
+    let iter = self.db.iterator_cf(
+      &cf,
+      rocksdb::IteratorMode::From(prefix, rocksdb::Direction::Forward),
+    );
+
+    for item in iter {
+      let (key, value) = item.map_err(|e| io::Error::other(e.to_string()))?;
+
+      // Check if the key has the prefix
+      if !key.starts_with(prefix) {
+        break;
+      }
+
+      results.push((key.to_vec(), value.to_vec()));
+    }
+
+    Ok(results)
+  }
+
   fn set_last_applied_log_id(&self, log_id: Option<LogId>) -> Result<(), io::Error> {
     let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
 
@@ -613,6 +639,147 @@ mod tests {
     assert_eq!(recovered_node3.node_id, 3);
     assert_eq!(recovered_node3.endpoint.addr(), "127.0.0.1");
     assert_eq!(recovered_node3.endpoint.port(), 9093);
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_scan_prefix_basic() -> Result<(), io::Error> {
+    let sm = create_test_state_machine().await;
+
+    // Insert test data with different prefixes
+    let cf_data = sm.cf_sm_data();
+    sm.db
+      .put_cf(&cf_data, b"user:1:name", b"Alice")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, b"user:1:age", b"25")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, b"user:2:name", b"Bob")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, b"user:2:age", b"30")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, b"product:1:name", b"Laptop")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, b"product:1:price", b"999")
+      .map_err(read_logs_err)?;
+
+    // Scan with "user:" prefix
+    let user_results = sm.scan_prefix(b"user:")?;
+    assert_eq!(user_results.len(), 4);
+
+    // Verify all user keys are returned
+    let keys: Vec<_> = user_results
+      .iter()
+      .map(|(k, _)| String::from_utf8_lossy(k).to_string())
+      .collect();
+    assert!(keys.contains(&"user:1:name".to_string()));
+    assert!(keys.contains(&"user:1:age".to_string()));
+    assert!(keys.contains(&"user:2:name".to_string()));
+    assert!(keys.contains(&"user:2:age".to_string()));
+
+    // Scan with "user:1:" prefix
+    let user1_results = sm.scan_prefix(b"user:1:")?;
+    assert_eq!(user1_results.len(), 2);
+
+    let user1_keys: Vec<_> = user1_results
+      .iter()
+      .map(|(k, _)| String::from_utf8_lossy(k).to_string())
+      .collect();
+    assert!(user1_keys.contains(&"user:1:name".to_string()));
+    assert!(user1_keys.contains(&"user:1:age".to_string()));
+
+    // Scan with "product:" prefix
+    let product_results = sm.scan_prefix(b"product:")?;
+    assert_eq!(product_results.len(), 2);
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_scan_prefix_empty_result() -> Result<(), io::Error> {
+    let sm = create_test_state_machine().await;
+
+    // Insert test data
+    let cf_data = sm.cf_sm_data();
+    sm.db
+      .put_cf(&cf_data, b"key1", b"value1")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, b"key2", b"value2")
+      .map_err(read_logs_err)?;
+
+    // Scan with non-existent prefix
+    let results = sm.scan_prefix(b"nonexistent:")?;
+    assert!(results.is_empty());
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_scan_prefix_binary_keys() -> Result<(), io::Error> {
+    let sm = create_test_state_machine().await;
+
+    // Insert binary data with prefixes
+    let cf_data = sm.cf_sm_data();
+    sm.db
+      .put_cf(&cf_data, &[0x01, 0x00, 0x01], b"data1")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, &[0x01, 0x00, 0x02], b"data2")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, &[0x01, 0x01, 0x01], b"data3")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, &[0x02, 0x00, 0x01], b"data4")
+      .map_err(read_logs_err)?;
+
+    // Scan with prefix [0x01, 0x00]
+    let results = sm.scan_prefix(&[0x01, 0x00])?;
+    assert_eq!(results.len(), 2);
+
+    // Verify correct data is returned
+    let values: Vec<_> = results.iter().map(|(_, v)| v.clone()).collect();
+    assert!(values.contains(&b"data1".to_vec()));
+    assert!(values.contains(&b"data2".to_vec()));
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_scan_prefix_values_match() -> Result<(), io::Error> {
+    let sm = create_test_state_machine().await;
+
+    // Insert test data
+    let cf_data = sm.cf_sm_data();
+    sm.db
+      .put_cf(&cf_data, b"config:host", b"localhost")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, b"config:port", b"8080")
+      .map_err(read_logs_err)?;
+    sm.db
+      .put_cf(&cf_data, b"config:timeout", b"30")
+      .map_err(read_logs_err)?;
+
+    // Scan and verify values
+    let results = sm.scan_prefix(b"config:")?;
+    assert_eq!(results.len(), 3);
+
+    // Convert to a map for easier verification
+    let map: std::collections::HashMap<_, _> = results.into_iter().collect();
+
+    assert_eq!(
+      map.get(b"config:host".as_slice()),
+      Some(&b"localhost".to_vec())
+    );
+    assert_eq!(map.get(b"config:port".as_slice()), Some(&b"8080".to_vec()));
+    assert_eq!(map.get(b"config:timeout".as_slice()), Some(&b"30".to_vec()));
 
     Ok(())
   }
