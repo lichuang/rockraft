@@ -21,6 +21,8 @@ pub use message::ForwardRequestBody;
 pub use message::ForwardResponse;
 pub use message::GetKVReply;
 pub use message::GetKVReq;
+pub use message::ScanPrefixReply;
+pub use message::ScanPrefixReq;
 pub use message::GetMembersReply;
 pub use message::GetMembersReq;
 pub use message::JoinRequest;

@@ -8,7 +8,7 @@ use axum::{
 use openraft::async_runtime::watch::WatchReceiver;
 use rockraft::config::Config as RockraftConfig;
 use rockraft::node::RaftNodeBuilder;
-use rockraft::raft::types::{Cmd, GetKVReq, LeaveRequest, LogEntry};
+use rockraft::raft::types::{Cmd, GetKVReq, LeaveRequest, LogEntry, ScanPrefixReq};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -182,6 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .route("/get", get(get_handler))
     .route("/set", post(set_handler))
     .route("/delete", post(delete_handler))
+    .route("/prefix", get(prefix_handler))
     .route("/leave", post(leave_handler))
     .route("/members", get(members_handler))
     .route("/health", get(health_handler))
@@ -215,6 +216,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   info!("  GET  http://{}/health          - Health check", http_addr);
   info!(
     "  GET  http://{}/metrics         - Cluster metrics",
+    http_addr
+  );
+  info!(
+    "  GET  http://{}/prefix?prefix=<prefix> - Scan keys by prefix",
     http_addr
   );
 
@@ -391,6 +396,45 @@ async fn members_handler(
     }
     Err(e) => Err(ErrorResponse {
       error: format!("Failed to get members: {}", e),
+    }),
+  }
+}
+
+/// Handler for GET /prefix endpoint
+///
+/// Query parameters:
+/// - prefix: The key prefix to scan
+///
+/// Returns a JSON array of {key, value} objects for all keys matching the prefix.
+async fn prefix_handler(
+  Query(params): Query<std::collections::HashMap<String, String>>,
+  State(state): State<AppState>,
+) -> Result<impl IntoResponse, ErrorResponse> {
+  let prefix = params.get("prefix").ok_or_else(|| ErrorResponse {
+    error: "Missing 'prefix' parameter".to_string(),
+  })?;
+
+  let req = ScanPrefixReq { prefix: prefix.clone() };
+  match state.raft_node.scan_prefix(req).await {
+    Ok(results) => {
+      let items: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(key, value)| {
+          serde_json::json!({
+            "key": String::from_utf8_lossy(&key),
+            "value": String::from_utf8_lossy(&value),
+          })
+        })
+        .collect();
+      Ok(Json(serde_json::json!({
+        "success": true,
+        "prefix": prefix,
+        "count": items.len(),
+        "items": items,
+      })))
+    }
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to scan prefix: {}", e),
     }),
   }
 }

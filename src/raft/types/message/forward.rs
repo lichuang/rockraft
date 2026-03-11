@@ -16,6 +16,13 @@ pub struct GetKVReq {
 
 pub type GetKVReply = Option<Vec<u8>>;
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ScanPrefixReq {
+  pub prefix: String,
+}
+
+pub type ScanPrefixReply = Vec<(Vec<u8>, Vec<u8>)>;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ForwardRequestBody {
   Join(JoinRequest),
@@ -23,6 +30,7 @@ pub enum ForwardRequestBody {
   GetMembers(GetMembersReq),
   Write(LogEntry),
   GetKV(GetKVReq),
+  ScanPrefix(ScanPrefixReq),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -38,6 +46,7 @@ pub enum ForwardResponse {
   GetMembers(GetMembersReply),
   Write(AppliedState),
   GetKV(GetKVReply),
+  ScanPrefix(ScanPrefixReply),
 }
 
 impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {

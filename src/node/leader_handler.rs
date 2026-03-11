@@ -8,6 +8,7 @@ use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::ForwardResponse;
 use crate::raft::types::GetKVReq;
 use crate::raft::types::GetMembersReq;
+use crate::raft::types::ScanPrefixReq;
 use crate::raft::types::JoinRequest;
 use crate::raft::types::LeaveRequest;
 use crate::raft::types::LogEntry;
@@ -63,6 +64,7 @@ impl<'a> LeaderHandler<'a> {
       ForwardRequestBody::GetMembers(req) => self.handle_get_members(req).await,
       ForwardRequestBody::Write(entry) => self.handle_write(entry).await,
       ForwardRequestBody::GetKV(req) => self.handle_get_kv(req).await,
+      ForwardRequestBody::ScanPrefix(req) => self.handle_scan_prefix(req).await,
     }
   }
 
@@ -205,6 +207,24 @@ impl<'a> LeaderHandler<'a> {
         error!("Failed to get kv: {:?}", e);
         Err(RockRaftError::TonicStatus(Status::internal(format!(
           "Failed to get kv: {}",
+          e
+        ))))
+      }
+    }
+  }
+
+  /// Handle scan_prefix request
+  ///
+  /// This function scans all key-value pairs with the given prefix from the KV store.
+  /// Note: This is a read-only operation and can be handled by any node, but for
+  /// consistency, it's forwarded to the leader.
+  async fn handle_scan_prefix(&self, req: ScanPrefixReq) -> Result<ForwardResponse> {
+    match self.node.state_machine().scan_prefix(req.prefix.as_bytes()) {
+      Ok(results) => Ok(ForwardResponse::ScanPrefix(results)),
+      Err(e) => {
+        error!("Failed to scan prefix: {:?}", e);
+        Err(RockRaftError::TonicStatus(Status::internal(format!(
+          "Failed to scan prefix: {}",
           e
         ))))
       }

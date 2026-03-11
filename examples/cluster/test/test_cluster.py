@@ -129,6 +129,15 @@ class ClusterClient:
         except Exception as e:
             raise RuntimeError(f"Failed to get value on port {port}: {e}")
     
+    def query_prefix(self, port: int, prefix: str, timeout: int = 5) -> Dict[str, Any]:
+        """Scan keys by prefix via the /prefix endpoint."""
+        url = f"http://127.0.0.1:{port}/prefix?prefix={urllib.parse.quote(prefix)}"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            raise RuntimeError(f"Failed to query prefix on port {port}: {e}")
+    
     def wait_for_nodes(self, max_retries: int = 30, retry_interval: float = 1.0) -> None:
         """Wait for all nodes to be ready."""
         print("\n[WAIT] Waiting for nodes to be ready...")
@@ -350,6 +359,115 @@ class TestClusterData:
                 assert result.get("value") == value, (
                     f"Value mismatch for {key} on port {read_port}: expected {repr(value)}, got {repr(result.get('value'))}"
                 )
+    
+    def test_scan_prefix_basic(self, cluster: ClusterClient):
+        """Test scanning keys by prefix on a single node."""
+        prefix = "prefix_test_"
+        test_data = {
+            f"{prefix}key_1": "value_1",
+            f"{prefix}key_2": "value_2",
+            f"{prefix}key_3": "value_3",
+            "other_key_1": "other_value_1",
+            "other_key_2": "other_value_2",
+        }
+        
+        # Write all data on node1
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True, f"Failed to write {key}: {result}"
+        
+        # Scan by prefix
+        result = cluster.query_prefix(HTTP_PORTS[0], prefix)
+        assert result.get("success") is True, f"Prefix scan failed: {result}"
+        assert result.get("prefix") == prefix, f"Prefix mismatch: {result}"
+        assert result.get("count") == 3, f"Expected 3 items, got {result.get('count')}"
+        
+        items = result.get("items", [])
+        keys = {item["key"] for item in items}
+        expected_keys = {f"{prefix}key_1", f"{prefix}key_2", f"{prefix}key_3"}
+        assert keys == expected_keys, f"Keys mismatch: expected {expected_keys}, got {keys}"
+    
+    def test_scan_prefix_empty_result(self, cluster: ClusterClient):
+        """Test scanning with a prefix that doesn't match any keys."""
+        prefix = "nonexistent_prefix_"
+        
+        # Scan by prefix (no data written with this prefix)
+        result = cluster.query_prefix(HTTP_PORTS[0], prefix)
+        assert result.get("success") is True, f"Prefix scan failed: {result}"
+        assert result.get("prefix") == prefix, f"Prefix mismatch: {result}"
+        assert result.get("count") == 0, f"Expected 0 items, got {result.get('count')}"
+        assert result.get("items") == [], f"Expected empty items list: {result}"
+    
+    def test_scan_prefix_across_nodes(self, cluster: ClusterClient):
+        """Test scanning keys by prefix from different nodes."""
+        prefix = "cross_node_prefix_"
+        test_data = {
+            f"{prefix}key_a": "value_a",
+            f"{prefix}key_b": "value_b",
+            f"{prefix}key_c": "value_c",
+        }
+        
+        # Write data on node1
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True, f"Failed to write {key}: {result}"
+        
+        # Scan from all nodes and verify consistency
+        for port in HTTP_PORTS:
+            result = cluster.query_prefix(port, prefix)
+            assert result.get("success") is True, f"Prefix scan failed on port {port}: {result}"
+            assert result.get("count") == 3, f"Expected 3 items on port {port}, got {result.get('count')}"
+            
+            items = result.get("items", [])
+            keys = {item["key"] for item in items}
+            expected_keys = set(test_data.keys())
+            assert keys == expected_keys, f"Keys mismatch on port {port}: expected {expected_keys}, got {keys}"
+            
+            # Verify values are correct
+            for item in items:
+                expected_value = test_data[item["key"]]
+                assert item["value"] == expected_value, (
+                    f"Value mismatch for {item['key']} on port {port}: expected {expected_value}, got {item['value']}"
+                )
+    
+    def test_scan_prefix_nested_prefix(self, cluster: ClusterClient):
+        """Test scanning with nested prefixes."""
+        # Create keys with hierarchical structure
+        test_data = {
+            "app:config:db:host": "localhost",
+            "app:config:db:port": "5432",
+            "app:config:db:name": "mydb",
+            "app:config:cache:host": "redis",
+            "app:config:cache:port": "6379",
+            "app:users:admin:name": "Admin",
+            "app:users:admin:role": "superuser",
+        }
+        
+        # Write all data on node1
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True, f"Failed to write {key}: {result}"
+        
+        # Test scanning with different prefix levels
+        # Level 1: "app:"
+        result = cluster.query_prefix(HTTP_PORTS[0], "app:")
+        assert result.get("count") == 7, f"Expected 7 items for 'app:', got {result.get('count')}"
+        
+        # Level 2: "app:config:"
+        result = cluster.query_prefix(HTTP_PORTS[0], "app:config:")
+        assert result.get("count") == 5, f"Expected 5 items for 'app:config:', got {result.get('count')}"
+        
+        # Level 3: "app:config:db:"
+        result = cluster.query_prefix(HTTP_PORTS[0], "app:config:db:")
+        assert result.get("count") == 3, f"Expected 3 items for 'app:config:db:', got {result.get('count')}"
+        
+        # Level 3: "app:config:cache:"
+        result = cluster.query_prefix(HTTP_PORTS[0], "app:config:cache:")
+        assert result.get("count") == 2, f"Expected 2 items for 'app:config:cache:', got {result.get('count')}"
+        
+        # Level 2: "app:users:"
+        result = cluster.query_prefix(HTTP_PORTS[0], "app:users:")
+        assert result.get("count") == 2, f"Expected 2 items for 'app:users:', got {result.get('count')}"
 
 
 class TestClusterRestart:

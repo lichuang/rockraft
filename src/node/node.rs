@@ -42,6 +42,7 @@ use crate::raft::types::{
 };
 use crate::raft::types::{
   ForwardToLeader, GetKVReply, GetKVReq, GetMembersReply, GetMembersReq, LeaveRequest, NodeId,
+  ScanPrefixReply, ScanPrefixReq,
 };
 use crate::service::RaftServiceImpl;
 
@@ -542,6 +543,36 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::GetKV(value)) => Ok(value),
+      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
+      Err(e) => Err(Self::error_to_status(e)),
+    }
+  }
+
+  /// Scan key-value pairs with the given prefix from the KV store
+  ///
+  /// This function scans all key-value pairs with the given prefix from the KV store.
+  /// If this node is the leader, it handles the request directly. Otherwise, it forwards
+  /// the request to the leader.
+  ///
+  /// # Arguments
+  /// * `req` - The ScanPrefixReq containing the prefix to scan
+  ///
+  /// # Returns
+  /// * `Ok(ScanPrefixReply)` - A vector of (key, value) pairs matching the prefix
+  /// * `Err(Status)` - If the operation failed
+  pub async fn scan_prefix(
+    &self,
+    req: ScanPrefixReq,
+  ) -> std::result::Result<ScanPrefixReply, Status> {
+    debug!("scan_prefix: {:?}", req);
+
+    let request = ForwardRequest {
+      forward_to_leader: 1,
+      body: ForwardRequestBody::ScanPrefix(req),
+    };
+
+    match self.handle_forward_request(request).await {
+      Ok(ForwardResponse::ScanPrefix(results)) => Ok(results),
       Ok(_) => Err(Status::internal("Unexpected response type from leader")),
       Err(e) => Err(Self::error_to_status(e)),
     }

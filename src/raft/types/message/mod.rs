@@ -8,6 +8,8 @@ pub use forward::ForwardRequestBody;
 pub use forward::ForwardResponse;
 pub use forward::GetKVReply;
 pub use forward::GetKVReq;
+pub use forward::ScanPrefixReply;
+pub use forward::ScanPrefixReq;
 pub use get_members::GetMembersReply;
 pub use get_members::GetMembersReq;
 pub use join::JoinRequest;
