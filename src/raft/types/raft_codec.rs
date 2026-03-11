@@ -20,11 +20,11 @@ impl RaftCodec for LogIdOf<TypeConfig> {
   where
     Self: Sized,
   {
-    Ok(decode(buf).map_err(read_logs_err)?)
+    decode(buf).map_err(read_logs_err)
   }
 
   fn encode_to(&self) -> Result<Vec<u8>, io::Error> {
-    Ok(encode(self).map_err(read_logs_err)?)
+    encode(self).map_err(read_logs_err)
   }
 }
 
@@ -33,11 +33,11 @@ impl RaftCodec for VoteOf<TypeConfig> {
   where
     Self: Sized,
   {
-    Ok(decode(buf).map_err(read_logs_err)?)
+    decode(buf).map_err(read_logs_err)
   }
 
   fn encode_to(&self) -> Result<Vec<u8>, io::Error> {
-    Ok(encode(self).map_err(read_logs_err)?)
+    encode(self).map_err(read_logs_err)
   }
 }
 
@@ -46,11 +46,11 @@ impl RaftCodec for StoredMembership {
   where
     Self: Sized,
   {
-    Ok(decode(buf).map_err(read_logs_err)?)
+    decode(buf).map_err(read_logs_err)
   }
 
   fn encode_to(&self) -> Result<Vec<u8>, io::Error> {
-    Ok(encode(self).map_err(read_logs_err)?)
+    encode(self).map_err(read_logs_err)
   }
 }
 

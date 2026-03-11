@@ -193,7 +193,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
     let last_purged_log_id = self.get_last_purged_log_id()?;
 
     let last_log_id = match last_log_id {
-      None => last_purged_log_id.clone(),
+      None => last_purged_log_id,
       Some(x) => Some(x),
     };
 

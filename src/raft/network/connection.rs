@@ -214,7 +214,7 @@ impl NetworkConnection {
       let done = (offset + n_read as u64) >= end;
 
       let req = InstallSnapshotRequest {
-        vote: vote.clone(),
+        vote,
         meta: snapshot.meta.clone(),
         offset,
         data: buf,
@@ -234,7 +234,7 @@ impl NetworkConnection {
         }
         Err(err) => {
           // Convert RockRaftError to RPCError
-          let io_err = std::io::Error::new(std::io::ErrorKind::Other, err.to_string());
+          let io_err = std::io::Error::other(err.to_string());
           return Err(StreamingError::from(openraft::error::Unreachable::new(
             &io_err,
           )));

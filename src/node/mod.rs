@@ -1,4 +1,5 @@
 mod leader_handler;
+#[allow(clippy::module_inception)]
 mod node;
 mod node_builder;
 mod parsed_config;

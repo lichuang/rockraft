@@ -146,7 +146,7 @@ impl RaftService for RaftServiceImpl {
     let snapshot_req: raft::InstallSnapshotRequest<TypeConfig> = decode(&req.value)
       .map_err(|e| Status::internal(format!("Failed to deserialize snapshot request: {}", e)))?;
 
-    let vote = snapshot_req.vote.clone();
+    let vote = snapshot_req.vote;
     let snapshot_id = snapshot_req.meta.snapshot_id.clone();
     let snapshot_meta = snapshot_req.meta.clone();
     let offset = snapshot_req.offset;

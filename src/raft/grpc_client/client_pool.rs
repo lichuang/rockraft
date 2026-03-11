@@ -81,8 +81,8 @@ impl ClientPool {
       }
     }
 
-    return Err(RockRaftError::NoAvailableGrpcConnection(
+    Err(RockRaftError::NoAvailableGrpcConnection(
       "connection pool is not initialized".to_string(),
-    ));
+    ))
   }
 }

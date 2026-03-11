@@ -1,5 +1,5 @@
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::raft::types::{decode, encode};
 use tokio::fs::File;
@@ -28,7 +28,7 @@ use crate::raft::types::SnapshotMeta;
 ///
 /// This function will panic if the resulting path cannot be converted to a string representation.
 /// This typically occurs with paths containing invalid UTF-8 sequences.
-pub fn snapshot_dump_file(snapshot_id_dir: &PathBuf) -> String {
+pub fn snapshot_dump_file(snapshot_id_dir: &Path) -> String {
   snapshot_id_dir
     .join("dump")
     .as_path()
@@ -55,7 +55,7 @@ pub fn snapshot_dump_file(snapshot_id_dir: &PathBuf) -> String {
 ///
 /// This function will panic if the resulting path cannot be converted to a string representation.
 /// This typically occurs with paths containing invalid UTF-8 sequences.
-pub fn snapshot_meta_file(snapshot_id_dir: &PathBuf) -> String {
+pub fn snapshot_meta_file(snapshot_id_dir: &Path) -> String {
   snapshot_id_dir
     .join("meta")
     .as_path()
@@ -82,7 +82,7 @@ pub fn snapshot_meta_file(snapshot_id_dir: &PathBuf) -> String {
 ///
 /// This function will panic if the resulting path cannot be converted to a string representation.
 /// This typically occurs with paths containing invalid UTF-8 sequences.
-pub fn snapshot_data_file(snapshot_id_dir: &PathBuf) -> String {
+pub fn snapshot_data_file(snapshot_id_dir: &Path) -> String {
   snapshot_id_dir
     .join("snapshot")
     .as_path()
@@ -109,7 +109,7 @@ pub fn snapshot_data_file(snapshot_id_dir: &PathBuf) -> String {
 ///
 /// This function will panic if the resulting path cannot be converted to a string representation.
 /// This typically occurs with paths containing invalid UTF-8 sequences.
-pub fn snapshot_last_snapshot_id_file(snapshot_dir: &PathBuf) -> String {
+pub fn snapshot_last_snapshot_id_file(snapshot_dir: &Path) -> String {
   snapshot_dir
     .join("last_snapshot_id")
     .as_path()
@@ -132,7 +132,7 @@ pub fn snapshot_last_snapshot_id_file(snapshot_dir: &PathBuf) -> String {
 /// # Returns
 ///
 /// A `PathBuf` representing the full path to the snapshot ID directory
-pub fn snapshot_id_dir(snapshot_dir: &PathBuf, snapshot_id: &str) -> PathBuf {
+pub fn snapshot_id_dir(snapshot_dir: &Path, snapshot_id: &str) -> PathBuf {
   snapshot_dir.join(snapshot_id)
 }
 
@@ -160,7 +160,7 @@ pub fn snapshot_id_dir(snapshot_dir: &PathBuf, snapshot_id: &str) -> PathBuf {
 /// - The disk is full
 /// - The file system experiences an I/O error
 pub async fn save_last_snapshot_id_file(
-  snapshot_dir: &PathBuf,
+  snapshot_dir: &Path,
   last_snapshot_id: &str,
 ) -> std::io::Result<()> {
   let last_snapshot_id_file = snapshot_last_snapshot_id_file(snapshot_dir);
@@ -193,7 +193,7 @@ pub async fn save_last_snapshot_id_file(
 /// - There are insufficient permissions to read the file
 /// - The file contains invalid UTF-8 data
 /// - The file system experiences an I/O error
-pub(crate) async fn get_last_snapshot_id(snapshot_dir: &PathBuf) -> std::io::Result<String> {
+pub(crate) async fn get_last_snapshot_id(snapshot_dir: &Path) -> std::io::Result<String> {
   let last_snapshot_file = snapshot_last_snapshot_id_file(snapshot_dir);
 
   let mut file = File::open(&last_snapshot_file).await?;
@@ -226,10 +226,7 @@ pub(crate) async fn get_last_snapshot_id(snapshot_dir: &PathBuf) -> std::io::Res
 /// - There are insufficient permissions to create or write the file
 /// - The disk is full
 /// - The file system experiences an I/O error
-pub async fn save_snapshot_meta(
-  snapshot_id_dir: &PathBuf,
-  meta: SnapshotMeta,
-) -> std::io::Result<()> {
+pub async fn save_snapshot_meta(snapshot_id_dir: &Path, meta: SnapshotMeta) -> std::io::Result<()> {
   let meta_file = snapshot_meta_file(snapshot_id_dir);
 
   let data = encode(&meta).map_err(|e| {
@@ -306,7 +303,7 @@ pub async fn get_snapshot_meta(snapshot_id_dir: &PathBuf) -> std::io::Result<Sna
 /// - Any unexpected I/O error occurs
 ///
 /// Note that missing files are not considered errors and result in `Ok(None)`.
-pub async fn get_current_snapshot(snapshot_dir: &PathBuf) -> std::io::Result<Option<Snapshot>> {
+pub async fn get_current_snapshot(snapshot_dir: &Path) -> std::io::Result<Option<Snapshot>> {
   let snapshot_id = match get_last_snapshot_id(snapshot_dir).await {
     Ok(id) => id,
     Err(e) if e.kind() == ErrorKind::NotFound => {

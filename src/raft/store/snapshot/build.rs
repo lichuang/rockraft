@@ -1,6 +1,6 @@
 use std::io;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openraft::SnapshotMeta;
@@ -46,7 +46,7 @@ use crate::utils::now_millis;
 /// Snapshot ID Format:
 ///   - With log_id: "{leader_id}-{index}-{timestamp}"
 ///   - Without log_id: "0-0-{timestamp}"
-///   Example: "T3-N5-100-1234567890"
+///     Example: "T3-N5-100-1234567890"
 ///
 /// Process:
 ///   1. Generate unique snapshot ID based on current time and log state
@@ -58,7 +58,7 @@ use crate::utils::now_millis;
 ///   7. Spawn background task to clean up old snapshots
 pub async fn build_snapshot(
   db: &Arc<DB>,
-  snapshot_dir: &PathBuf,
+  snapshot_dir: &Path,
   last_applied_log_id: Option<LogId>,
   last_membership: StoredMembership,
 ) -> Result<Snapshot, io::Error> {
@@ -162,7 +162,7 @@ pub async fn build_snapshot(
 
   // Only update last_snapshot_id file after both data and meta are successfully saved
   // This ensures we never point to an incomplete snapshot
-  if let Err(e) = save_last_snapshot_id_file(&snapshot_dir, &snapshot_id).await {
+  if let Err(e) = save_last_snapshot_id_file(snapshot_dir, &snapshot_id).await {
     error!(
       "Fail to save last snapshot id file for snapshot id={}:{}",
       snapshot_id, e

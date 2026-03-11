@@ -23,3 +23,4 @@ target
 #.idea/
 
 examples/*/Cargo.lock
+commit-message

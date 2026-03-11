@@ -19,6 +19,7 @@ impl Endpoint {
     }
   }
 
+  #[allow(clippy::inherent_to_string_shadow_display)]
   pub fn to_string(&self) -> String {
     format!("{}:{}", self.address, self.port)
   }

@@ -45,7 +45,7 @@ impl Interval {
     }
   }
 
-  pub fn to_duration(&self) -> Duration {
+  pub fn as_duration(&self) -> Duration {
     Duration::from_millis(self.millis)
   }
 
@@ -124,8 +124,8 @@ impl Time {
   }
 
   #[allow(dead_code)]
-  pub fn to_duration(&self) -> Duration {
-    self.time.to_duration()
+  pub fn as_duration(&self) -> Duration {
+    self.time.as_duration()
   }
 
   #[allow(dead_code)]

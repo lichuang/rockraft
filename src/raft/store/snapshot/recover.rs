@@ -121,16 +121,14 @@ async fn do_recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io:
     count += 1;
 
     if count.is_multiple_of(1000) {
-      db.write(batch)
-        .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+      db.write(batch).map_err(io::Error::other)?;
       batch = rocksdb::WriteBatch::default();
       info!("[metadata] Recovered {} entries so far...", count);
     }
   }
 
   if !batch.is_empty() {
-    db.write(batch)
-      .map_err(|e| io::Error::new(ErrorKind::Other, e))?;
+    db.write(batch).map_err(io::Error::other)?;
   }
 
   info!("Successfully recovered {} entries from snapshot", count);

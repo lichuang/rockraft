@@ -151,6 +151,7 @@ impl RocksStateMachine {
   }
 
   /// Scan all key-value pairs with the given prefix from the KV store
+  #[allow(clippy::type_complexity)]
   pub fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, io::Error> {
     let cf = self.cf_sm_data();
     let mut results = Vec::new();
@@ -361,14 +362,12 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
   async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot>, io::Error> {
     let data = get_current_snapshot(&self.snapshot_dir).await?;
 
-    if let Some(snapshot) = data {
-      if let Some(id) = self.get_last_applied_log_id()? {
-        if let Some(snapshot_id) = snapshot.meta.last_log_id {
-          if snapshot_id >= id {
-            return Ok(Some(snapshot));
-          }
-        }
-      }
+    if let Some(snapshot) = data
+      && let Some(id) = self.get_last_applied_log_id()?
+      && let Some(snapshot_id) = snapshot.meta.last_log_id
+      && snapshot_id >= id
+    {
+      return Ok(Some(snapshot));
     }
 
     Ok(None)

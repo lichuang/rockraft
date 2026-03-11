@@ -45,9 +45,9 @@ impl JoinConnectionFactory {
     rpc_client_tls_config: Option<RpcClientTlsConfig>,
   ) -> Result<Endpoint> {
     let u = if rpc_client_tls_config.is_some() {
-      format!("https://{}", addr.to_string())
+      format!("https://{}", addr)
     } else {
-      format!("http://{}", addr.to_string())
+      format!("http://{}", addr)
     };
     match u.parse::<Uri>() {
       Err(error) => Err(RockRaftError::GrpcConnection(

@@ -122,7 +122,7 @@ impl RaftNode {
         state_machine.clone(),
       )
       .await
-      .map_err(|e| crate::error::OpenRaft::Fatal(e))?,
+      .map_err(crate::error::OpenRaft::Fatal)?,
     );
 
     // Create shutdown channel
@@ -394,7 +394,8 @@ impl RaftNode {
       return Ok(());
     }
 
-    Ok(self.do_join_cluster().await?.into())
+    self.do_join_cluster().await?;
+    Ok(())
   }
 
   async fn do_join_cluster(&self) -> StdResult<(), ManagementError> {
@@ -697,12 +698,12 @@ impl RaftNode {
           };
 
           // Retry if we have a reason and attempts remain
-          if let Some(reason) = retry_reason {
-            if attempt < MAX_RETRIES - 1 {
-              debug!("{}, retrying {}/{}", reason, attempt + 1, MAX_RETRIES);
-              sleep(RETRY_INTERVAL).await;
-              continue;
-            }
+          if let Some(reason) = retry_reason
+            && attempt < MAX_RETRIES - 1
+          {
+            debug!("{}, retrying {}/{}", reason, attempt + 1, MAX_RETRIES);
+            sleep(RETRY_INTERVAL).await;
+            continue;
           }
 
           return Err(RockRaftError::TonicStatus(Status::internal(
