@@ -18,7 +18,7 @@ pub type GetKVReply = Option<Vec<u8>>;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ScanPrefixReq {
-  pub prefix: String,
+  pub prefix: Vec<u8>,
 }
 
 pub type ScanPrefixReply = Vec<(Vec<u8>, Vec<u8>)>;

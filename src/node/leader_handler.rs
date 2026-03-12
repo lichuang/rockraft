@@ -219,7 +219,7 @@ impl<'a> LeaderHandler<'a> {
   /// Note: This is a read-only operation and can be handled by any node, but for
   /// consistency, it's forwarded to the leader.
   async fn handle_scan_prefix(&self, req: ScanPrefixReq) -> Result<ForwardResponse> {
-    match self.node.state_machine().scan_prefix(req.prefix.as_bytes()) {
+    match self.node.state_machine().scan_prefix(&req.prefix) {
       Ok(results) => Ok(ForwardResponse::ScanPrefix(results)),
       Err(e) => {
         error!("Failed to scan prefix: {:?}", e);

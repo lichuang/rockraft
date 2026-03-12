@@ -414,7 +414,7 @@ async fn prefix_handler(
     error: "Missing 'prefix' parameter".to_string(),
   })?;
 
-  let req = ScanPrefixReq { prefix: prefix.clone() };
+  let req = ScanPrefixReq { prefix: prefix.clone().into_bytes() };
   match state.raft_node.scan_prefix(req).await {
     Ok(results) => {
       let items: Vec<serde_json::Value> = results
