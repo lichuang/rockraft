@@ -98,7 +98,6 @@ This file provides guidance for agentic coding agents working on this codebase.
 - Call `flush_wal(true)` for critical operations requiring durability
 
 ## Important Notes
-- The project uses OpenRaft from a git rev, not crates.io
 - Protobuf code generation happens via `tonic-build` in `build.rs`
 - Generated protobuf code has `#[allow(clippy::all)]` attribute
 - All async functions use `tokio` runtime
