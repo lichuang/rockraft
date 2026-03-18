@@ -138,6 +138,27 @@ class ClusterClient:
         except Exception as e:
             raise RuntimeError(f"Failed to query prefix on port {port}: {e}")
     
+    def batch_write(self, port: int, operations: list, timeout: int = 10) -> Dict[str, Any]:
+        """Batch write multiple operations atomically via the /batch_write endpoint.
+        
+        Args:
+            port: HTTP port of the node
+            operations: List of dicts with keys 'op' (set/delete), 'key', and optionally 'value'
+            timeout: Request timeout in seconds
+        
+        Returns:
+            Response dict with 'success' and 'message' fields
+        """
+        url = f"http://127.0.0.1:{port}/batch_write"
+        data = json.dumps({"operations": operations}).encode()
+        headers = {"Content-Type": "application/json"}
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            raise RuntimeError(f"Failed to batch write on port {port}: {e}")
+    
     def wait_for_nodes(self, max_retries: int = 30, retry_interval: float = 1.0) -> None:
         """Wait for all nodes to be ready."""
         print("\n[WAIT] Waiting for nodes to be ready...")
@@ -737,9 +758,207 @@ class TestClusterRestart:
             print("="*60)
             
         finally:
-            # Cleanup
-            print("\n[CLEANUP] Stopping cluster...")
+            # Cleanup - stop the test cluster
+            print("\n[CLEANUP] Stopping test cluster...")
             cluster_mgr.stop()
+            
+            # Restart the original cluster for subsequent tests
+            print("\n[RESTART] Restarting original cluster for subsequent tests...")
+            cluster_mgr_start = ClusterManager(BASE_DIR, START_SCRIPT)
+            cluster_mgr_start.start()
+            
+            # Wait for nodes to be ready
+            client_restart = ClusterClient(HTTP_PORTS)
+            client_restart.wait_for_nodes()
+            client_restart.wait_for_members_sync(expected_count=3)
+            print("[RESTART] Cluster restarted successfully")
+
+
+class TestBatchWrite:
+    """Test batch write functionality."""
+    
+    def test_batch_write_multiple_sets(self, cluster: ClusterClient):
+        """Test batch writing multiple set operations."""
+        operations = [
+            {"op": "set", "key": "batch_key_1", "value": "batch_value_1"},
+            {"op": "set", "key": "batch_key_2", "value": "batch_value_2"},
+            {"op": "set", "key": "batch_key_3", "value": "batch_value_3"},
+        ]
+        
+        # Execute batch write on node1
+        result = cluster.batch_write(HTTP_PORTS[0], operations)
+        assert result.get("success") is True, f"Batch write failed: {result}"
+        assert "3 operations" in result.get("message", ""), f"Unexpected message: {result}"
+        
+        # Verify all keys are readable from all nodes
+        expected_data = {
+            "batch_key_1": "batch_value_1",
+            "batch_key_2": "batch_value_2",
+            "batch_key_3": "batch_value_3",
+        }
+        
+        for port in HTTP_PORTS:
+            for key, expected_value in expected_data.items():
+                result = cluster.get_value(port, key)
+                assert result.get("key") == key, f"Key mismatch on port {port}: {result}"
+                assert result.get("value") == expected_value, (
+                    f"Value mismatch for {key} on port {port}: expected {expected_value}, got {result.get('value')}"
+                )
+    
+    def test_batch_write_mixed_operations(self, cluster: ClusterClient):
+        """Test batch write with both set and delete operations."""
+        # First, set some initial values
+        initial_ops = [
+            {"op": "set", "key": "mixed_key_1", "value": "initial_value_1"},
+            {"op": "set", "key": "mixed_key_2", "value": "initial_value_2"},
+            {"op": "set", "key": "mixed_key_3", "value": "initial_value_3"},
+        ]
+        
+        result = cluster.batch_write(HTTP_PORTS[0], initial_ops)
+        assert result.get("success") is True, f"Initial batch write failed: {result}"
+        
+        # Verify initial values
+        for i in range(1, 4):
+            result = cluster.get_value(HTTP_PORTS[0], f"mixed_key_{i}")
+            assert result.get("value") == f"initial_value_{i}"
+        
+        # Now perform mixed batch: update key_1, delete key_2, set key_4
+        mixed_ops = [
+            {"op": "set", "key": "mixed_key_1", "value": "updated_value_1"},
+            {"op": "delete", "key": "mixed_key_2"},
+            {"op": "set", "key": "mixed_key_4", "value": "new_value_4"},
+        ]
+        
+        result = cluster.batch_write(HTTP_PORTS[1], mixed_ops)  # Write from different node
+        assert result.get("success") is True, f"Mixed batch write failed: {result}"
+        
+        # Verify results from all nodes
+        for port in HTTP_PORTS:
+            # Key 1 should be updated
+            result = cluster.get_value(port, "mixed_key_1")
+            assert result.get("value") == "updated_value_1", (
+                f"Key 1 not updated on port {port}: {result}"
+            )
+            
+            # Key 2 should be deleted
+            result = cluster.get_value(port, "mixed_key_2")
+            assert result.get("value") is None, (
+                f"Key 2 not deleted on port {port}: {result}"
+            )
+            
+            # Key 3 should remain unchanged
+            result = cluster.get_value(port, "mixed_key_3")
+            assert result.get("value") == "initial_value_3", (
+                f"Key 3 changed unexpectedly on port {port}: {result}"
+            )
+            
+            # Key 4 should be new
+            result = cluster.get_value(port, "mixed_key_4")
+            assert result.get("value") == "new_value_4", (
+                f"Key 4 not set on port {port}: {result}"
+            )
+    
+    def test_batch_write_empty_operations(self, cluster: ClusterClient):
+        """Test batch write with empty operations list."""
+        result = cluster.batch_write(HTTP_PORTS[0], [])
+        assert result.get("success") is True, f"Empty batch write failed: {result}"
+        assert "No operations" in result.get("message", ""), f"Unexpected message: {result}"
+    
+    def test_batch_write_single_operation(self, cluster: ClusterClient):
+        """Test batch write with a single operation."""
+        operations = [
+            {"op": "set", "key": "single_batch_key", "value": "single_batch_value"},
+        ]
+        
+        result = cluster.batch_write(HTTP_PORTS[0], operations)
+        assert result.get("success") is True, f"Single batch write failed: {result}"
+        
+        # Verify from all nodes
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "single_batch_key")
+            assert result.get("value") == "single_batch_value", (
+                f"Value mismatch on port {port}: {result}"
+            )
+    
+    def test_batch_write_special_characters(self, cluster: ClusterClient):
+        """Test batch write with special characters in keys and values."""
+        operations = [
+            {"op": "set", "key": "batch:special:1", "value": "Hello, 世界! 🌍"},
+            {"op": "set", "key": "batch:special:2", "value": "Line1\nLine2\nLine3"},
+            {"op": "set", "key": "batch:special:3", "value": "Tab\tSeparated\tValues"},
+            {"op": "delete", "key": "batch:special:nonexistent"},
+        ]
+        
+        result = cluster.batch_write(HTTP_PORTS[0], operations)
+        assert result.get("success") is True, f"Special chars batch write failed: {result}"
+        
+        # Verify set operations
+        expected_values = {
+            "batch:special:1": "Hello, 世界! 🌍",
+            "batch:special:2": "Line1\nLine2\nLine3",
+            "batch:special:3": "Tab\tSeparated\tValues",
+        }
+        
+        for port in HTTP_PORTS:
+            for key, expected_value in expected_values.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected_value, (
+                    f"Value mismatch for {key} on port {port}: expected {repr(expected_value)}, got {repr(result.get('value'))}"
+                )
+    
+    def test_batch_write_consistency_across_nodes(self, cluster: ClusterClient):
+        """Test that batch write is consistent across all nodes."""
+        operations = []
+        expected_data = {}
+        
+        # Create 10 key-value pairs
+        for i in range(10):
+            key = f"consistency_key_{i}"
+            value = f"consistency_value_{i}"
+            operations.append({"op": "set", "key": key, "value": value})
+            expected_data[key] = value
+        
+        # Execute batch write on node1
+        result = cluster.batch_write(HTTP_PORTS[0], operations)
+        assert result.get("success") is True, f"Consistency batch write failed: {result}"
+        
+        # Verify all nodes have the same data
+        for port in HTTP_PORTS:
+            for key, expected_value in expected_data.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected_value, (
+                    f"Data inconsistency for {key} on port {port}: expected {expected_value}, got {result.get('value')}"
+                )
+    
+    def test_batch_write_large_batch(self, cluster: ClusterClient):
+        """Test batch write with a large number of operations."""
+        operations = []
+        expected_data = {}
+        
+        # Create 50 key-value pairs
+        for i in range(50):
+            key = f"large_batch_key_{i:03d}"
+            value = f"large_batch_value_{i:03d}_" + "x" * 100  # Add some padding
+            operations.append({"op": "set", "key": key, "value": value})
+            expected_data[key] = value
+        
+        # Execute batch write
+        result = cluster.batch_write(HTTP_PORTS[0], operations)
+        assert result.get("success") is True, f"Large batch write failed: {result}"
+        assert "50 operations" in result.get("message", ""), f"Unexpected message: {result}"
+        
+        # Verify a sample of the data from all nodes
+        sample_keys = list(expected_data.keys())[:10]
+        for port in HTTP_PORTS:
+            for key in sample_keys:
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected_data[key], (
+                    f"Value mismatch for {key} on port {port}"
+                )
+        
+        # Verify count using prefix scan
+        result = cluster.query_prefix(HTTP_PORTS[0], "large_batch_key_")
+        assert result.get("count") == 50, f"Expected 50 items, got {result.get('count')}"
 
 
 def main():

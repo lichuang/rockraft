@@ -38,7 +38,8 @@ use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::store::column_family_list;
 use crate::raft::types::{
-  AppliedState, ForwardRequest, ForwardResponse, LogEntry, Node, TypeConfig, decode,
+  AppliedState, BatchWriteReply, BatchWriteReq, ForwardRequest, ForwardResponse, LogEntry, Node,
+  TypeConfig, decode,
 };
 use crate::raft::types::{
   ForwardToLeader, GetKVReply, GetKVReq, GetMembersReply, GetMembersReq, LeaveRequest, NodeId,
@@ -516,6 +517,39 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::Write(applied_state)) => Ok(applied_state),
+      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
+      Err(e) => Err(Self::error_to_status(e)),
+    }
+  }
+
+  /// Batch write multiple entries to the raft cluster atomically
+  ///
+  /// This function writes multiple entries atomically to the raft log.
+  /// If this node is the leader, it writes directly. Otherwise, it forwards
+  /// the request to the leader.
+  ///
+  /// All entries in the batch are applied as a single log entry, ensuring
+  /// atomicity - either all entries are applied or none are.
+  ///
+  /// # Arguments
+  /// * `req` - The BatchWriteReq containing entries to write
+  ///
+  /// # Returns
+  /// * `Ok(BatchWriteReply)` - The result of applying the batch
+  /// * `Err(Status)` - If the operation failed
+  pub async fn batch_write(
+    &self,
+    req: BatchWriteReq,
+  ) -> std::result::Result<BatchWriteReply, Status> {
+    debug!("batch write: {:?}", req);
+
+    let request = ForwardRequest {
+      forward_to_leader: 1,
+      body: ForwardRequestBody::BatchWrite(req),
+    };
+
+    match self.handle_forward_request(request).await {
+      Ok(ForwardResponse::BatchWrite(applied_state)) => Ok(applied_state),
       Ok(_) => Err(Status::internal("Unexpected response type from leader")),
       Err(e) => Err(Self::error_to_status(e)),
     }

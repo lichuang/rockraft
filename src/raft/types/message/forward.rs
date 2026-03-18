@@ -1,6 +1,7 @@
 use crate::raft::protobuf as pb;
 use crate::raft::types::AppliedState;
 use crate::raft::types::LogEntry;
+use crate::raft::types::UpsertKV;
 use crate::raft::types::encode;
 use crate::raft::types::message::GetMembersReply;
 use crate::raft::types::message::GetMembersReq;
@@ -23,6 +24,16 @@ pub struct ScanPrefixReq {
 
 pub type ScanPrefixReply = Vec<(Vec<u8>, Vec<u8>)>;
 
+/// Request for batch write operation
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BatchWriteReq {
+  /// Entries to upsert or delete atomically
+  pub entries: Vec<UpsertKV>,
+}
+
+/// Response for batch write operation
+pub type BatchWriteReply = AppliedState;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ForwardRequestBody {
   Join(JoinRequest),
@@ -31,6 +42,7 @@ pub enum ForwardRequestBody {
   Write(LogEntry),
   GetKV(GetKVReq),
   ScanPrefix(ScanPrefixReq),
+  BatchWrite(BatchWriteReq),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -47,6 +59,7 @@ pub enum ForwardResponse {
   Write(AppliedState),
   GetKV(GetKVReply),
   ScanPrefix(ScanPrefixReply),
+  BatchWrite(BatchWriteReply),
 }
 
 impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {

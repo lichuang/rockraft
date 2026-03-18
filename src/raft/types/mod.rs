@@ -16,6 +16,8 @@ pub use encoder::decode;
 pub use encoder::encode;
 pub use endpoint::Endpoint;
 pub use log_entry::LogEntry;
+pub use message::BatchWriteReq;
+pub use message::BatchWriteReply;
 pub use message::ForwardRequest;
 pub use message::ForwardRequestBody;
 pub use message::ForwardResponse;

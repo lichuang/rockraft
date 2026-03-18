@@ -38,6 +38,19 @@ Tests cluster membership and data read/write functionality using pytest framewor
    - `test_read_nonexistent_key` - Tests reading a non-existent key
    - `test_overwrite_existing_key` - Tests overwriting an existing key
    - `test_write_special_characters` - Tests special characters and Unicode in values
+   - `test_scan_prefix_basic` - Tests scanning keys by prefix
+   - `test_scan_prefix_empty_result` - Tests scanning with non-matching prefix
+   - `test_scan_prefix_across_nodes` - Tests prefix scan consistency across nodes
+   - `test_scan_prefix_nested_prefix` - Tests hierarchical prefix scanning
+
+**Batch Write Tests (`TestBatchWrite`):**
+   - `test_batch_write_multiple_sets` - Tests batch writing multiple set operations
+   - `test_batch_write_mixed_operations` - Tests batch write with set and delete operations
+   - `test_batch_write_empty_operations` - Tests batch write with empty operations list
+   - `test_batch_write_single_operation` - Tests batch write with a single operation
+   - `test_batch_write_special_characters` - Tests special characters in batch operations
+   - `test_batch_write_consistency_across_nodes` - Tests batch write consistency across all nodes
+   - `test_batch_write_large_batch` - Tests batch write with 50 operations
 
 6. Stops the cluster
 
@@ -63,6 +76,7 @@ The tests use the following HTTP endpoints:
 - `GET /members` - Get cluster membership information
 - `POST /set` - Set a key-value pair
 - `GET /get?key=<key>` - Get a value by key
+- `POST /batch_write` - Batch write multiple operations atomically
 
 Example response from `/members`:
 ```json
@@ -110,6 +124,27 @@ Example response from `/get`:
 {
   "key": "mykey",
   "value": "myvalue"
+}
+```
+
+Example request to `/batch_write`:
+```bash
+curl -X POST http://127.0.0.1:8001/batch_write \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operations": [
+      {"op": "set", "key": "key1", "value": "value1"},
+      {"op": "set", "key": "key2", "value": "value2"},
+      {"op": "delete", "key": "key3"}
+    ]
+  }'
+```
+
+Example response from `/batch_write`:
+```json
+{
+  "success": true,
+  "message": "Batch write successful: 3 operations applied"
 }
 ```
 
@@ -164,6 +199,8 @@ def test_my_new_test(self, cluster: ClusterClient):
 - `query_members(port)` - Query cluster membership from a node
 - `set_value(port, key, value)` - Set a key-value pair via a node
 - `get_value(port, key)` - Get a value by key via a node
+- `query_prefix(port, prefix)` - Scan keys by prefix via a node
+- `batch_write(port, operations)` - Execute batch write operations atomically
 
 ## Troubleshooting
 

@@ -3,6 +3,8 @@ mod get_members;
 mod join;
 mod leave;
 
+pub use forward::BatchWriteReq;
+pub use forward::BatchWriteReply;
 pub use forward::ForwardRequest;
 pub use forward::ForwardRequestBody;
 pub use forward::ForwardResponse;

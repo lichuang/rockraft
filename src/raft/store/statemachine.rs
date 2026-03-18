@@ -285,6 +285,19 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
                 }
               }
             }
+            Cmd::BatchUpsertKV { entries } => {
+              let cf_data = &self.cf_sm_data();
+              for kv in entries {
+                match kv.value {
+                  Operation::Update(value) => {
+                    batch.put_cf(cf_data, kv.key.as_bytes(), value);
+                  }
+                  Operation::Delete => {
+                    batch.delete_cf(cf_data, kv.key.as_bytes());
+                  }
+                }
+              }
+            }
             Cmd::AddNode { node, .. } => {
               let node_id = node.node_id;
               info!(

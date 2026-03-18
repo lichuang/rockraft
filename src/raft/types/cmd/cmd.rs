@@ -23,6 +23,9 @@ pub enum Cmd {
 
   /// Update or insert a general purpose kv store
   UpsertKV(UpsertKV),
+
+  /// Batch update or insert multiple kv entries atomically
+  BatchUpsertKV { entries: Vec<UpsertKV> },
 }
 
 impl fmt::Display for Cmd {
@@ -41,6 +44,10 @@ impl fmt::Display for Cmd {
 
       Cmd::UpsertKV(upsert_kv) => {
         write!(f, "upsert_kv:{}", upsert_kv)
+      }
+
+      Cmd::BatchUpsertKV { entries } => {
+        write!(f, "batch_upsert_kv: {} entries", entries.len())
       }
     }
   }

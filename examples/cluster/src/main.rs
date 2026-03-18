@@ -8,7 +8,7 @@ use axum::{
 use openraft::async_runtime::watch::WatchReceiver;
 use rockraft::config::Config as RockraftConfig;
 use rockraft::node::RaftNodeBuilder;
-use rockraft::raft::types::{Cmd, GetKVReq, LeaveRequest, LogEntry, ScanPrefixReq};
+use rockraft::raft::types::{BatchWriteReq, Cmd, GetKVReq, LeaveRequest, LogEntry, ScanPrefixReq, UpsertKV};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -65,6 +65,32 @@ pub struct SetValueRequest {
 #[derive(Debug, Deserialize)]
 pub struct LeaveRequestHttp {
   pub node_id: u64,
+}
+
+/// Operation type for batch operations
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BatchOpType {
+  Set,
+  Delete,
+}
+
+/// Single operation in a batch write request
+#[derive(Debug, Deserialize)]
+pub struct BatchOp {
+  /// Operation type: "set" or "delete"
+  pub op: BatchOpType,
+  /// Key for the operation
+  pub key: String,
+  /// Value for the operation (required for "set", ignored for "delete")
+  pub value: Option<String>,
+}
+
+/// Request for batch write operations
+#[derive(Debug, Deserialize)]
+pub struct BatchWriteRequest {
+  /// List of operations to perform atomically
+  pub operations: Vec<BatchOp>,
 }
 
 /// Response for successful operations
@@ -182,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .route("/get", get(get_handler))
     .route("/set", post(set_handler))
     .route("/delete", post(delete_handler))
+    .route("/batch_write", post(batch_write_handler))
     .route("/prefix", get(prefix_handler))
     .route("/leave", post(leave_handler))
     .route("/members", get(members_handler))
@@ -205,6 +232,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     http_addr
   );
   info!("  POST http://{}/delete          - Delete a key", http_addr);
+  info!(
+    "  POST http://{}/batch_write     - Batch write multiple keys atomically",
+    http_addr
+  );
   info!(
     "  POST http://{}/leave           - Remove a node from cluster",
     http_addr
@@ -318,6 +349,65 @@ async fn delete_handler(
     }
     Err(e) => Err(ErrorResponse {
       error: format!("Failed to delete: {}", e),
+    }),
+  }
+}
+
+/// Handler for POST /batch_write endpoint
+///
+/// Request body example:
+/// ```json
+/// {
+///   "operations": [
+///     { "op": "set", "key": "key1", "value": "value1" },
+///     { "op": "set", "key": "key2", "value": "value2" },
+///     { "op": "delete", "key": "key3" }
+///   ]
+/// }
+/// ```
+///
+/// All operations are applied atomically - either all succeed or all fail.
+async fn batch_write_handler(
+  State(state): State<AppState>,
+  Json(payload): Json<BatchWriteRequest>,
+) -> Result<impl IntoResponse, ErrorResponse> {
+  if payload.operations.is_empty() {
+    return Ok(Json(SuccessResponse {
+      success: true,
+      message: "No operations to perform".to_string(),
+    }));
+  }
+
+  // Convert HTTP request entries to UpsertKV entries
+  let mut entries = Vec::with_capacity(payload.operations.len());
+  for op in &payload.operations {
+    let upsert_kv = match op.op {
+      BatchOpType::Set => {
+        let value = op.value.as_ref().ok_or_else(|| ErrorResponse {
+          error: format!("Missing 'value' for set operation on key '{}'", op.key),
+        })?;
+        UpsertKV::insert(&op.key, value.as_bytes())
+      }
+      BatchOpType::Delete => UpsertKV::delete(&op.key),
+    };
+    entries.push(upsert_kv);
+  }
+
+  // Create batch write request
+  let batch_req = BatchWriteReq { entries };
+
+  // Execute batch write
+  match state.raft_node.batch_write(batch_req).await {
+    Ok(_) => {
+      let op_count = payload.operations.len();
+      info!("Batch write successful: {} operations", op_count);
+      Ok(Json(SuccessResponse {
+        success: true,
+        message: format!("Batch write successful: {} operations applied", op_count),
+      }))
+    }
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to batch write: {}", e),
     }),
   }
 }

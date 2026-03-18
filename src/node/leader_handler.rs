@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::error::RockRaftError;
 use crate::node::RaftNode;
 use crate::raft::types::AppliedState;
+use crate::raft::types::BatchWriteReq;
 use crate::raft::types::Cmd;
 use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::ForwardResponse;
@@ -65,6 +66,7 @@ impl<'a> LeaderHandler<'a> {
       ForwardRequestBody::Write(entry) => self.handle_write(entry).await,
       ForwardRequestBody::GetKV(req) => self.handle_get_kv(req).await,
       ForwardRequestBody::ScanPrefix(req) => self.handle_scan_prefix(req).await,
+      ForwardRequestBody::BatchWrite(req) => self.handle_batch_write(req).await,
     }
   }
 
@@ -193,6 +195,31 @@ impl<'a> LeaderHandler<'a> {
         error!("Failed to write log entry: {:?}", e);
         Err(RockRaftError::TonicStatus(Status::internal(format!(
           "Failed to write log entry: {}",
+          e
+        ))))
+      }
+    }
+  }
+
+  /// Handle batch write request
+  ///
+  /// This function writes multiple entries atomically to the raft cluster.
+  /// All entries are applied as a single log entry, ensuring atomicity.
+  async fn handle_batch_write(&self, req: BatchWriteReq) -> Result<ForwardResponse> {
+    if req.entries.is_empty() {
+      return Ok(ForwardResponse::BatchWrite(AppliedState::None));
+    }
+
+    let entry = LogEntry::new(Cmd::BatchUpsertKV {
+      entries: req.entries,
+    });
+
+    match self.write(entry).await {
+      Ok(applied_state) => Ok(ForwardResponse::BatchWrite(applied_state)),
+      Err(e) => {
+        error!("Failed to write batch log entry: {:?}", e);
+        Err(RockRaftError::TonicStatus(Status::internal(format!(
+          "Failed to write batch log entry: {}",
           e
         ))))
       }
