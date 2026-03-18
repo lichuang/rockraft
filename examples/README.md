@@ -32,7 +32,7 @@ This example shows:
 ## Project Structure
 
 ```
-cluster/
+examples/
 ├── Cargo.toml              # Project dependencies
 ├── start.sh                # Cluster management script
 ├── conf/                   # Configuration files
@@ -277,7 +277,7 @@ max_open_files = 10000
 
 ### Step 1: Build the example
 
-From `examples/cluster` directory:
+From the `examples` directory:
 
 ```bash
 cargo build
