@@ -22,6 +22,27 @@ This file provides guidance for agentic coding agents working on this codebase.
 - Run `cargo build` to regenerate protobuf code if `.proto` files change
 - Proto file location: `src/raft/proto/raft.proto`
 
+### Code Quality Requirements
+
+**All code changes MUST pass the following checks before submission:**
+
+#### Formatting Check
+```bash
+# Check code formatting
+cargo fmt --all -- --check
+
+# Auto-fix formatting issues
+cargo fmt --all
+```
+
+#### Clippy Check
+```bash
+# Run clippy (treat warnings as errors)
+cargo clippy --all-features -- -D warnings
+```
+
+**⚠️ IMPORTANT: After every code change, ensure both commands pass with ZERO errors and ZERO warnings!**
+
 ## Code Style Guidelines
 
 ### Formatting
@@ -76,6 +97,7 @@ This file provides guidance for agentic coding agents working on this codebase.
 - Use `tempfile` crate for temporary directories in tests
 - Test function naming: `test_<feature>_<scenario>`
 - Helper functions: Create private `create_test_*` helpers for setup
+- For cluster tests that stop/restart the cluster, ensure the cluster is restarted at the end for subsequent tests
 
 ### Comments and Documentation
 - Use `///` for public item documentation (rustdoc)
@@ -90,12 +112,53 @@ This file provides guidance for agentic coding agents working on this codebase.
 - Use `raft.wait(timeout).applied_index(index, "label")` for awaiting log application
 - All storage operations must be async to match OpenRaft's storage traits
 
+#### Batch Write Operations
+- Use `raft_node.batch_write(req)` for atomic batch operations
+- Batch requests use `BatchWriteReq { entries: Vec<UpsertKV> }`
+- Each entry can be either insert (`Operation::Update`) or delete (`Operation::Delete`)
+- Empty batches return immediately without writing to the log
+- Batch operations are atomic - all succeed or all fail together
+- Example:
+  ```rust
+  use rockraft::raft::types::{BatchWriteReq, UpsertKV};
+  
+  let req = BatchWriteReq {
+    entries: vec![
+      UpsertKV::insert("key1", b"value1"),
+      UpsertKV::delete("key2"),
+    ],
+  };
+  raft_node.batch_write(req).await?;
+  ```
+
+#### Command Types (Cmd enum)
+- `Cmd::UpsertKV` - Single key-value operation
+- `Cmd::BatchUpsertKV` - Multiple key-value operations atomically
+- `Cmd::AddNode` / `Cmd::RemoveNode` - Cluster membership changes
+- New command variants must implement `Display` for logging
+
 ### Storage (RocksDB)
 - Use column families for data organization
 - Column families defined in `src/raft/store/keys.rs`
 - Use `Arc<DB>` for shared database instance
 - Use `spawn_blocking` for blocking RocksDB operations in async context
 - Call `flush_wal(true)` for critical operations requiring durability
+
+## Examples
+
+### Cluster Example (`examples/cluster/`)
+- Full-featured HTTP API example with axum
+- HTTP endpoints:
+  - `GET /get?key=<key>` - Get value by key
+  - `POST /set` - Set key-value pair
+  - `POST /delete` - Delete a key
+  - `POST /batch_write` - Batch atomic write (supports mixed set/delete)
+  - `GET /prefix?prefix=<prefix>` - Scan keys by prefix
+  - `GET /members` - Get cluster membership
+  - `POST /leave` - Remove node from cluster
+  - `GET /health` - Health check
+  - `GET /metrics` - Cluster metrics
+- Run tests: `./run_tests.sh` (requires Python and pytest)
 
 ## Important Notes
 - Protobuf code generation happens via `tonic-build` in `build.rs`

@@ -8,7 +8,9 @@ use axum::{
 use openraft::async_runtime::watch::WatchReceiver;
 use rockraft::config::Config as RockraftConfig;
 use rockraft::node::RaftNodeBuilder;
-use rockraft::raft::types::{BatchWriteReq, Cmd, GetKVReq, LeaveRequest, LogEntry, ScanPrefixReq, UpsertKV};
+use rockraft::raft::types::{
+  BatchWriteReq, Cmd, GetKVReq, LeaveRequest, LogEntry, ScanPrefixReq, UpsertKV,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -504,7 +506,9 @@ async fn prefix_handler(
     error: "Missing 'prefix' parameter".to_string(),
   })?;
 
-  let req = ScanPrefixReq { prefix: prefix.clone().into_bytes() };
+  let req = ScanPrefixReq {
+    prefix: prefix.clone().into_bytes(),
+  };
   match state.raft_node.scan_prefix(req).await {
     Ok(results) => {
       let items: Vec<serde_json::Value> = results
