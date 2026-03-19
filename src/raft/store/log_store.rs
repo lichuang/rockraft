@@ -1,6 +1,8 @@
 use std::fmt::Debug;
 use std::io;
+use std::io::Error;
 use std::marker::PhantomData;
+use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
@@ -44,11 +46,11 @@ where
 }
 
 impl RocksLogStore<TypeConfig> {
-  pub fn create(db: Arc<DB>) -> Result<Self, std::io::Error> {
+  pub fn create(db: Arc<DB>) -> Result<Self, Error> {
     db.cf_handle(LOG_META_FAMILY)
-      .ok_or_else(|| std::io::Error::other("column family `_log_meta` not found"))?;
+      .ok_or_else(|| Error::other("column family `_log_meta` not found"))?;
     db.cf_handle(LOG_DATA_FAMILY)
-      .ok_or_else(|| std::io::Error::other("column family `_log_data` not found"))?;
+      .ok_or_else(|| Error::other("column family `_log_data` not found"))?;
 
     Ok(Self {
       db,
@@ -140,9 +142,9 @@ impl RaftLogReader<TypeConfig> for RocksLogStore<TypeConfig> {
     range: RB,
   ) -> Result<Vec<Entry>, io::Error> {
     let start = match range.start_bound() {
-      std::ops::Bound::Included(x) => id_to_bin(*x),
-      std::ops::Bound::Excluded(x) => id_to_bin(*x + 1),
-      std::ops::Bound::Unbounded => id_to_bin(0),
+      Bound::Included(x) => id_to_bin(*x),
+      Bound::Excluded(x) => id_to_bin(*x + 1),
+      Bound::Unbounded => id_to_bin(0),
     };
 
     let mut entries = Vec::new();
@@ -253,7 +255,7 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
     // Because when the function returns, it requires the log entries can be read.
     let db = self.db.clone();
     let handle = spawn_blocking(move || {
-      let res = db.flush_wal(true).map_err(std::io::Error::other);
+      let res = db.flush_wal(true).map_err(Error::other);
       callback.io_completed(res);
     });
     drop(handle);
@@ -306,7 +308,7 @@ fn id_to_bin(id: u64) -> Vec<u8> {
   buf
 }
 
-fn bin_to_id(buf: &[u8]) -> std::io::Result<u64> {
+fn bin_to_id(buf: &[u8]) -> Result<u64, Error> {
   (&buf[0..8]).read_u64::<BigEndian>()
 }
 

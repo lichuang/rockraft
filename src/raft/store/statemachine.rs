@@ -1,7 +1,12 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::io;
+use std::io::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::PoisonError;
 
 use crate::raft::types::{decode, encode};
 use futures::Stream;
@@ -47,7 +52,7 @@ pub struct RocksStateMachine {
 }
 
 /// Convert Mutex lock error to io::Error
-fn mutex_lock_err(e: std::sync::PoisonError<std::sync::MutexGuard<'_, SysData>>) -> io::Error {
+fn mutex_lock_err(e: PoisonError<MutexGuard<'_, SysData>>) -> Error {
   io::Error::other(format!("Mutex lock failed: {}", e))
 }
 
@@ -62,11 +67,11 @@ impl Clone for RocksStateMachine {
 }
 
 impl RocksStateMachine {
-  pub async fn new(db: Arc<DB>, data_dir: PathBuf) -> Result<RocksStateMachine, std::io::Error> {
+  pub async fn new(db: Arc<DB>, data_dir: PathBuf) -> Result<RocksStateMachine, Error> {
     db.cf_handle(SM_META_FAMILY)
-      .ok_or_else(|| std::io::Error::other("column family `_log_meta` not found"))?;
+      .ok_or_else(|| Error::other("column family `_log_meta` not found"))?;
     db.cf_handle(SM_DATA_FAMILY)
-      .ok_or_else(|| std::io::Error::other("column family `_log_data` not found"))?;
+      .ok_or_else(|| Error::other("column family `_log_data` not found"))?;
 
     let snapshot_dir = data_dir.join("snapshot");
     let sys_data = Self::recover_sys_data(&db)?;
@@ -89,7 +94,7 @@ impl RocksStateMachine {
   fn recover_sys_data(db: &Arc<DB>) -> Result<SysData, io::Error> {
     let cf_meta = db
       .cf_handle(SM_META_FAMILY)
-      .ok_or_else(|| std::io::Error::other("column family `_sm_meta` not found"))?;
+      .ok_or_else(|| Error::other("column family `_sm_meta` not found"))?;
 
     // Recover last_applied
     let last_applied = match db.get_cf(&cf_meta, LAST_APPLIED_LOG_KEY) {
@@ -127,7 +132,7 @@ impl RocksStateMachine {
   /// Build StoredMembership from current nodes
   fn build_membership_from_nodes(&self) -> Result<StoredMembership, io::Error> {
     let sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
-    let node_ids: std::collections::BTreeSet<NodeId> = sys_data.nodes.keys().cloned().collect();
+    let node_ids: BTreeSet<NodeId> = sys_data.nodes.keys().cloned().collect();
     let nodes = sys_data.nodes.clone();
 
     // If no nodes, return default membership
@@ -201,7 +206,7 @@ impl RocksStateMachine {
   }
 
   /// Get all nodes from the state machine
-  pub fn get_nodes(&self) -> Result<std::collections::BTreeMap<NodeId, Node>, io::Error> {
+  pub fn get_nodes(&self) -> Result<BTreeMap<NodeId, Node>, io::Error> {
     Ok(self.sys_data.lock().map_err(mutex_lock_err)?.nodes.clone())
   }
 
@@ -389,14 +394,14 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
 #[cfg(test)]
 mod tests {
-  use std::collections::BTreeSet;
+  use super::*;
+
+  use std::collections::HashMap;
 
   use crate::{
     engine::RocksDBEngine,
     raft::types::{Endpoint, LeaderId, Node},
   };
-
-  use super::*;
 
   async fn create_test_state_machine() -> RocksStateMachine {
     let temp_data_dir = tempfile::tempdir().unwrap().keep();
@@ -784,7 +789,7 @@ mod tests {
     assert_eq!(results.len(), 3);
 
     // Convert to a map for easier verification
-    let map: std::collections::HashMap<_, _> = results.into_iter().collect();
+    let map: HashMap<_, _> = results.into_iter().collect();
 
     assert_eq!(
       map.get(b"config:host".as_slice()),

@@ -18,9 +18,12 @@ use crate::raft::types::TypeConfig;
 use openraft::ChangeMembers;
 use openraft::Raft;
 use openraft::async_runtime::watch::WatchReceiver;
+use openraft::error::RaftError;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tonic::Status;
 use tracing::debug;
 use tracing::error;
@@ -290,8 +293,8 @@ impl<'a> LeaderHandler<'a> {
   /// * `Err(RockRaftError)` - If the operation failed or this node is not the leader
   pub async fn write(&self, mut entry: LogEntry) -> Result<AppliedState> {
     // Set the current timestamp in milliseconds, safe to unwrap
-    let now = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
       .unwrap_or_default()
       .as_millis() as u64;
     entry.time_ms = Some(now);
@@ -314,12 +317,10 @@ impl<'a> LeaderHandler<'a> {
           "Failed to write log entry"
         );
         match e {
-          openraft::error::RaftError::APIError(api_err) => {
+          RaftError::APIError(api_err) => {
             Err(RockRaftError::OpenRaft(OpenRaft::ClientWrite(api_err)))
           }
-          openraft::error::RaftError::Fatal(fatal_err) => {
-            Err(RockRaftError::OpenRaft(OpenRaft::Fatal(fatal_err)))
-          }
+          RaftError::Fatal(fatal_err) => Err(RockRaftError::OpenRaft(OpenRaft::Fatal(fatal_err))),
         }
       }
     }

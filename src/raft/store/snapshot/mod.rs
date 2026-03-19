@@ -8,6 +8,7 @@ pub use util::get_current_snapshot;
 
 #[cfg(test)]
 mod tests {
+  use super::util;
   use super::*;
   use openraft::Membership;
   use openraft::StoredMembership;
@@ -459,16 +460,15 @@ mod tests {
     );
 
     // Step 4: Verify snapshot files exist
-    let snapshot_id_dir =
-      crate::raft::store::snapshot::util::snapshot_id_dir(&snapshot_dir_path, &snapshot_id);
+    let snapshot_id_dir = util::snapshot_id_dir(&snapshot_dir_path, &snapshot_id);
 
-    let meta_file = crate::raft::store::snapshot::util::snapshot_meta_file(&snapshot_id_dir);
+    let meta_file = util::snapshot_meta_file(&snapshot_id_dir);
     assert!(
       PathBuf::from(&meta_file).exists(),
       "Metadata file should exist"
     );
 
-    let data_file = crate::raft::store::snapshot::util::snapshot_data_file(&snapshot_id_dir);
+    let data_file = util::snapshot_data_file(&snapshot_id_dir);
     assert!(PathBuf::from(&data_file).exists(), "Data file should exist");
 
     println!("Integration test passed: Build and recover snapshot with metadata");

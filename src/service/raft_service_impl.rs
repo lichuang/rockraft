@@ -1,7 +1,11 @@
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::SeekFrom;
 use std::sync::Arc;
 
+use openraft::raft::{
+  AppendEntriesRequest, InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest,
+};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
@@ -12,7 +16,6 @@ use crate::raft::protobuf as pb;
 use crate::node::RaftNode;
 use crate::raft::types::{ForwardRequest, ForwardResponse, Snapshot, TypeConfig, decode, encode};
 use openraft::async_runtime::watch::WatchReceiver;
-use openraft::raft;
 use pb::raft_service_server::RaftService;
 
 /// State for receiving a snapshot chunk
@@ -80,7 +83,7 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
 
     // Deserialize the request
-    let append_req: raft::AppendEntriesRequest<TypeConfig> = decode(&req.value)
+    let append_req: AppendEntriesRequest<TypeConfig> = decode(&req.value)
       .map_err(|e| Status::internal(format!("Failed to deserialize append request: {}", e)))?;
 
     // Forward to Raft instance
@@ -110,7 +113,7 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
 
     // Deserialize the request
-    let vote_req: raft::VoteRequest<TypeConfig> = decode(&req.value)
+    let vote_req: VoteRequest<TypeConfig> = decode(&req.value)
       .map_err(|e| Status::internal(format!("Failed to deserialize vote request: {}", e)))?;
 
     // Forward to Raft instance
@@ -143,7 +146,7 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
 
     // Deserialize the request
-    let snapshot_req: raft::InstallSnapshotRequest<TypeConfig> = decode(&req.value)
+    let snapshot_req: InstallSnapshotRequest<TypeConfig> = decode(&req.value)
       .map_err(|e| Status::internal(format!("Failed to deserialize snapshot request: {}", e)))?;
 
     let vote = snapshot_req.vote;
@@ -169,10 +172,9 @@ impl RaftService for RaftServiceImpl {
       }
 
       // Create a temporary file for receiving the snapshot
-      let std_file = std::fs::File::create(
-        std::env::temp_dir().join(format!("rockraft_snapshot_{}", snapshot_id)),
-      )
-      .map_err(|e| Status::internal(format!("Failed to create temp file: {}", e)))?;
+      let std_file =
+        File::create(std::env::temp_dir().join(format!("rockraft_snapshot_{}", snapshot_id)))
+          .map_err(|e| Status::internal(format!("Failed to create temp file: {}", e)))?;
       let tokio_file = tokio::fs::File::from_std(std_file);
 
       streaming_guard.insert(
@@ -242,7 +244,7 @@ impl RaftService for RaftServiceImpl {
 
     // Return intermediate response with current vote
     let my_vote = WatchReceiver::borrow_watched(&self.node.raft().metrics()).vote;
-    let resp = raft::InstallSnapshotResponse::<TypeConfig> { vote: my_vote };
+    let resp = InstallSnapshotResponse::<TypeConfig> { vote: my_vote };
     let response_data = encode(&resp)
       .map_err(|e| Status::internal(format!("Failed to serialize snapshot response: {}", e)))?;
 

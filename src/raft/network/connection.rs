@@ -1,6 +1,6 @@
 use openraft::error::NetworkError;
 use openraft::error::RPCError;
-
+use openraft::error::Unreachable;
 use openraft::errors::ReplicationClosed;
 use openraft::errors::StreamingError;
 use openraft::network::RPCOption;
@@ -14,7 +14,10 @@ use openraft::raft::VoteResponse;
 use openraft::storage::Snapshot;
 use openraft::type_config::alias::VoteOf;
 use std::future::Future;
+use std::io::Error;
+use std::io::ErrorKind;
 use std::io::SeekFrom;
+use std::result::Result as StdResult;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
@@ -60,7 +63,7 @@ impl NetworkConnection {
 
     encode(&req)
       .map(|data| self.serialize_buf.extend_from_slice(&data))
-      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+      .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(RaftRequest {
       data: self.serialize_buf.clone(),
@@ -91,7 +94,7 @@ impl NetworkConnection {
 
     encode(&req)
       .map(|data| self.serialize_buf.extend_from_slice(&data))
-      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+      .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(AppendRequest {
       value: self.serialize_buf.clone(),
@@ -118,7 +121,7 @@ impl NetworkConnection {
 
     encode(&req)
       .map(|data| self.serialize_buf.extend_from_slice(&data))
-      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+      .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(PbVoteRequest {
       value: self.serialize_buf.clone(),
@@ -145,7 +148,7 @@ impl NetworkConnection {
 
     encode(&req)
       .map(|data| self.serialize_buf.extend_from_slice(&data))
-      .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+      .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
 
     let grpc_request = tonic::Request::new(PbSnapshotRequest {
       value: self.serialize_buf.clone(),
@@ -169,7 +172,7 @@ impl NetworkConnection {
     snapshot: Snapshot<TypeConfig>,
     cancel: impl Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
     option: RPCOption,
-  ) -> std::result::Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
+  ) -> StdResult<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
     use futures::FutureExt;
 
     // Pin the cancel future
@@ -180,13 +183,13 @@ impl NetworkConnection {
     let end = snapshot_data
       .seek(SeekFrom::End(0))
       .await
-      .map_err(|e| StreamingError::from(openraft::error::Unreachable::new(&e)))?;
+      .map_err(|e| StreamingError::from(Unreachable::new(&e)))?;
 
     // Seek back to beginning
     snapshot_data
       .seek(SeekFrom::Start(0))
       .await
-      .map_err(|e| StreamingError::from(openraft::error::Unreachable::new(&e)))?;
+      .map_err(|e| StreamingError::from(Unreachable::new(&e)))?;
 
     let mut offset = 0u64;
     // Use default chunk size of 64KB if not specified
@@ -204,7 +207,7 @@ impl NetworkConnection {
         let n = snapshot_data
           .read_buf(&mut buf)
           .await
-          .map_err(|e| StreamingError::from(openraft::error::Unreachable::new(&e)))?;
+          .map_err(|e| StreamingError::from(Unreachable::new(&e)))?;
         if n == 0 {
           break;
         }
@@ -234,10 +237,8 @@ impl NetworkConnection {
         }
         Err(err) => {
           // Convert RockRaftError to RPCError
-          let io_err = std::io::Error::other(err.to_string());
-          return Err(StreamingError::from(openraft::error::Unreachable::new(
-            &io_err,
-          )));
+          let io_err = Error::other(err.to_string());
+          return Err(StreamingError::from(Unreachable::new(&io_err)));
         }
       }
 
@@ -251,7 +252,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
     &mut self,
     rpc: AppendEntriesRequest<TypeConfig>,
     _option: RPCOption,
-  ) -> std::result::Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
+  ) -> StdResult<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
     self
       .append_entries_internal(rpc)
       .await
@@ -262,7 +263,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
     &mut self,
     rpc: VoteRequest<TypeConfig>,
     _option: RPCOption,
-  ) -> std::result::Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
+  ) -> StdResult<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
     self
       .vote_internal(rpc)
       .await
@@ -275,7 +276,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
     snapshot: Snapshot<TypeConfig>,
     cancel: impl Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
     option: RPCOption,
-  ) -> std::result::Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
+  ) -> StdResult<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
     // Send snapshot in chunks using our internal method
     self
       .send_snapshot_in_chunks(vote, snapshot, cancel, option)

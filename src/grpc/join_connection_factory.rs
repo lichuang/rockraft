@@ -3,6 +3,7 @@ use crate::error::GrpcConnectionError;
 use crate::error::Result;
 use crate::error::RockRaftError;
 use hyper_util::client::legacy::connect::HttpConnector;
+use std::fs;
 use std::time::Duration;
 use tonic::transport::Certificate;
 use tonic::transport::Channel;
@@ -85,7 +86,7 @@ impl JoinConnectionFactory {
   }
 
   fn client_tls_config(conf: &RpcClientTlsConfig) -> Result<ClientTlsConfig> {
-    let server_root_ca_cert = std::fs::read(conf.rpc_tls_server_root_ca_cert.as_str())?;
+    let server_root_ca_cert = fs::read(conf.rpc_tls_server_root_ca_cert.as_str())?;
     let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
 
     let tls = ClientTlsConfig::new()
@@ -100,7 +101,11 @@ mod tests {
   use super::*;
   use crate::raft::protobuf::raft_service_server::RaftService;
   use crate::raft::protobuf::raft_service_server::RaftServiceServer;
-  use crate::raft::protobuf::{RaftReply, RaftRequest};
+  use crate::raft::protobuf::{
+    AppendReply, AppendRequest, RaftReply, RaftRequest, SnapshotReply, SnapshotRequest, VoteReply,
+    VoteRequest,
+  };
+  use std::result::Result as StdResult;
   use tokio::net::TcpListener;
   use tonic::{Request, Response, Status};
 
@@ -112,7 +117,7 @@ mod tests {
     async fn forward(
       &self,
       _request: Request<RaftRequest>,
-    ) -> std::result::Result<Response<RaftReply>, Status> {
+    ) -> StdResult<Response<RaftReply>, Status> {
       Ok(Response::new(RaftReply {
         data: vec![],
         error: vec![],
@@ -121,29 +126,20 @@ mod tests {
 
     async fn append(
       &self,
-      _request: Request<crate::raft::protobuf::AppendRequest>,
-    ) -> std::result::Result<Response<crate::raft::protobuf::AppendReply>, Status> {
-      Ok(Response::new(crate::raft::protobuf::AppendReply {
-        value: vec![],
-      }))
+      _request: Request<AppendRequest>,
+    ) -> StdResult<Response<AppendReply>, Status> {
+      Ok(Response::new(AppendReply { value: vec![] }))
     }
 
-    async fn vote(
-      &self,
-      _request: Request<crate::raft::protobuf::VoteRequest>,
-    ) -> std::result::Result<Response<crate::raft::protobuf::VoteReply>, Status> {
-      Ok(Response::new(crate::raft::protobuf::VoteReply {
-        value: vec![],
-      }))
+    async fn vote(&self, _request: Request<VoteRequest>) -> StdResult<Response<VoteReply>, Status> {
+      Ok(Response::new(VoteReply { value: vec![] }))
     }
 
     async fn snapshot(
       &self,
-      _request: Request<crate::raft::protobuf::SnapshotRequest>,
-    ) -> std::result::Result<Response<crate::raft::protobuf::SnapshotReply>, Status> {
-      Ok(Response::new(crate::raft::protobuf::SnapshotReply {
-        value: vec![],
-      }))
+      _request: Request<SnapshotRequest>,
+    ) -> StdResult<Response<SnapshotReply>, Status> {
+      Ok(Response::new(SnapshotReply { value: vec![] }))
     }
   }
 

@@ -45,6 +45,40 @@ cargo clippy --all-features -- -D warnings
 
 ## Code Style Guidelines
 
+### Type Import Rules
+
+**DO NOT** use long path references to types directly in code:
+
+```rust
+// ❌ Wrong
+pub fn to_openai_tool(&self) -> async_openai::types::chat::ChatCompletionTools {
+    // ...
+}
+
+// ❌ Wrong
+pub fn process_response(response: async_openai::types::chat::CreateChatCompletionResponse) {
+    // ...
+}
+```
+
+**MUST** use `use` to import types at the top of the file, then use short names:
+
+```rust
+// ✅ Correct
+use async_openai::types::chat::ChatCompletionTools;
+
+pub fn to_openai_tool(&self) -> ChatCompletionTools {
+    // ...
+}
+
+// ✅ Correct
+use async_openai::types::chat::CreateChatCompletionResponse;
+
+pub fn process_response(response: CreateChatCompletionResponse) {
+    // ...
+}
+```
+
 ### Formatting
 - **Indentation**: 2 spaces (configured in `rustfmt.toml`)
 - **Import ordering**: Automatic reordering enabled (`reorder_imports = true`)

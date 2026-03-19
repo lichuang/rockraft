@@ -9,8 +9,10 @@ use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::JoinRequest;
 use anyerror::AnyError;
 use openraft::error::{InitializeError, RaftError};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot};
 use tokio::time::{Duration, timeout};
@@ -61,7 +63,7 @@ pub struct RaftNode {
 
   shutdown_tx: broadcast::Sender<()>,
   _shutdown_rx: broadcast::Receiver<()>,
-  service_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+  service_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RaftNode {
@@ -138,7 +140,7 @@ impl RaftNode {
       state_machine: Arc::new(state_machine),
       shutdown_tx,
       _shutdown_rx: shutdown_rx_for_struct,
-      service_handle: std::sync::Mutex::new(None),
+      service_handle: Mutex::new(None),
     }))
   }
 
@@ -281,7 +283,7 @@ impl RaftNode {
   /// Assume's current node is a leader
   /// Returns Ok(LeaderHandler) if this node is the current leader
   /// Returns Err(ForwardToLeader) with the current leader information if this node is not a leader
-  async fn assume_leader(&self) -> std::result::Result<LeaderHandler<'_>, ForwardToLeader> {
+  async fn assume_leader(&self) -> StdResult<LeaderHandler<'_>, ForwardToLeader> {
     let current_node_id = *self.raft.node_id();
 
     match self.get_leader().await {
@@ -360,7 +362,7 @@ impl RaftNode {
 
     // Initialize cluster with the node
     let node_id = node.node_id;
-    let mut nodes = std::collections::BTreeMap::new();
+    let mut nodes = BTreeMap::new();
     nodes.insert(node_id, node);
 
     if let Err(e) = self.raft.initialize(nodes).await {
@@ -507,7 +509,7 @@ impl RaftNode {
   /// # Returns
   /// * `Ok(AppliedState)` - The result of applying the log entry
   /// * `Err(Status)` - If the operation failed
-  pub async fn write(&self, entry: LogEntry) -> std::result::Result<AppliedState, Status> {
+  pub async fn write(&self, entry: LogEntry) -> StdResult<AppliedState, Status> {
     debug!("write log entry: {:?}", entry);
 
     let request = ForwardRequest {
@@ -537,10 +539,7 @@ impl RaftNode {
   /// # Returns
   /// * `Ok(BatchWriteReply)` - The result of applying the batch
   /// * `Err(Status)` - If the operation failed
-  pub async fn batch_write(
-    &self,
-    req: BatchWriteReq,
-  ) -> std::result::Result<BatchWriteReply, Status> {
+  pub async fn batch_write(&self, req: BatchWriteReq) -> StdResult<BatchWriteReply, Status> {
     debug!("batch write: {:?}", req);
 
     let request = ForwardRequest {
@@ -567,7 +566,7 @@ impl RaftNode {
   /// # Returns
   /// * `Ok(GetKVReply)` - The value associated with the key, or None if not found
   /// * `Err(Status)` - If the operation failed
-  pub async fn read(&self, req: GetKVReq) -> std::result::Result<GetKVReply, Status> {
+  pub async fn read(&self, req: GetKVReq) -> StdResult<GetKVReply, Status> {
     debug!("read kv: {:?}", req);
 
     let request = ForwardRequest {
@@ -594,10 +593,7 @@ impl RaftNode {
   /// # Returns
   /// * `Ok(ScanPrefixReply)` - A vector of (key, value) pairs matching the prefix
   /// * `Err(Status)` - If the operation failed
-  pub async fn scan_prefix(
-    &self,
-    req: ScanPrefixReq,
-  ) -> std::result::Result<ScanPrefixReply, Status> {
+  pub async fn scan_prefix(&self, req: ScanPrefixReq) -> StdResult<ScanPrefixReply, Status> {
     debug!("scan_prefix: {:?}", req);
 
     let request = ForwardRequest {
@@ -623,7 +619,7 @@ impl RaftNode {
   /// # Returns
   /// * `Ok(())` - If the node was successfully removed from the cluster
   /// * `Err(Status)` - If the operation failed
-  pub async fn leave(&self, req: LeaveRequest) -> std::result::Result<(), Status> {
+  pub async fn leave(&self, req: LeaveRequest) -> StdResult<(), Status> {
     debug!("leave node: {:?}", req);
 
     let request = ForwardRequest {
@@ -649,10 +645,7 @@ impl RaftNode {
   /// # Returns
   /// * `Ok(GetMembersReply)` - A map of node_id to Node containing all cluster members
   /// * `Err(Status)` - If the operation failed
-  pub async fn get_members(
-    &self,
-    req: GetMembersReq,
-  ) -> std::result::Result<GetMembersReply, Status> {
+  pub async fn get_members(&self, req: GetMembersReq) -> StdResult<GetMembersReply, Status> {
     debug!("get members: {:?}", req);
 
     // This operation can be handled by any node, use LeaderHandler for code reuse
@@ -787,20 +780,22 @@ impl RaftNode {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::config::Config;
+  use crate::config::RaftConfig;
+  use crate::config::RocksdbConfig;
+  use crate::raft::types::Endpoint;
   use tempfile::tempdir;
 
   /// Helper function to create a test config
   fn create_test_config(data_dir: &str, node_id: u64, addr: &str) -> Config {
     Config {
       node_id,
-      raft: crate::config::RaftConfig {
+      raft: RaftConfig {
         address: addr.to_string(),
         advertise_host: "".to_string(),
         single: true,
         join: vec![],
       },
-      rocksdb: crate::config::RocksdbConfig {
+      rocksdb: RocksdbConfig {
         data_path: data_dir.to_string(),
         max_open_files: 1024,
       },
@@ -812,9 +807,9 @@ mod tests {
     let sm = &raft_node.state_machine;
 
     for node_id in node_ids {
-      let node = crate::raft::types::Node {
+      let node = Node {
         node_id,
-        endpoint: crate::raft::types::Endpoint::new("127.0.0.1", 1000 + node_id as u32),
+        endpoint: Endpoint::new("127.0.0.1", 1000 + node_id as u32),
       };
       sm.add_node(node).unwrap();
     }

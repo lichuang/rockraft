@@ -1,6 +1,9 @@
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::fmt::Result as FmtResult;
 
 use super::AppliedState;
 use super::endpoint::Endpoint;
@@ -16,8 +19,8 @@ pub struct Node {
   pub endpoint: Endpoint,
 }
 
-impl std::fmt::Display for Node {
-  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+impl Display for Node {
+  fn fmt(&self, f: &mut Formatter) -> FmtResult {
     write!(f, "{}={}", self.node_id, self.endpoint)
   }
 }

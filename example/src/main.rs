@@ -13,8 +13,11 @@ use rockraft::raft::types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::env;
+use std::error::Error;
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::signal;
 use tower_http::cors::CorsLayer;
@@ -127,7 +130,7 @@ impl IntoResponse for ErrorResponse {
   }
 }
 
-fn init_logging(config: &LogConfig) -> Result<(), Box<dyn std::error::Error>> {
+fn init_logging(config: &LogConfig) -> Result<(), Box<dyn Error>> {
   let env_filter = if std::env::var("RUST_LOG").is_ok() {
     EnvFilter::from_default_env()
   } else {
@@ -137,17 +140,13 @@ fn init_logging(config: &LogConfig) -> Result<(), Box<dyn std::error::Error>> {
   match &config.file {
     Some(log_file) => {
       // Ensure parent directory exists
-      if let Some(parent) = std::path::Path::new(log_file).parent() {
-        std::fs::create_dir_all(parent)?;
+      if let Some(parent) = Path::new(log_file).parent() {
+        fs::create_dir_all(parent)?;
       }
 
       let file_appender = tracing_appender::rolling::never(
-        std::path::Path::new(log_file)
-          .parent()
-          .unwrap_or(std::path::Path::new(".")),
-        std::path::Path::new(log_file)
-          .file_name()
-          .unwrap_or_default(),
+        Path::new(log_file).parent().unwrap_or(Path::new(".")),
+        Path::new(log_file).file_name().unwrap_or_default(),
       );
 
       tracing_subscriber::registry()
@@ -169,7 +168,7 @@ fn init_logging(config: &LogConfig) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn Error>> {
   // Parse command line arguments first to get config path
   let args: Vec<String> = env::args().collect();
   let config_path = if args.len() > 2 && args[1] == "--conf" {
@@ -276,7 +275,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Handler for GET /get endpoint
 async fn get_handler(
-  Query(params): Query<std::collections::HashMap<String, String>>,
+  Query(params): Query<HashMap<String, String>>,
   State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ErrorResponse> {
   let key = params.get("key").ok_or_else(|| ErrorResponse {
@@ -306,10 +305,7 @@ async fn set_handler(
   Json(payload): Json<SetValueRequest>,
 ) -> Result<impl IntoResponse, ErrorResponse> {
   // Create a LogEntry with UpsertKV command
-  let upsert_kv = Cmd::UpsertKV(rockraft::raft::types::UpsertKV::insert(
-    &payload.key,
-    payload.value.as_bytes(),
-  ));
+  let upsert_kv = Cmd::UpsertKV(UpsertKV::insert(&payload.key, payload.value.as_bytes()));
   let entry = LogEntry::new(upsert_kv);
 
   // Use raft_node.write() which handles leader forwarding automatically
@@ -330,14 +326,14 @@ async fn set_handler(
 /// Handler for POST /delete endpoint
 async fn delete_handler(
   State(state): State<AppState>,
-  Json(payload): Json<std::collections::HashMap<String, String>>,
+  Json(payload): Json<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ErrorResponse> {
   let key = payload.get("key").ok_or_else(|| ErrorResponse {
     error: "Missing 'key' field".to_string(),
   })?;
 
   // Create an UpsertKV with Delete operation
-  let upsert_kv = Cmd::UpsertKV(rockraft::raft::types::UpsertKV::delete(key));
+  let upsert_kv = Cmd::UpsertKV(UpsertKV::delete(key));
   let entry = LogEntry::new(upsert_kv);
 
   // Use raft_node.write() which handles leader forwarding automatically

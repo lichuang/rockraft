@@ -1,6 +1,8 @@
+use std::fs;
 use std::io;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use openraft::SnapshotMeta;
@@ -109,7 +111,7 @@ pub async fn build_snapshot(
 
     // Create temporary dump file for compressed data
     let dump_file_name = snapshot_dump_file(&snapshot_id_dir);
-    let dump_file = std::fs::File::create(&dump_file_name)?;
+    let dump_file = fs::File::create(&dump_file_name)?;
 
     // Initialize zstd compressor with compression level 3 (good balance of speed/compression)
     let mut encoder = zstd::Encoder::new(dump_file, 3)?;
@@ -227,6 +229,7 @@ fn vacuum_snapshot_files(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::raft::types::LeaderId;
   use openraft::Membership;
   use tempfile::tempdir;
 
@@ -314,7 +317,7 @@ mod tests {
     let snapshot_dir = temp_dir.path().join("snapshots");
 
     let last_applied_log_id = Some(LogId {
-      leader_id: crate::raft::types::LeaderId {
+      leader_id: LeaderId {
         term: 2,
         node_id: 1,
       },
@@ -323,7 +326,7 @@ mod tests {
 
     let last_membership = StoredMembership::new(
       Some(LogId {
-        leader_id: crate::raft::types::LeaderId {
+        leader_id: LeaderId {
           term: 2,
           node_id: 1,
         },
@@ -352,7 +355,7 @@ mod tests {
 
     // Verify snapshot data file exists
     let snapshot_data = snapshot_data_file(&snapshot_id_dir);
-    assert!(std::path::Path::new(&snapshot_data).exists());
+    assert!(Path::new(&snapshot_data).exists());
 
     // Verify meta file exists
     let meta_file = snapshot_id_dir.join("meta");
@@ -465,7 +468,7 @@ mod tests {
     let snapshot_dir = temp_dir.path().join("snapshots");
 
     let last_applied_log_id = Some(LogId {
-      leader_id: crate::raft::types::LeaderId {
+      leader_id: LeaderId {
         term: 1,
         node_id: 2,
       },
@@ -474,7 +477,7 @@ mod tests {
 
     let last_membership = StoredMembership::new(
       Some(LogId {
-        leader_id: crate::raft::types::LeaderId {
+        leader_id: LeaderId {
           term: 1,
           node_id: 2,
         },
@@ -492,7 +495,7 @@ mod tests {
 
     // Verify all expected files exist
     let snapshot_file = snapshot_data_file(&snapshot_id_dir);
-    let snapshot_path = std::path::Path::new(&snapshot_file);
+    let snapshot_path = Path::new(&snapshot_file);
 
     assert!(snapshot_path.exists());
     assert!(snapshot_path.is_file());
@@ -526,7 +529,7 @@ mod tests {
     let snapshot_dir = tempdir().unwrap().path().join("deeply/nested/snapshots");
 
     let last_applied_log_id = Some(LogId {
-      leader_id: crate::raft::types::LeaderId {
+      leader_id: LeaderId {
         term: 1,
         node_id: 1,
       },
@@ -535,7 +538,7 @@ mod tests {
 
     let last_membership = StoredMembership::new(
       Some(LogId {
-        leader_id: crate::raft::types::LeaderId {
+        leader_id: LeaderId {
           term: 1,
           node_id: 1,
         },
@@ -582,7 +585,7 @@ mod tests {
     let snapshot_dir = tempdir().unwrap().path().join("snapshots");
 
     let last_applied_log_id = Some(LogId {
-      leader_id: crate::raft::types::LeaderId {
+      leader_id: LeaderId {
         term: 5,
         node_id: 3,
       },
@@ -591,7 +594,7 @@ mod tests {
 
     let last_membership = StoredMembership::new(
       Some(LogId {
-        leader_id: crate::raft::types::LeaderId {
+        leader_id: LeaderId {
           term: 4,
           node_id: 2,
         },
@@ -643,7 +646,7 @@ mod tests {
   #[test]
   fn test_snapshot_id_format_with_log_id() {
     let last_applied_log_id = Some(LogId {
-      leader_id: crate::raft::types::LeaderId {
+      leader_id: LeaderId {
         term: 3,
         node_id: 5,
       },
