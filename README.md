@@ -39,4 +39,4 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 ## See Also
 
-- [examples/](examples/) - Complete cluster working examples
+- [example/](example/) - Complete cluster working example

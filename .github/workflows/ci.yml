@@ -13,6 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -48,6 +51,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -71,6 +77,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
