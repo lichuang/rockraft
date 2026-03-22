@@ -1,6 +1,8 @@
 use crate::raft::protobuf as pb;
 use crate::raft::types::AppliedState;
 use crate::raft::types::LogEntry;
+use crate::raft::types::TxnReply;
+use crate::raft::types::TxnReq;
 use crate::raft::types::UpsertKV;
 use crate::raft::types::encode;
 use crate::raft::types::message::GetMembersReply;
@@ -34,6 +36,12 @@ pub struct BatchWriteReq {
 /// Response for batch write operation
 pub type BatchWriteReply = AppliedState;
 
+/// Request for transaction operation
+pub type TxnRequest = TxnReq;
+
+/// Response for transaction operation
+pub type TxnResponse = TxnReply;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ForwardRequestBody {
   Join(JoinRequest),
@@ -43,6 +51,7 @@ pub enum ForwardRequestBody {
   GetKV(GetKVReq),
   ScanPrefix(ScanPrefixReq),
   BatchWrite(BatchWriteReq),
+  Txn(TxnRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -60,6 +69,7 @@ pub enum ForwardResponse {
   GetKV(GetKVReply),
   ScanPrefix(ScanPrefixReply),
   BatchWrite(BatchWriteReply),
+  Txn(TxnResponse),
 }
 
 impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {

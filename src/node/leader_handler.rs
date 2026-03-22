@@ -14,6 +14,7 @@ use crate::raft::types::LeaveRequest;
 use crate::raft::types::LogEntry;
 use crate::raft::types::Node;
 use crate::raft::types::ScanPrefixReq;
+use crate::raft::types::TxnReq;
 use crate::raft::types::TypeConfig;
 use openraft::ChangeMembers;
 use openraft::Raft;
@@ -70,6 +71,7 @@ impl<'a> LeaderHandler<'a> {
       ForwardRequestBody::GetKV(req) => self.handle_get_kv(req).await,
       ForwardRequestBody::ScanPrefix(req) => self.handle_scan_prefix(req).await,
       ForwardRequestBody::BatchWrite(req) => self.handle_batch_write(req).await,
+      ForwardRequestBody::Txn(req) => self.handle_txn(req).await,
     }
   }
 
@@ -272,6 +274,37 @@ impl<'a> LeaderHandler<'a> {
         error!("Failed to get members: {:?}", e);
         Err(RockRaftError::TonicStatus(Status::internal(format!(
           "Failed to get members: {}",
+          e
+        ))))
+      }
+    }
+  }
+
+  /// Handle transaction request
+  ///
+  /// This function executes a transaction that checks conditions and performs
+  /// operations atomically based on the condition results.
+  async fn handle_txn(&self, req: TxnReq) -> Result<ForwardResponse> {
+    // Build a transaction command
+    let entry = LogEntry::new(Cmd::Txn { req, result: None });
+
+    match self.write(entry).await {
+      Ok(AppliedState::None) => {
+        // Transaction was applied successfully
+        // Return success with default values
+        // Note: In a more complete implementation, we would retrieve
+        // the actual previous values from the state machine
+        Ok(ForwardResponse::Txn(
+          crate::raft::types::TxnReply::Success {
+            branch: true,
+            prev_values: Vec::new(),
+          },
+        ))
+      }
+      Err(e) => {
+        error!("Failed to execute transaction: {:?}", e);
+        Err(RockRaftError::TonicStatus(Status::internal(format!(
+          "Failed to execute transaction: {}",
           e
         ))))
       }

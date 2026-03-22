@@ -40,6 +40,7 @@ use crate::raft::types::Snapshot;
 use crate::raft::types::SnapshotMeta;
 use crate::raft::types::StoredMembership;
 use crate::raft::types::SysData;
+use crate::raft::types::TxnOp;
 use crate::raft::types::TypeConfig;
 use crate::raft::types::read_logs_err;
 
@@ -54,6 +55,32 @@ pub struct RocksStateMachine {
 /// Convert Mutex lock error to io::Error
 fn mutex_lock_err(e: PoisonError<MutexGuard<'_, SysData>>) -> Error {
   io::Error::other(format!("Mutex lock failed: {}", e))
+}
+
+/// Evaluate a transaction condition against the actual value
+fn evaluate_condition(expected: &TxnOp, actual: Option<&Vec<u8>>) -> bool {
+  match expected {
+    TxnOp::Exists => actual.is_some(),
+    TxnOp::NotExists => actual.is_none(),
+    TxnOp::Equal(expected_value) => actual
+      .map(|v| v.as_slice() == expected_value.as_slice())
+      .unwrap_or(false),
+    TxnOp::NotEqual(expected_value) => actual
+      .map(|v| v.as_slice() != expected_value.as_slice())
+      .unwrap_or(true),
+    TxnOp::Greater(expected_value) => actual
+      .map(|v| v.as_slice() > expected_value.as_slice())
+      .unwrap_or(false),
+    TxnOp::Less(expected_value) => actual
+      .map(|v| v.as_slice() < expected_value.as_slice())
+      .unwrap_or(false),
+    TxnOp::GreaterEqual(expected_value) => actual
+      .map(|v| v.as_slice() >= expected_value.as_slice())
+      .unwrap_or(false),
+    TxnOp::LessEqual(expected_value) => actual
+      .map(|v| v.as_slice() <= expected_value.as_slice())
+      .unwrap_or(false),
+  }
 }
 
 impl Clone for RocksStateMachine {
@@ -314,6 +341,50 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
             }
             Cmd::RemoveNode { node_id } => {
               self.remove_node(node_id)?;
+            }
+            Cmd::Txn { req, .. } => {
+              // Execute transaction: check conditions and apply operations
+              let cf_data = &self.cf_sm_data();
+              let mut all_conditions_met = true;
+
+              // Check all conditions (AND logic)
+              for condition in &req.condition {
+                let actual_value = self
+                  .db
+                  .get_cf(cf_data, condition.key.as_bytes())
+                  .map_err(read_logs_err)?;
+                let condition_met = evaluate_condition(&condition.expected, actual_value.as_ref());
+                if !condition_met {
+                  all_conditions_met = false;
+                  break;
+                }
+              }
+
+              // Determine which operations to execute
+              let ops_to_execute = if all_conditions_met {
+                &req.if_then
+              } else {
+                &req.else_then
+              };
+
+              // Execute operations
+              for kv in ops_to_execute {
+                match &kv.value {
+                  Operation::Update(value) => {
+                    batch.put_cf(cf_data, kv.key.as_bytes(), value);
+                  }
+                  Operation::Delete => {
+                    batch.delete_cf(cf_data, kv.key.as_bytes());
+                  }
+                }
+              }
+
+              info!(
+                "Applied transaction: conditions_met={}, if_then_ops={}, else_then_ops={}",
+                all_conditions_met,
+                req.if_then.len(),
+                req.else_then.len()
+              );
             }
           }
 

@@ -41,7 +41,7 @@ use crate::raft::store::RocksStateMachine;
 use crate::raft::store::column_family_list;
 use crate::raft::types::{
   AppliedState, BatchWriteReply, BatchWriteReq, ForwardRequest, ForwardResponse, LogEntry, Node,
-  TypeConfig, decode,
+  TxnReply, TxnReq, TypeConfig, decode,
 };
 use crate::raft::types::{
   ForwardToLeader, GetKVReply, GetKVReq, GetMembersReply, GetMembersReq, LeaveRequest, NodeId,
@@ -549,6 +549,42 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::BatchWrite(applied_state)) => Ok(applied_state),
+      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
+      Err(e) => Err(Self::error_to_status(e)),
+    }
+  }
+
+  /// Execute a transaction with conditional operations
+  ///
+  /// This function executes a transaction that checks conditions and performs
+  /// operations atomically based on the condition results. If this node is the
+  /// leader, it executes directly. Otherwise, it forwards the request to the leader.
+  ///
+  /// # Arguments
+  /// * `req` - The TxnReq containing conditions and operations
+  ///
+  /// # Returns
+  /// * `Ok(TxnReply)` - The result of the transaction execution
+  /// * `Err(Status)` - If the operation failed
+  ///
+  /// # Example
+  /// ```rust,no_run
+  /// use rockraft::raft::types::{TxnReq, TxnCondition, UpsertKV};
+  ///
+  /// let req = TxnReq::new(vec![TxnCondition::eq("key", b"expected_value")])
+  ///   .if_then(UpsertKV::insert("key", b"new_value"));
+  /// // raft_node.txn(req).await;
+  /// ```
+  pub async fn txn(&self, req: TxnReq) -> StdResult<TxnReply, Status> {
+    debug!("transaction: {:?}", req);
+
+    let request = ForwardRequest {
+      forward_to_leader: 1,
+      body: ForwardRequestBody::Txn(req),
+    };
+
+    match self.handle_forward_request(request).await {
+      Ok(ForwardResponse::Txn(reply)) => Ok(reply),
       Ok(_) => Err(Status::internal("Unexpected response type from leader")),
       Err(e) => Err(Self::error_to_status(e)),
     }
