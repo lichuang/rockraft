@@ -159,6 +159,59 @@ class ClusterClient:
         except Exception as e:
             raise RuntimeError(f"Failed to batch write on port {port}: {e}")
     
+    def txn(self, port: int, conditions: list, if_then: list, else_then: list = None, 
+            return_previous: bool = False, timeout: int = 10) -> Dict[str, Any]:
+        """Execute a transaction via the /txn endpoint.
+        
+        Args:
+            port: HTTP port of the node
+            conditions: List of condition dicts with 'key', 'op', and optionally 'value'
+            if_then: List of operation dicts to execute if conditions are met
+            else_then: List of operation dicts to execute if conditions are not met
+            return_previous: Whether to return previous values
+            timeout: Request timeout in seconds
+        
+        Returns:
+            Response dict with 'success', 'branch', and 'prev_values' fields
+        """
+        url = f"http://127.0.0.1:{port}/txn"
+        payload = {
+            "conditions": conditions,
+            "if_then": if_then,
+            "else_then": else_then or [],
+            "return_previous": return_previous,
+        }
+        data = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            raise RuntimeError(f"Failed to execute transaction on port {port}: {e}")
+    
+    def getset(self, port: int, key: str, value: str, timeout: int = 5) -> Dict[str, Any]:
+        """Get old value and set new value atomically via the /getset endpoint.
+        
+        Args:
+            port: HTTP port of the node
+            key: Key to get and set
+            value: New value to set
+            timeout: Request timeout in seconds
+        
+        Returns:
+            Response dict with 'success', 'key', 'old_value', and 'new_value' fields
+        """
+        url = f"http://127.0.0.1:{port}/getset"
+        data = json.dumps({"key": key, "value": value}).encode()
+        headers = {"Content-Type": "application/json"}
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            raise RuntimeError(f"Failed to getset on port {port}: {e}")
+    
     def wait_for_nodes(self, max_retries: int = 30, retry_interval: float = 1.0) -> None:
         """Wait for all nodes to be ready."""
         print("\n[WAIT] Waiting for nodes to be ready...")
@@ -772,6 +825,294 @@ class TestClusterRestart:
             client_restart.wait_for_nodes()
             client_restart.wait_for_members_sync(expected_count=3)
             print("[RESTART] Cluster restarted successfully")
+
+
+class TestTransaction:
+    """Test transaction functionality with conditions."""
+    
+    def test_txn_basic_if_then(self, cluster: ClusterClient):
+        """Test basic transaction with conditions met (if_then branch)."""
+        # First set a key that we'll check in the condition
+        cluster.set_value(HTTP_PORTS[0], "txn_test_key", "expected_value")
+        
+        # Execute transaction: if key equals "expected_value", update it
+        conditions = [
+            {"key": "txn_test_key", "op": "equal", "value": "expected_value"}
+        ]
+        if_then = [
+            {"op": "set", "key": "txn_test_key", "value": "updated_value"}
+        ]
+        
+        result = cluster.txn(HTTP_PORTS[0], conditions, if_then)
+        assert result.get("success") is True, f"Transaction failed: {result}"
+        assert result.get("branch") is True, f"Expected if_then branch, got: {result}"
+        
+        # Verify the key was updated
+        result = cluster.get_value(HTTP_PORTS[0], "txn_test_key")
+        assert result.get("value") == "updated_value", f"Value not updated: {result}"
+    
+    def test_txn_else_then_branch(self, cluster: ClusterClient):
+        """Test transaction with conditions not met (else_then branch)."""
+        # Set a key with a value that won't match the condition
+        cluster.set_value(HTTP_PORTS[0], "txn_else_key", "actual_value")
+        
+        # Execute transaction: if key equals "wrong_value", set to "if_value"
+        # Otherwise, set to "else_value"
+        conditions = [
+            {"key": "txn_else_key", "op": "equal", "value": "wrong_value"}
+        ]
+        if_then = [
+            {"op": "set", "key": "txn_else_key", "value": "if_value"}
+        ]
+        else_then = [
+            {"op": "set", "key": "txn_else_key", "value": "else_value"}
+        ]
+        
+        result = cluster.txn(HTTP_PORTS[0], conditions, if_then, else_then)
+        assert result.get("success") is True, f"Transaction failed: {result}"
+        assert result.get("branch") is False, f"Expected else_then branch, got: {result}"
+        
+        # Verify the else value was set
+        result = cluster.get_value(HTTP_PORTS[0], "txn_else_key")
+        assert result.get("value") == "else_value", f"Else value not set: {result}"
+    
+    def test_txn_return_previous_values(self, cluster: ClusterClient):
+        """Test transaction returning previous values."""
+        # Set initial value
+        cluster.set_value(HTTP_PORTS[0], "txn_prev_key", "old_value")
+        
+        conditions = [
+            {"key": "txn_prev_key", "op": "exists"}
+        ]
+        if_then = [
+            {"op": "set", "key": "txn_prev_key", "value": "new_value"}
+        ]
+        
+        result = cluster.txn(HTTP_PORTS[0], conditions, if_then, return_previous=True)
+        assert result.get("success") is True, f"Transaction failed: {result}"
+        assert result.get("branch") is True, f"Expected if_then branch: {result}"
+        
+        # Check previous values
+        prev_values = result.get("prev_values", [])
+        assert len(prev_values) == 1, f"Expected 1 prev_value, got: {prev_values}"
+        assert prev_values[0] == "old_value", f"Expected old_value, got: {prev_values[0]}"
+    
+    def test_txn_exists_condition(self, cluster: ClusterClient):
+        """Test transaction with exists condition."""
+        # Set a key
+        cluster.set_value(HTTP_PORTS[0], "txn_exists_key", "some_value")
+        
+        conditions = [
+            {"key": "txn_exists_key", "op": "exists"}
+        ]
+        if_then = [
+            {"op": "set", "key": "txn_exists_result", "value": "key_exists"}
+        ]
+        else_then = [
+            {"op": "set", "key": "txn_exists_result", "value": "key_not_exists"}
+        ]
+        
+        result = cluster.txn(HTTP_PORTS[0], conditions, if_then, else_then)
+        assert result.get("success") is True, f"Transaction failed: {result}"
+        assert result.get("branch") is True, f"Expected if_then branch: {result}"
+        
+        result = cluster.get_value(HTTP_PORTS[0], "txn_exists_result")
+        assert result.get("value") == "key_exists", f"Unexpected result: {result}"
+    
+    def test_txn_not_exists_condition(self, cluster: ClusterClient):
+        """Test transaction with not_exists condition."""
+        # Ensure key doesn't exist
+        conditions = [
+            {"key": "txn_notexists_key", "op": "not_exists"}
+        ]
+        if_then = [
+            {"op": "set", "key": "txn_notexists_key", "value": "created_value"}
+        ]
+        else_then = [
+            {"op": "set", "key": "txn_notexists_key", "value": "wrong_value"}
+        ]
+        
+        result = cluster.txn(HTTP_PORTS[0], conditions, if_then, else_then)
+        assert result.get("success") is True, f"Transaction failed: {result}"
+        assert result.get("branch") is True, f"Expected if_then branch: {result}"
+        
+        result = cluster.get_value(HTTP_PORTS[0], "txn_notexists_key")
+        assert result.get("value") == "created_value", f"Key not created: {result}"
+    
+    def test_txn_multiple_conditions(self, cluster: ClusterClient):
+        """Test transaction with multiple conditions (AND logic)."""
+        # Set two keys
+        cluster.set_value(HTTP_PORTS[0], "txn_multi_key1", "value1")
+        cluster.set_value(HTTP_PORTS[0], "txn_multi_key2", "value2")
+        
+        # Both conditions must be met
+        conditions = [
+            {"key": "txn_multi_key1", "op": "equal", "value": "value1"},
+            {"key": "txn_multi_key2", "op": "equal", "value": "value2"}
+        ]
+        if_then = [
+            {"op": "set", "key": "txn_multi_result", "value": "both_met"}
+        ]
+        else_then = [
+            {"op": "set", "key": "txn_multi_result", "value": "not_met"}
+        ]
+        
+        result = cluster.txn(HTTP_PORTS[0], conditions, if_then, else_then)
+        assert result.get("success") is True, f"Transaction failed: {result}"
+        assert result.get("branch") is True, f"Expected if_then branch: {result}"
+        
+        result = cluster.get_value(HTTP_PORTS[0], "txn_multi_result")
+        assert result.get("value") == "both_met", f"Unexpected result: {result}"
+    
+    def test_txn_delete_operation(self, cluster: ClusterClient):
+        """Test transaction with delete operation."""
+        # Set a key to delete
+        cluster.set_value(HTTP_PORTS[0], "txn_delete_key", "to_be_deleted")
+        
+        conditions = [
+            {"key": "txn_delete_key", "op": "exists"}
+        ]
+        if_then = [
+            {"op": "delete", "key": "txn_delete_key"}
+        ]
+        
+        result = cluster.txn(HTTP_PORTS[0], conditions, if_then, return_previous=True)
+        assert result.get("success") is True, f"Transaction failed: {result}"
+        
+        # Verify the key was deleted
+        result = cluster.get_value(HTTP_PORTS[0], "txn_delete_key")
+        assert result.get("value") is None, f"Key not deleted: {result}"
+    
+    def test_txn_multiple_operations(self, cluster: ClusterClient):
+        """Test transaction with multiple operations in if_then."""
+        cluster.set_value(HTTP_PORTS[0], "txn_multi_cond", "trigger")
+        
+        conditions = [
+            {"key": "txn_multi_cond", "op": "equal", "value": "trigger"}
+        ]
+        if_then = [
+            {"op": "set", "key": "txn_op_key1", "value": "value1"},
+            {"op": "set", "key": "txn_op_key2", "value": "value2"},
+            {"op": "set", "key": "txn_op_key3", "value": "value3"}
+        ]
+        
+        result = cluster.txn(HTTP_PORTS[0], conditions, if_then)
+        assert result.get("success") is True, f"Transaction failed: {result}"
+        
+        # Verify all keys were set
+        for i in range(1, 4):
+            result = cluster.get_value(HTTP_PORTS[0], f"txn_op_key{i}")
+            assert result.get("value") == f"value{i}", f"Key {i} not set: {result}"
+    
+    def test_txn_consistency_across_nodes(self, cluster: ClusterClient):
+        """Test that transaction results are consistent across all nodes."""
+        # Set initial value
+        cluster.set_value(HTTP_PORTS[0], "txn_consistency_key", "initial")
+        
+        conditions = [
+            {"key": "txn_consistency_key", "op": "equal", "value": "initial"}
+        ]
+        if_then = [
+            {"op": "set", "key": "txn_consistency_key", "value": "updated"}
+        ]
+        
+        result = cluster.txn(HTTP_PORTS[0], conditions, if_then)
+        assert result.get("success") is True, f"Transaction failed: {result}"
+        
+        # Verify from all nodes
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "txn_consistency_key")
+            assert result.get("value") == "updated", (
+                f"Inconsistent value on port {port}: {result}"
+            )
+
+
+class TestGetSet:
+    """Test getset functionality."""
+    
+    def test_getset_new_key(self, cluster: ClusterClient):
+        """Test getset on a non-existent key."""
+        result = cluster.getset(HTTP_PORTS[0], "getset_new_key", "new_value")
+        assert result.get("success") is True, f"Getset failed: {result}"
+        assert result.get("key") == "getset_new_key", f"Key mismatch: {result}"
+        assert result.get("old_value") is None, f"Expected None for new key: {result}"
+        assert result.get("new_value") == "new_value", f"New value mismatch: {result}"
+        
+        # Verify the key was created
+        result = cluster.get_value(HTTP_PORTS[0], "getset_new_key")
+        assert result.get("value") == "new_value", f"Key not created: {result}"
+    
+    def test_getset_existing_key(self, cluster: ClusterClient):
+        """Test getset on an existing key."""
+        # First create the key
+        cluster.set_value(HTTP_PORTS[0], "getset_existing_key", "old_value")
+        
+        # Now getset it
+        result = cluster.getset(HTTP_PORTS[0], "getset_existing_key", "new_value")
+        assert result.get("success") is True, f"Getset failed: {result}"
+        assert result.get("old_value") == "old_value", f"Old value mismatch: {result}"
+        assert result.get("new_value") == "new_value", f"New value mismatch: {result}"
+        
+        # Verify the new value
+        result = cluster.get_value(HTTP_PORTS[0], "getset_existing_key")
+        assert result.get("value") == "new_value", f"Value not updated: {result}"
+    
+    def test_getset_overwrite_multiple_times(self, cluster: ClusterClient):
+        """Test getset overwriting a key multiple times."""
+        # First set
+        cluster.set_value(HTTP_PORTS[0], "getset_multi_key", "value1")
+        
+        # Second set
+        result = cluster.getset(HTTP_PORTS[0], "getset_multi_key", "value2")
+        assert result.get("old_value") == "value1", f"First getset failed: {result}"
+        
+        # Third set
+        result = cluster.getset(HTTP_PORTS[0], "getset_multi_key", "value3")
+        assert result.get("old_value") == "value2", f"Second getset failed: {result}"
+        
+        # Verify final value
+        result = cluster.get_value(HTTP_PORTS[0], "getset_multi_key")
+        assert result.get("value") == "value3", f"Final value mismatch: {result}"
+    
+    def test_getset_consistency_across_nodes(self, cluster: ClusterClient):
+        """Test that getset is consistent across all nodes."""
+        # Create initial value
+        cluster.set_value(HTTP_PORTS[0], "getset_consistency_key", "initial")
+        
+        # Getset from node1
+        result = cluster.getset(HTTP_PORTS[0], "getset_consistency_key", "updated")
+        assert result.get("success") is True, f"Getset failed: {result}"
+        
+        # Verify from all nodes
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "getset_consistency_key")
+            assert result.get("value") == "updated", (
+                f"Inconsistent value on port {port}: {result}"
+            )
+    
+    def test_getset_special_characters(self, cluster: ClusterClient):
+        """Test getset with special characters in value."""
+        test_cases = [
+            ("getset_special_1", "Hello, 世界! 🌍"),
+            ("getset_special_2", "Line1\nLine2\nLine3"),
+            ("getset_special_3", "Tab\tSeparated\tValues"),
+            ("getset_special_4", 'Quotes: "single" and \'double\''),
+        ]
+        
+        for key, value in test_cases:
+            # Set initial value
+            cluster.set_value(HTTP_PORTS[0], key, "initial")
+            
+            # Getset with special characters
+            result = cluster.getset(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True, f"Getset failed for {key}: {result}"
+            assert result.get("old_value") == "initial", f"Old value mismatch for {key}: {result}"
+            
+            # Verify new value
+            result = cluster.get_value(HTTP_PORTS[0], key)
+            assert result.get("value") == value, (
+                f"Value mismatch for {key}: expected {repr(value)}, got {repr(result.get('value'))}"
+            )
 
 
 class TestBatchWrite:

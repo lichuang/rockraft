@@ -316,6 +316,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
                   batch.delete_cf(cf_data, kv.key.as_bytes());
                 }
               }
+              AppliedState::None
             }
             Cmd::BatchUpsertKV { entries } => {
               let cf_data = &self.cf_sm_data();
@@ -329,6 +330,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
                   }
                 }
               }
+              AppliedState::None
             }
             Cmd::AddNode { node, .. } => {
               let node_id = node.node_id;
@@ -338,9 +340,11 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
               );
               self.add_node(node)?;
               info!("AddNode command applied successfully for node {}", node_id);
+              AppliedState::None
             }
             Cmd::RemoveNode { node_id } => {
               self.remove_node(node_id)?;
+              AppliedState::None
             }
             Cmd::Txn { req, .. } => {
               // Execute transaction: check conditions and apply operations
@@ -367,6 +371,21 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
                 &req.else_then
               };
 
+              // Collect previous values if requested
+              let prev_values = if req.return_previous {
+                let mut values = Vec::with_capacity(ops_to_execute.len());
+                for kv in ops_to_execute {
+                  let old_value = self
+                    .db
+                    .get_cf(cf_data, kv.key.as_bytes())
+                    .map_err(read_logs_err)?;
+                  values.push(old_value);
+                }
+                values
+              } else {
+                Vec::new()
+              };
+
               // Execute operations
               for kv in ops_to_execute {
                 match &kv.value {
@@ -385,10 +404,14 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
                 req.if_then.len(),
                 req.else_then.len()
               );
+
+              // Return transaction result with branch info and optional previous values
+              AppliedState::Txn(crate::raft::types::TxnReply::Success {
+                branch: all_conditions_met,
+                prev_values,
+              })
             }
           }
-
-          AppliedState::None
         }
         EntryPayload::Membership(membership) => {
           // Membership changes are handled by AddNode/RemoveNode commands

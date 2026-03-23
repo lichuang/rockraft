@@ -117,6 +117,108 @@ curl -X POST http://localhost:8001/delete \
 }
 ```
 
+### POST /batch_write
+
+Batch write multiple keys atomically (only works on leader node).
+
+**Example:**
+```bash
+curl -X POST http://localhost:8001/batch_write \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operations": [
+      { "op": "set", "key": "key1", "value": "value1" },
+      { "op": "set", "key": "key2", "value": "value2" },
+      { "op": "delete", "key": "key3" }
+    ]
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Batch write successful: 3 operations applied"
+}
+```
+
+### POST /txn
+
+Execute a transaction with conditional operations (only works on leader node).
+All conditions must be met (AND logic) for `if_then` operations to execute.
+Otherwise, `else_then` operations are executed.
+
+**Condition operators:** `exists`, `not_exists`, `equal`, `not_equal`, `greater`, `less`, `greater_equal`, `less_equal`
+
+**Example (CAS - Compare and Swap):**
+```bash
+curl -X POST http://localhost:8001/txn \
+  -H "Content-Type: application/json" \
+  -d '{
+    "conditions": [
+      { "key": "counter", "op": "exists" },
+      { "key": "counter", "op": "equal", "value": "10" }
+    ],
+    "if_then": [
+      { "op": "set", "key": "counter", "value": "20" }
+    ],
+    "else_then": [
+      { "op": "set", "key": "counter", "value": "0" }
+    ],
+    "return_previous": true
+  }'
+```
+
+**Response (conditions met):**
+```json
+{
+  "success": true,
+  "branch": true,
+  "prev_values": ["10"]
+}
+```
+
+**Response (conditions not met):**
+```json
+{
+  "success": true,
+  "branch": false,
+  "prev_values": []
+}
+```
+
+### POST /getset
+
+Atomically get the old value and set a new value (only works on leader node).
+Returns the previous value of the key, or `null` if the key did not exist.
+
+**Example:**
+```bash
+curl -X POST http://localhost:8001/getset \
+  -H "Content-Type: application/json" \
+  -d '{"key": "mykey", "value": "new_value"}'
+```
+
+**Response (key existed):**
+```json
+{
+  "success": true,
+  "key": "mykey",
+  "old_value": "old_value",
+  "new_value": "new_value"
+}
+```
+
+**Response (key did not exist):**
+```json
+{
+  "success": true,
+  "key": "mykey",
+  "old_value": null,
+  "new_value": "new_value"
+}
+```
+
 ### GET /health
 
 Health check endpoint.

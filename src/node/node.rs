@@ -590,6 +590,52 @@ impl RaftNode {
     }
   }
 
+  /// Atomically get the old value and set a new value
+  ///
+  /// This function retrieves the previous value associated with the key and
+  /// updates it with the new value atomically. If the key does not exist,
+  /// it returns `None` and creates the new key.
+  ///
+  /// Internally, this is implemented as a transaction that always succeeds
+  /// and returns the previous values of modified keys.
+  ///
+  /// # Arguments
+  /// * `key` - The key to update
+  /// * `value` - The new value to set
+  ///
+  /// # Returns
+  /// * `Ok(Some(Vec<u8>))` - The previous value if the key existed
+  /// * `Ok(None)` - If the key did not exist
+  /// * `Err(Status)` - If the operation failed
+  ///
+  /// # Example
+  /// ```rust,no_run
+  /// # use rockraft::node::RaftNode;
+  /// # async fn example(node: &RaftNode) -> Result<(), Box<dyn std::error::Error>> {
+  /// let old_value = node.getset("my_key", b"new_value").await?;
+  /// match old_value {
+  ///   Some(prev) => println!("Previous value: {:?}", prev),
+  ///   None => println!("Key did not exist"),
+  /// }
+  /// # Ok(())
+  /// # }
+  /// ```
+  pub async fn getset(
+    &self,
+    key: impl ToString,
+    value: impl AsRef<[u8]>,
+  ) -> StdResult<Option<Vec<u8>>, Status> {
+    use crate::raft::types::UpsertKV;
+
+    let req = TxnReq::new(vec![]) // No conditions, always execute
+      .if_then(UpsertKV::insert(key, value.as_ref()))
+      .with_return_previous();
+
+    match self.txn(req).await? {
+      TxnReply::Success { prev_values, .. } => Ok(prev_values.into_iter().next().flatten()),
+    }
+  }
+
   /// Read a value from the KV store
   ///
   /// This function reads a value from the KV store. If this node is the leader,

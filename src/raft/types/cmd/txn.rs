@@ -121,6 +121,7 @@ impl TxnCondition {
 /// - `condition`: A list of conditions to check. All conditions must be met (AND logic).
 /// - `if_then`: Operations to execute if all conditions are met.
 /// - `else_then`: Operations to execute if any condition is not met.
+/// - `return_previous`: Whether to return the previous values of modified keys.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TxnReq {
   /// Conditions to check (all must be met)
@@ -129,6 +130,9 @@ pub struct TxnReq {
   pub if_then: Vec<UpsertKV>,
   /// Operations to execute if conditions are not met
   pub else_then: Vec<UpsertKV>,
+  /// Whether to return the previous values of modified keys
+  #[serde(default)]
+  pub return_previous: bool,
 }
 
 impl TxnReq {
@@ -138,6 +142,7 @@ impl TxnReq {
       condition,
       if_then: Vec::new(),
       else_then: Vec::new(),
+      return_previous: false,
     }
   }
 
@@ -162,6 +167,12 @@ impl TxnReq {
   /// Add multiple operations to execute if conditions are not met
   pub fn else_then_ops(mut self, ops: Vec<UpsertKV>) -> Self {
     self.else_then.extend(ops);
+    self
+  }
+
+  /// Set whether to return the previous values of modified keys
+  pub fn with_return_previous(mut self) -> Self {
+    self.return_previous = true;
     self
   }
 }
@@ -218,6 +229,16 @@ mod tests {
     assert_eq!(req.condition.len(), 1);
     assert_eq!(req.if_then.len(), 1);
     assert_eq!(req.else_then.len(), 1);
+    assert!(!req.return_previous);
+  }
+
+  #[test]
+  fn test_txn_req_with_return_previous() {
+    let req = TxnReq::new(vec![TxnCondition::exists("key1")])
+      .if_then(UpsertKV::insert("k1", b"v1"))
+      .with_return_previous();
+
+    assert!(req.return_previous);
   }
 
   #[test]
@@ -229,7 +250,8 @@ mod tests {
       TxnCondition::eq("key2", b"value2"),
     ])
     .if_then(UpsertKV::insert("k1", b"v1"))
-    .else_then(UpsertKV::delete("k2"));
+    .else_then(UpsertKV::delete("k2"))
+    .with_return_previous();
 
     let serialized = encode(&req).unwrap();
     let deserialized: TxnReq = decode(&serialized).unwrap();

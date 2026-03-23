@@ -187,12 +187,37 @@ pub fn process_response(response: CreateChatCompletionResponse) {
   - `POST /set` - Set key-value pair
   - `POST /delete` - Delete a key
   - `POST /batch_write` - Batch atomic write (supports mixed set/delete)
+  - `POST /txn` - Execute transaction with conditions
+  - `POST /getset` - Get old value and set new value atomically
   - `GET /prefix?prefix=<prefix>` - Scan keys by prefix
   - `GET /members` - Get cluster membership
   - `POST /leave` - Remove node from cluster
   - `GET /health` - Health check
   - `GET /metrics` - Cluster metrics
 - Run tests: `./run_tests.sh` (requires Python and pytest)
+
+### Example Integration Requirements
+
+**When adding new APIs to the core library, you MUST also:**
+
+1. **Add corresponding HTTP endpoints** in `example/src/main.rs`:
+   - Create request/response structs with proper serde derives
+   - Implement handler functions with appropriate documentation
+   - Register routes in the Router
+   - Log the new endpoints in the startup messages
+
+2. **Add integration tests** in `example/test/test_cluster.py`:
+   - Add client methods in `ClusterClient` class for the new endpoints
+   - Create test classes (e.g., `Test<FeatureName>`) with comprehensive test cases
+   - Test both success and error scenarios
+   - Test consistency across all nodes in the cluster
+   - Run the full test suite with `./run_tests.sh` to ensure no regressions
+
+3. **Update documentation** in `example/README.md`:
+   - Document the new endpoints with request/response examples
+   - Include curl commands for manual testing
+
+This ensures the example remains a complete reference implementation and the new features are properly tested end-to-end.
 
 ## Important Notes
 - Protobuf code generation happens via `tonic-build` in `build.rs`

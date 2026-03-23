@@ -9,7 +9,8 @@ use openraft::async_runtime::watch::WatchReceiver;
 use rockraft::config::Config as RockraftConfig;
 use rockraft::node::RaftNodeBuilder;
 use rockraft::raft::types::{
-  BatchWriteReq, Cmd, GetKVReq, LeaveRequest, LogEntry, ScanPrefixReq, UpsertKV,
+  BatchWriteReq, Cmd, GetKVReq, LeaveRequest, LogEntry, ScanPrefixReq, TxnCondition, TxnReq,
+  UpsertKV,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -96,6 +97,80 @@ pub struct BatchOp {
 pub struct BatchWriteRequest {
   /// List of operations to perform atomically
   pub operations: Vec<BatchOp>,
+}
+
+/// Request for getset operation (get old value and set new value atomically)
+#[derive(Debug, Deserialize)]
+pub struct GetSetRequest {
+  pub key: String,
+  pub value: String,
+}
+
+/// Response for getset operation
+#[derive(Debug, Serialize)]
+pub struct GetSetResponse {
+  pub success: bool,
+  pub key: String,
+  pub old_value: Option<String>,
+  pub new_value: String,
+}
+
+/// Condition for transaction
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TxnConditionOp {
+  Exists,
+  NotExists,
+  Equal,
+  NotEqual,
+  Greater,
+  Less,
+  GreaterEqual,
+  LessEqual,
+}
+
+/// Single condition in a transaction
+#[derive(Debug, Deserialize)]
+pub struct TxnConditionReq {
+  pub key: String,
+  pub op: TxnConditionOp,
+  /// Value for comparison (not needed for Exists/NotExists)
+  pub value: Option<String>,
+}
+
+/// Single operation in a transaction
+#[derive(Debug, Deserialize)]
+pub struct TxnOp {
+  /// Operation type: "set" or "delete"
+  pub op: BatchOpType,
+  pub key: String,
+  /// Value for the operation (required for "set", ignored for "delete")
+  pub value: Option<String>,
+}
+
+/// Request for transaction
+#[derive(Debug, Deserialize)]
+pub struct TxnRequest {
+  /// Conditions to check (all must be met for if_then to execute)
+  pub conditions: Vec<TxnConditionReq>,
+  /// Operations to execute if conditions are met
+  pub if_then: Vec<TxnOp>,
+  /// Operations to execute if conditions are not met
+  #[serde(default)]
+  pub else_then: Vec<TxnOp>,
+  /// Whether to return previous values
+  #[serde(default)]
+  pub return_previous: bool,
+}
+
+/// Response for transaction
+#[derive(Debug, Serialize)]
+pub struct TxnResponse {
+  pub success: bool,
+  /// Which branch was executed: true = if_then, false = else_then
+  pub branch: bool,
+  /// Previous values (only populated if return_previous was true)
+  pub prev_values: Vec<Option<String>>,
 }
 
 /// Response for successful operations
@@ -210,6 +285,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .route("/set", post(set_handler))
     .route("/delete", post(delete_handler))
     .route("/batch_write", post(batch_write_handler))
+    .route("/txn", post(txn_handler))
+    .route("/getset", post(getset_handler))
     .route("/prefix", get(prefix_handler))
     .route("/leave", post(leave_handler))
     .route("/members", get(members_handler))
@@ -235,6 +312,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
   info!("  POST http://{}/delete          - Delete a key", http_addr);
   info!(
     "  POST http://{}/batch_write     - Batch write multiple keys atomically",
+    http_addr
+  );
+  info!(
+    "  POST http://{}/txn             - Execute transaction with conditions",
+    http_addr
+  );
+  info!(
+    "  POST http://{}/getset          - Get old value and set new value atomically",
     http_addr
   );
   info!(
@@ -525,6 +610,199 @@ async fn prefix_handler(
     }
     Err(e) => Err(ErrorResponse {
       error: format!("Failed to scan prefix: {}", e),
+    }),
+  }
+}
+
+/// Handler for POST /txn endpoint
+///
+/// Execute a transaction with conditional operations.
+/// All conditions must be met (AND logic) for if_then operations to execute.
+/// Otherwise, else_then operations are executed.
+///
+/// Request body example:
+/// ```json
+/// {
+///   "conditions": [
+///     { "key": "counter", "op": "exists" },
+///     { "key": "counter", "op": "equal", "value": "10" }
+///   ],
+///   "if_then": [
+///     { "op": "set", "key": "counter", "value": "20" }
+///   ],
+///   "else_then": [
+///     { "op": "set", "key": "counter", "value": "0" }
+///   ],
+///   "return_previous": true
+/// }
+/// ```
+///
+/// Response example:
+/// ```json
+/// {
+///   "success": true,
+///   "branch": true,
+///   "prev_values": ["10"]
+/// }
+/// ```
+async fn txn_handler(
+  State(state): State<AppState>,
+  Json(payload): Json<TxnRequest>,
+) -> Result<impl IntoResponse, ErrorResponse> {
+  // Build conditions
+  let mut conditions = Vec::new();
+  for cond in &payload.conditions {
+    let txn_cond = match cond.op {
+      TxnConditionOp::Exists => TxnCondition::exists(&cond.key),
+      TxnConditionOp::NotExists => TxnCondition::not_exists(&cond.key),
+      TxnConditionOp::Equal => {
+        let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
+          error: format!("Condition 'equal' requires a value for key '{}'", cond.key),
+        })?;
+        TxnCondition::eq(&cond.key, value.as_bytes())
+      }
+      TxnConditionOp::NotEqual => {
+        let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
+          error: format!("Condition 'not_equal' requires a value for key '{}'", cond.key),
+        })?;
+        TxnCondition::ne(&cond.key, value.as_bytes())
+      }
+      TxnConditionOp::Greater => {
+        let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
+          error: format!("Condition 'greater' requires a value for key '{}'", cond.key),
+        })?;
+        TxnCondition::gt(&cond.key, value.as_bytes())
+      }
+      TxnConditionOp::Less => {
+        let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
+          error: format!("Condition 'less' requires a value for key '{}'", cond.key),
+        })?;
+        TxnCondition::lt(&cond.key, value.as_bytes())
+      }
+      TxnConditionOp::GreaterEqual => {
+        let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
+          error: format!("Condition 'greater_equal' requires a value for key '{}'", cond.key),
+        })?;
+        TxnCondition::ge(&cond.key, value.as_bytes())
+      }
+      TxnConditionOp::LessEqual => {
+        let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
+          error: format!("Condition 'less_equal' requires a value for key '{}'", cond.key),
+        })?;
+        TxnCondition::le(&cond.key, value.as_bytes())
+      }
+    };
+    conditions.push(txn_cond);
+  }
+
+  // Build if_then operations
+  let mut if_then = Vec::new();
+  for op in &payload.if_then {
+    let upsert = match op.op {
+      BatchOpType::Set => {
+        let value = op.value.as_ref().ok_or_else(|| ErrorResponse {
+          error: format!("Set operation requires a value for key '{}'", op.key),
+        })?;
+        UpsertKV::insert(&op.key, value.as_bytes())
+      }
+      BatchOpType::Delete => UpsertKV::delete(&op.key),
+    };
+    if_then.push(upsert);
+  }
+
+  // Build else_then operations
+  let mut else_then = Vec::new();
+  for op in &payload.else_then {
+    let upsert = match op.op {
+      BatchOpType::Set => {
+        let value = op.value.as_ref().ok_or_else(|| ErrorResponse {
+          error: format!("Set operation requires a value for key '{}'", op.key),
+        })?;
+        UpsertKV::insert(&op.key, value.as_bytes())
+      }
+      BatchOpType::Delete => UpsertKV::delete(&op.key),
+    };
+    else_then.push(upsert);
+  }
+
+  // Build transaction request
+  let mut txn = TxnReq::new(conditions).if_then_ops(if_then).else_then_ops(else_then);
+  if payload.return_previous {
+    txn = txn.with_return_previous();
+  }
+
+  // Execute transaction
+  match state.raft_node.txn(txn).await {
+    Ok(rockraft::raft::types::TxnReply::Success { branch, prev_values }) => {
+      let prev_strings: Vec<Option<String>> = prev_values
+        .into_iter()
+        .map(|v| v.map(|bytes| String::from_utf8(bytes).unwrap_or_else(|_| "Invalid UTF-8".to_string())))
+        .collect();
+
+      info!(
+        "Transaction successful: branch={}, prev_values={:?}",
+        branch, prev_strings
+      );
+
+      Ok(Json(TxnResponse {
+        success: true,
+        branch,
+        prev_values: prev_strings,
+      }))
+    }
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to execute transaction: {}", e),
+    }),
+  }
+}
+
+/// Handler for POST /getset endpoint
+///
+/// Request body example:
+/// ```json
+/// {
+///   "key": "mykey",
+///   "value": "new_value"
+/// }
+/// ```
+///
+/// Response example:
+/// ```json
+/// {
+///   "success": true,
+///   "key": "mykey",
+///   "old_value": "previous_value",
+///   "new_value": "new_value"
+/// }
+/// ```
+///
+/// If the key did not exist, `old_value` will be null.
+async fn getset_handler(
+  State(state): State<AppState>,
+  Json(payload): Json<GetSetRequest>,
+) -> Result<impl IntoResponse, ErrorResponse> {
+  // Use the getset API which atomically gets the old value and sets the new value
+  match state
+    .raft_node
+    .getset(&payload.key, payload.value.as_bytes())
+    .await
+  {
+    Ok(old_value_opt) => {
+      let old_value_str = old_value_opt
+        .map(|v| String::from_utf8(v).unwrap_or_else(|_| "Invalid UTF-8".to_string()));
+      info!(
+        "Getset successful: key='{}', old_value={:?}, new_value='{}'",
+        payload.key, old_value_str, payload.value
+      );
+      Ok(Json(GetSetResponse {
+        success: true,
+        key: payload.key,
+        old_value: old_value_str,
+        new_value: payload.value,
+      }))
+    }
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to getset: {}", e),
     }),
   }
 }

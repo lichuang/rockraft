@@ -289,17 +289,16 @@ impl<'a> LeaderHandler<'a> {
     let entry = LogEntry::new(Cmd::Txn { req, result: None });
 
     match self.write(entry).await {
-      Ok(AppliedState::None) => {
+      Ok(AppliedState::Txn(reply)) => {
         // Transaction was applied successfully
-        // Return success with default values
-        // Note: In a more complete implementation, we would retrieve
-        // the actual previous values from the state machine
-        Ok(ForwardResponse::Txn(
-          crate::raft::types::TxnReply::Success {
-            branch: true,
-            prev_values: Vec::new(),
-          },
-        ))
+        Ok(ForwardResponse::Txn(reply))
+      }
+      Ok(_) => {
+        // Should not happen - Txn command always returns AppliedState::Txn
+        error!("Unexpected AppliedState from transaction");
+        Err(RockRaftError::TonicStatus(Status::internal(
+          "Unexpected response from transaction".to_string(),
+        )))
       }
       Err(e) => {
         error!("Failed to execute transaction: {:?}", e);

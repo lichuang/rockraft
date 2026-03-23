@@ -1,3 +1,5 @@
+use super::TxnReply;
+
 /// The state of an applied raft log.
 /// Normally it includes two fields: the state before applying and the state after applying the log.
 #[derive(
@@ -13,4 +15,6 @@
 pub enum AppliedState {
   #[try_into(ignore)]
   None,
+  /// Transaction execution result with previous values
+  Txn(TxnReply),
 }
