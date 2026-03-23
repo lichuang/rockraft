@@ -1302,6 +1302,389 @@ class TestBatchWrite:
         assert result.get("count") == 50, f"Expected 50 items, got {result.get('count')}"
 
 
+class TestConcurrency:
+    def test_concurrent_writes_same_key(self, cluster: ClusterClient):
+        """Test concurrent writes to the same key from multiple threads."""
+        import concurrent.futures
+        import threading
+        
+        key = "concurrent_same_key"
+        num_threads = 10
+        num_writes_per_thread = 5
+        values_written = []
+        lock = threading.Lock()
+        errors = []
+        
+        def write_value(thread_id: int, write_num: int):
+            try:
+                value = f"thread_{thread_id}_write_{write_num}"
+                port = HTTP_PORTS[thread_id % len(HTTP_PORTS)]
+                result = cluster.set_value(port, key, value)
+                if result.get("success"):
+                    with lock:
+                        values_written.append(value)
+                else:
+                    with lock:
+                        errors.append(f"Write failed: thread={thread_id}, write={write_num}")
+            except Exception as e:
+                with lock:
+                    errors.append(f"Exception in thread={thread_id}: {e}")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = []
+            for thread_id in range(num_threads):
+                for write_num in range(num_writes_per_thread):
+                    futures.append(executor.submit(write_value, thread_id, write_num))
+            concurrent.futures.wait(futures)
+        
+        assert len(errors) == 0, f"Errors during concurrent writes: {errors}"
+        assert len(values_written) > 0, "No writes succeeded"
+        
+        final_values = []
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, key)
+            final_values.append(result.get("value"))
+        
+        assert len(set(final_values)) == 1, f"Nodes have inconsistent values: {final_values}"
+        
+        final_value = final_values[0]
+        assert final_value in values_written, (
+            f"Final value '{final_value}' not in written values"
+        )
+        
+        print(f"[PASS] Concurrent writes to same key: {len(values_written)} writes succeeded, final value: {final_value}")
+    
+    def test_concurrent_writes_different_keys(self, cluster: ClusterClient):
+        import concurrent.futures
+        
+        num_threads = 20
+        keys_written = {}
+        errors = []
+        
+        def write_unique_key(thread_id: int):
+            try:
+                key = f"concurrent_diff_key_{thread_id}"
+                value = f"concurrent_diff_value_{thread_id}"
+                port = HTTP_PORTS[thread_id % len(HTTP_PORTS)]
+                result = cluster.set_value(port, key, value)
+                if result.get("success"):
+                    return (key, value, None)
+                else:
+                    return (key, value, f"Write failed: {result}")
+            except Exception as e:
+                return (f"key_{thread_id}", None, str(e))
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(write_unique_key, i) for i in range(num_threads)]
+            results = [f.result() for f in concurrent.futures.as_completed(futures)]
+        
+        for key, value, error in results:
+            if error:
+                errors.append(error)
+            elif value:
+                keys_written[key] = value
+        
+        assert len(errors) == 0, f"Errors during concurrent writes: {errors}"
+        assert len(keys_written) == num_threads, f"Expected {num_threads} keys, got {len(keys_written)}"
+        
+        for port in HTTP_PORTS:
+            for key, expected_value in keys_written.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected_value, (
+                    f"Value mismatch for {key} on port {port}: expected {expected_value}, got {result.get('value')}"
+                )
+        
+        print(f"[PASS] Concurrent writes to different keys: {len(keys_written)} keys written")
+    
+    def test_concurrent_read_write_mixed(self, cluster: ClusterClient):
+        import concurrent.futures
+        import random
+        
+        key = "concurrent_rw_key"
+        initial_value = "initial_value"
+        num_iterations = 50
+        
+        cluster.set_value(HTTP_PORTS[0], key, initial_value)
+        
+        read_values = []
+        write_count = 0
+        errors = []
+        
+        def read_operation(op_id: int):
+            nonlocal read_values
+            try:
+                port = HTTP_PORTS[op_id % len(HTTP_PORTS)]
+                result = cluster.get_value(port, key)
+                if result.get("key") == key:
+                    read_values.append(result.get("value"))
+                else:
+                    errors.append(f"Read returned wrong key: {result}")
+            except Exception as e:
+                errors.append(f"Read exception: {e}")
+        
+        def write_operation(op_id: int):
+            nonlocal write_count
+            try:
+                value = f"write_value_{op_id}"
+                port = HTTP_PORTS[op_id % len(HTTP_PORTS)]
+                result = cluster.set_value(port, key, value)
+                if result.get("success"):
+                    write_count += 1
+                else:
+                    errors.append(f"Write failed: {result}")
+            except Exception as e:
+                errors.append(f"Write exception: {e}")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = []
+            for i in range(num_iterations):
+                if random.random() < 0.7:
+                    futures.append(executor.submit(read_operation, i))
+                else:
+                    futures.append(executor.submit(write_operation, i))
+            concurrent.futures.wait(futures)
+        
+        assert len(errors) == 0, f"Errors during mixed operations: {errors}"
+        assert len(read_values) > 0, "No reads succeeded"
+        assert write_count > 0, "No writes succeeded"
+        
+        for val in read_values:
+            assert val is None or isinstance(val, str), f"Invalid read value: {val}"
+        
+        final_values = []
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, key)
+            final_values.append(result.get("value"))
+        
+        assert len(set(final_values)) == 1, f"Final values inconsistent: {final_values}"
+        print(f"[PASS] Mixed read/write: {len(read_values)} reads, {write_count} writes")
+    
+    def test_concurrent_batch_writes(self, cluster: ClusterClient):
+        import concurrent.futures
+        
+        num_batches = 5
+        keys_per_batch = 10
+        all_keys = {}
+        errors = []
+        
+        def batch_write_operation(batch_id: int):
+            try:
+                operations = []
+                for i in range(keys_per_batch):
+                    key = f"concurrent_batch_{batch_id}_key_{i}"
+                    value = f"concurrent_batch_{batch_id}_value_{i}"
+                    operations.append({"op": "set", "key": key, "value": value})
+                    all_keys[key] = value
+                
+                port = HTTP_PORTS[batch_id % len(HTTP_PORTS)]
+                result = cluster.batch_write(port, operations)
+                if not result.get("success"):
+                    errors.append(f"Batch {batch_id} failed: {result}")
+            except Exception as e:
+                errors.append(f"Batch {batch_id} exception: {e}")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_batches) as executor:
+            futures = [executor.submit(batch_write_operation, i) for i in range(num_batches)]
+            concurrent.futures.wait(futures)
+        
+        assert len(errors) == 0, f"Errors during concurrent batch writes: {errors}"
+        expected_count = num_batches * keys_per_batch
+        assert len(all_keys) == expected_count, f"Expected {expected_count} keys, got {len(all_keys)}"
+        
+        for port in HTTP_PORTS:
+            for key, expected_value in all_keys.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected_value, f"Value mismatch for {key} on port {port}"
+        
+        print(f"[PASS] Concurrent batch writes: {len(all_keys)} keys written")
+    
+    def test_concurrent_transactions(self, cluster: ClusterClient):
+        import concurrent.futures
+        
+        num_transactions = 10
+        results = []
+        errors = []
+        
+        def transaction_operation(txn_id: int):
+            try:
+                key = f"concurrent_txn_key_{txn_id}"
+                value = f"concurrent_txn_value_{txn_id}"
+                conditions = [{"key": key, "op": "not_exists"}]
+                if_then = [{"op": "set", "key": key, "value": value}]
+                else_then = [{"op": "set", "key": key, "value": f"else_{value}"}]
+                
+                port = HTTP_PORTS[txn_id % len(HTTP_PORTS)]
+                result = cluster.txn(port, conditions, if_then, else_then)
+                
+                if result.get("success"):
+                    results.append((key, result.get("branch")))
+                else:
+                    errors.append(f"Transaction {txn_id} failed: {result}")
+            except Exception as e:
+                errors.append(f"Transaction {txn_id} exception: {e}")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_transactions) as executor:
+            futures = [executor.submit(transaction_operation, i) for i in range(num_transactions)]
+            concurrent.futures.wait(futures)
+        
+        assert len(errors) == 0, f"Errors during concurrent transactions: {errors}"
+        assert len(results) == num_transactions, f"Expected {num_transactions} results, got {len(results)}"
+        
+        for key, branch in results:
+            for port in HTTP_PORTS:
+                result = cluster.get_value(port, key)
+                assert result.get("value") is not None, f"Key {key} not found on port {port}"
+        
+        print(f"[PASS] Concurrent transactions: {len(results)} transactions completed")
+    
+    def test_concurrent_getset(self, cluster: ClusterClient):
+        import concurrent.futures
+        import threading
+        
+        key = "concurrent_getset_key"
+        initial_value = "getset_initial"
+        num_operations = 15
+        
+        cluster.set_value(HTTP_PORTS[0], key, initial_value)
+        
+        old_values = []
+        lock = threading.Lock()
+        errors = []
+        
+        def getset_operation(op_id: int):
+            try:
+                new_value = f"getset_value_{op_id}"
+                port = HTTP_PORTS[op_id % len(HTTP_PORTS)]
+                result = cluster.getset(port, key, new_value)
+                
+                if result.get("success"):
+                    with lock:
+                        old_values.append(result.get("old_value"))
+                else:
+                    with lock:
+                        errors.append(f"Getset {op_id} failed: {result}")
+            except Exception as e:
+                with lock:
+                    errors.append(f"Getset {op_id} exception: {e}")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(getset_operation, i) for i in range(num_operations)]
+            concurrent.futures.wait(futures)
+        
+        assert len(errors) == 0, f"Errors during concurrent getset: {errors}"
+        assert len(old_values) == num_operations, f"Expected {num_operations} results, got {len(old_values)}"
+        
+        final_values = []
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, key)
+            final_values.append(result.get("value"))
+        
+        assert len(set(final_values)) == 1, f"Final values inconsistent: {final_values}"
+        print(f"[PASS] Concurrent getset: {len(old_values)} operations completed")
+    
+    def test_concurrent_writes_from_all_nodes(self, cluster: ClusterClient):
+        import concurrent.futures
+        
+        keys_per_node = 10
+        all_keys = {}
+        errors = []
+        
+        def write_from_node(node_idx: int):
+            try:
+                port = HTTP_PORTS[node_idx]
+                for i in range(keys_per_node):
+                    key = f"node{node_idx + 1}_key_{i}"
+                    value = f"node{node_idx + 1}_value_{i}"
+                    result = cluster.set_value(port, key, value)
+                    if result.get("success"):
+                        all_keys[key] = value
+                    else:
+                        errors.append(f"Write from node{node_idx + 1} failed: {result}")
+            except Exception as e:
+                errors.append(f"Node{node_idx + 1} exception: {e}")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(HTTP_PORTS)) as executor:
+            futures = [executor.submit(write_from_node, i) for i in range(len(HTTP_PORTS))]
+            concurrent.futures.wait(futures)
+        
+        assert len(errors) == 0, f"Errors during concurrent writes from nodes: {errors}"
+        expected_count = len(HTTP_PORTS) * keys_per_node
+        assert len(all_keys) == expected_count, f"Expected {expected_count} keys, got {len(all_keys)}"
+        
+        for port in HTTP_PORTS:
+            for key, expected_value in all_keys.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected_value, (
+                    f"Value mismatch for {key} on port {port}: expected {expected_value}, got {result.get('value')}"
+                )
+        
+        print(f"[PASS] Concurrent writes from all nodes: {len(all_keys)} keys written")
+    
+    def test_concurrent_high_load(self, cluster: ClusterClient):
+        import concurrent.futures
+        import random
+        
+        num_operations = 100
+        success_count = 0
+        errors = []
+        lock = __import__('threading').Lock()
+        
+        def random_operation(op_id: int):
+            nonlocal success_count
+            try:
+                op_type = random.choice(['set', 'get', 'batch', 'txn'])
+                port = HTTP_PORTS[op_id % len(HTTP_PORTS)]
+                
+                if op_type == 'set':
+                    key = f"highload_key_{op_id}"
+                    value = f"highload_value_{op_id}"
+                    result = cluster.set_value(port, key, value)
+                    if result.get("success"):
+                        with lock:
+                            success_count += 1
+                
+                elif op_type == 'get':
+                    key = f"highload_key_{random.randint(0, 50)}"
+                    cluster.get_value(port, key)
+                    with lock:
+                        success_count += 1
+                
+                elif op_type == 'batch':
+                    operations = [
+                        {"op": "set", "key": f"highload_batch_{op_id}_0", "value": f"val_{op_id}"},
+                        {"op": "set", "key": f"highload_batch_{op_id}_1", "value": f"val_{op_id}"},
+                    ]
+                    result = cluster.batch_write(port, operations)
+                    if result.get("success"):
+                        with lock:
+                            success_count += 1
+                
+                elif op_type == 'txn':
+                    key = f"highload_txn_{op_id}"
+                    conditions = [{"key": key, "op": "not_exists"}]
+                    if_then = [{"op": "set", "key": key, "value": f"txn_val_{op_id}"}]
+                    result = cluster.txn(port, conditions, if_then)
+                    if result.get("success"):
+                        with lock:
+                            success_count += 1
+                            
+            except Exception as e:
+                with lock:
+                    errors.append(f"Operation {op_id} exception: {e}")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(random_operation, i) for i in range(num_operations)]
+            concurrent.futures.wait(futures)
+        
+        success_rate = success_count / num_operations
+        assert success_rate >= 0.8, f"Success rate too low: {success_rate:.2%} ({success_count}/{num_operations})"
+        
+        if errors:
+            print(f"[INFO] {len(errors)} errors during high load test (expected some)")
+        
+        print(f"[PASS] High load test: {success_count}/{num_operations} operations succeeded ({success_rate:.1%})")
+
+
 def main():
     """Main entry point for direct execution."""
     pytest.main([__file__, "-v"])
