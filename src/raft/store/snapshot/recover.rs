@@ -142,6 +142,7 @@ mod tests {
   use openraft::Membership;
   use openraft::SnapshotMeta;
   use openraft::StoredMembership;
+  use std::io::Write;
   use tempfile::tempdir;
 
   /// Helper function: Create a test RocksDB instance
@@ -566,5 +567,204 @@ mod tests {
 
     let value1 = db.get_cf(&cf_handle, b"key-1").unwrap().unwrap();
     assert_eq!(String::from_utf8(value1).unwrap(), "value-1");
+  }
+
+  #[tokio::test]
+  async fn test_recover_snapshot_truncated_during_transfer() {
+    let db = create_test_db();
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("truncated.snapshot");
+
+    create_test_snapshot_file(snapshot_file_path.to_str().unwrap(), 10).await;
+
+    let original_metadata = std::fs::metadata(&snapshot_file_path).unwrap();
+    let truncated_size = original_metadata.len() / 2;
+
+    let file = std::fs::File::create(&snapshot_file_path).unwrap();
+    file.set_len(truncated_size).unwrap();
+
+    let snapshot_meta = SnapshotMeta {
+      last_log_id: None,
+      last_membership: StoredMembership::new(None, Membership::default()),
+      snapshot_id: String::from("truncated-snapshot"),
+    };
+
+    let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
+    let snapshot = Snapshot {
+      meta: snapshot_meta,
+      snapshot: file,
+    };
+
+    let result = do_recover_snapshot(&db, snapshot).await;
+    assert!(result.is_err(), "Expected error for truncated snapshot");
+  }
+
+  #[tokio::test]
+  async fn test_recover_snapshot_corrupted_key_length() {
+    let db = create_test_db();
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("corrupted.snapshot");
+
+    let file = std::fs::File::create(&snapshot_file_path).unwrap();
+    let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+
+    let key = "valid-key";
+    let value = "valid-value";
+    encoder
+      .write_all(&(key.len() as u32).to_le_bytes())
+      .unwrap();
+    encoder.write_all(key.as_bytes()).unwrap();
+    encoder
+      .write_all(&(value.len() as u32).to_le_bytes())
+      .unwrap();
+    encoder.write_all(value.as_bytes()).unwrap();
+
+    encoder.write_all(&(0xFFFFFFFFu32).to_le_bytes()).unwrap();
+
+    encoder.finish().unwrap();
+
+    let snapshot_meta = SnapshotMeta {
+      last_log_id: None,
+      last_membership: StoredMembership::new(None, Membership::default()),
+      snapshot_id: String::from("corrupted-snapshot"),
+    };
+
+    let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
+    let snapshot = Snapshot {
+      meta: snapshot_meta,
+      snapshot: file,
+    };
+
+    let result = do_recover_snapshot(&db, snapshot).await;
+    assert!(result.is_err(), "Expected error for corrupted key length");
+  }
+
+  #[tokio::test]
+  async fn test_recover_snapshot_partial_write_consistency() {
+    let db = create_test_db();
+    let cf_handle = db.cf_handle(SM_DATA_FAMILY).unwrap();
+
+    db.put_cf(&cf_handle, b"existing-key", b"existing-value")
+      .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("partial.snapshot");
+
+    create_test_snapshot_file(snapshot_file_path.to_str().unwrap(), 10).await;
+
+    let original_metadata = std::fs::metadata(&snapshot_file_path).unwrap();
+    let truncated_size = original_metadata.len() / 3;
+
+    let file = std::fs::File::create(&snapshot_file_path).unwrap();
+    file.set_len(truncated_size).unwrap();
+
+    let snapshot_meta = SnapshotMeta {
+      last_log_id: None,
+      last_membership: StoredMembership::new(None, Membership::default()),
+      snapshot_id: String::from("partial-snapshot"),
+    };
+
+    let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
+    let snapshot = Snapshot {
+      meta: snapshot_meta,
+      snapshot: file,
+    };
+
+    let result = do_recover_snapshot(&db, snapshot).await;
+    assert!(result.is_err(), "Expected error for partial snapshot");
+
+    let existing_value = db.get_cf(&cf_handle, b"existing-key").unwrap().unwrap();
+    assert_eq!(
+      String::from_utf8(existing_value).unwrap(),
+      "existing-value",
+      "Existing data should not be corrupted"
+    );
+  }
+
+  #[tokio::test]
+  async fn test_recover_snapshot_value_truncated() {
+    let db = create_test_db();
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("value-truncated.snapshot");
+
+    let file = std::fs::File::create(&snapshot_file_path).unwrap();
+    let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+
+    let key = "test-key";
+    let _value = "this-is-a-long-value";
+    encoder
+      .write_all(&(key.len() as u32).to_le_bytes())
+      .unwrap();
+    encoder.write_all(key.as_bytes()).unwrap();
+    encoder.write_all(&(100u32).to_le_bytes()).unwrap();
+    encoder.write_all(key.as_bytes()).unwrap();
+    encoder.write_all(&(100u32).to_le_bytes()).unwrap();
+    encoder.write_all(b"partial").unwrap();
+
+    encoder.finish().unwrap();
+
+    let snapshot_meta = SnapshotMeta {
+      last_log_id: None,
+      last_membership: StoredMembership::new(None, Membership::default()),
+      snapshot_id: String::from("value-truncated-snapshot"),
+    };
+
+    let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
+    let snapshot = Snapshot {
+      meta: snapshot_meta,
+      snapshot: file,
+    };
+
+    let result = do_recover_snapshot(&db, snapshot).await;
+    assert!(result.is_err(), "Expected error for truncated value");
+  }
+
+  #[tokio::test]
+  async fn test_recover_snapshot_large_data_interrupted() {
+    let db = create_test_db();
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("large-interrupted.snapshot");
+
+    let file = std::fs::File::create(&snapshot_file_path).unwrap();
+    let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+
+    let large_value = "x".repeat(10240);
+    for i in 0..100 {
+      let key = format!("large-key-{}", i);
+      encoder
+        .write_all(&(key.len() as u32).to_le_bytes())
+        .unwrap();
+      encoder.write_all(key.as_bytes()).unwrap();
+      encoder
+        .write_all(&(large_value.len() as u32).to_le_bytes())
+        .unwrap();
+      encoder.write_all(large_value.as_bytes()).unwrap();
+    }
+
+    encoder.finish().unwrap();
+
+    let original_metadata = std::fs::metadata(&snapshot_file_path).unwrap();
+    let truncated_size = (original_metadata.len() as f64 * 0.7) as u64;
+
+    let file = std::fs::File::create(&snapshot_file_path).unwrap();
+    file.set_len(truncated_size).unwrap();
+
+    let snapshot_meta = SnapshotMeta {
+      last_log_id: None,
+      last_membership: StoredMembership::new(None, Membership::default()),
+      snapshot_id: String::from("large-interrupted-snapshot"),
+    };
+
+    let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
+    let snapshot = Snapshot {
+      meta: snapshot_meta,
+      snapshot: file,
+    };
+
+    let result = do_recover_snapshot(&db, snapshot).await;
+    assert!(
+      result.is_err(),
+      "Expected error for interrupted large data transfer"
+    );
   }
 }
