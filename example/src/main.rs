@@ -9,8 +9,8 @@ use openraft::async_runtime::watch::WatchReceiver;
 use rockraft::config::Config as RockraftConfig;
 use rockraft::node::RaftNodeBuilder;
 use rockraft::raft::types::{
-  BatchWriteReq, Cmd, GetKVReq, LeaveRequest, LogEntry, ScanPrefixReq, TxnCondition, TxnReq,
-  UpsertKV,
+  BatchWriteReq, Cmd, GetKVReq, JoinRequest, LeaveRequest, LogEntry, ScanPrefixReq, TxnCondition,
+  TxnReq, UpsertKV,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -71,6 +71,13 @@ pub struct SetValueRequest {
 #[derive(Debug, Deserialize)]
 pub struct LeaveRequestHttp {
   pub node_id: u64,
+}
+
+/// Request for joining a node to the cluster
+#[derive(Debug, Deserialize)]
+pub struct JoinRequestHttp {
+  pub node_id: u64,
+  pub endpoint: String,
 }
 
 /// Operation type for batch operations
@@ -289,6 +296,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .route("/getset", post(getset_handler))
     .route("/prefix", get(prefix_handler))
     .route("/leave", post(leave_handler))
+    .route("/join", post(join_handler))
     .route("/members", get(members_handler))
     .route("/health", get(health_handler))
     .route("/metrics", get(metrics_handler))
@@ -324,6 +332,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
   );
   info!(
     "  POST http://{}/leave           - Remove a node from cluster",
+    http_addr
+  );
+  info!(
+    "  POST http://{}/join            - Add a node to cluster",
     http_addr
   );
   info!(
@@ -544,6 +556,43 @@ async fn leave_handler(
   }
 }
 
+/// Handler for POST /join endpoint
+///
+/// Add a node to the raft cluster.
+/// This request is forwarded to the leader if the current node is not the leader.
+///
+/// Request body example:
+/// ```json
+/// {
+///   "node_id": 4,
+///   "endpoint": "127.0.0.1:7004"
+/// }
+/// ```
+async fn join_handler(
+  State(state): State<AppState>,
+  Json(payload): Json<JoinRequestHttp>,
+) -> Result<impl IntoResponse, ErrorResponse> {
+  let endpoint =
+    rockraft::raft::types::Endpoint::parse(&payload.endpoint).map_err(|e| ErrorResponse {
+      error: format!("Invalid endpoint '{}': {}", payload.endpoint, e),
+    })?;
+
+  let req = JoinRequest {
+    node_id: payload.node_id,
+    endpoint,
+  };
+
+  match state.raft_node.join(req).await {
+    Ok(()) => Ok(Json(SuccessResponse {
+      success: true,
+      message: format!("Node {} joined the cluster successfully", payload.node_id),
+    })),
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to join cluster: {}", e),
+    }),
+  }
+}
+
 /// Handler for GET /members endpoint
 async fn members_handler(
   State(state): State<AppState>,
@@ -663,13 +712,19 @@ async fn txn_handler(
       }
       TxnConditionOp::NotEqual => {
         let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
-          error: format!("Condition 'not_equal' requires a value for key '{}'", cond.key),
+          error: format!(
+            "Condition 'not_equal' requires a value for key '{}'",
+            cond.key
+          ),
         })?;
         TxnCondition::ne(&cond.key, value.as_bytes())
       }
       TxnConditionOp::Greater => {
         let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
-          error: format!("Condition 'greater' requires a value for key '{}'", cond.key),
+          error: format!(
+            "Condition 'greater' requires a value for key '{}'",
+            cond.key
+          ),
         })?;
         TxnCondition::gt(&cond.key, value.as_bytes())
       }
@@ -681,13 +736,19 @@ async fn txn_handler(
       }
       TxnConditionOp::GreaterEqual => {
         let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
-          error: format!("Condition 'greater_equal' requires a value for key '{}'", cond.key),
+          error: format!(
+            "Condition 'greater_equal' requires a value for key '{}'",
+            cond.key
+          ),
         })?;
         TxnCondition::ge(&cond.key, value.as_bytes())
       }
       TxnConditionOp::LessEqual => {
         let value = cond.value.as_ref().ok_or_else(|| ErrorResponse {
-          error: format!("Condition 'less_equal' requires a value for key '{}'", cond.key),
+          error: format!(
+            "Condition 'less_equal' requires a value for key '{}'",
+            cond.key
+          ),
         })?;
         TxnCondition::le(&cond.key, value.as_bytes())
       }
@@ -726,17 +787,24 @@ async fn txn_handler(
   }
 
   // Build transaction request
-  let mut txn = TxnReq::new(conditions).if_then_ops(if_then).else_then_ops(else_then);
+  let mut txn = TxnReq::new(conditions)
+    .if_then_ops(if_then)
+    .else_then_ops(else_then);
   if payload.return_previous {
     txn = txn.with_return_previous();
   }
 
   // Execute transaction
   match state.raft_node.txn(txn).await {
-    Ok(rockraft::raft::types::TxnReply::Success { branch, prev_values }) => {
+    Ok(rockraft::raft::types::TxnReply::Success {
+      branch,
+      prev_values,
+    }) => {
       let prev_strings: Vec<Option<String>> = prev_values
         .into_iter()
-        .map(|v| v.map(|bytes| String::from_utf8(bytes).unwrap_or_else(|_| "Invalid UTF-8".to_string())))
+        .map(|v| {
+          v.map(|bytes| String::from_utf8(bytes).unwrap_or_else(|_| "Invalid UTF-8".to_string()))
+        })
         .collect();
 
       info!(
@@ -788,8 +856,8 @@ async fn getset_handler(
     .await
   {
     Ok(old_value_opt) => {
-      let old_value_str = old_value_opt
-        .map(|v| String::from_utf8(v).unwrap_or_else(|_| "Invalid UTF-8".to_string()));
+      let old_value_str =
+        old_value_opt.map(|v| String::from_utf8(v).unwrap_or_else(|_| "Invalid UTF-8".to_string()));
       info!(
         "Getset successful: key='{}', old_value={:?}, new_value='{}'",
         payload.key, old_value_str, payload.value

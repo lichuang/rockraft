@@ -212,6 +212,28 @@ class ClusterClient:
         except Exception as e:
             raise RuntimeError(f"Failed to getset on port {port}: {e}")
     
+    def join_node(self, port: int, node_id: int, endpoint: str, timeout: int = 10) -> Dict[str, Any]:
+        """Add a node to the cluster via the /join endpoint.
+        
+        Args:
+            port: HTTP port of the node to send the join request to
+            node_id: ID of the node to add
+            endpoint: Raft endpoint of the new node (e.g. "127.0.0.1:7004")
+            timeout: Request timeout in seconds
+        
+        Returns:
+            Response dict with 'success' and 'message' fields
+        """
+        url = f"http://127.0.0.1:{port}/join"
+        data = json.dumps({"node_id": node_id, "endpoint": endpoint}).encode()
+        headers = {"Content-Type": "application/json"}
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            raise RuntimeError(f"Failed to join node {node_id} on port {port}: {e}")
+    
     def wait_for_nodes(self, max_retries: int = 30, retry_interval: float = 1.0) -> None:
         """Wait for all nodes to be ready."""
         print("\n[WAIT] Waiting for nodes to be ready...")
@@ -1300,6 +1322,31 @@ class TestBatchWrite:
         # Verify count using prefix scan
         result = cluster.query_prefix(HTTP_PORTS[0], "large_batch_key_")
         assert result.get("count") == 50, f"Expected 50 items, got {result.get('count')}"
+
+
+class TestJoin:
+    """Test join node functionality."""
+
+    def test_join_already_existing_node(self, cluster: ClusterClient):
+        """Test joining a node that is already in the cluster returns success."""
+        result = cluster.join_node(HTTP_PORTS[0], 1, "127.0.0.1:7001")
+        assert result.get("success") is True, f"Join existing node failed: {result}"
+
+    def test_join_with_invalid_endpoint(self, cluster: ClusterClient):
+        """Test joining with an invalid endpoint returns an error."""
+        try:
+            cluster.join_node(HTTP_PORTS[0], 99, "invalid_endpoint")
+            assert False, "Expected an error for invalid endpoint"
+        except RuntimeError:
+            pass
+
+    def test_join_consistency_across_nodes(self, cluster: ClusterClient):
+        """Test that join request forwarded to any node succeeds."""
+        for i, port in enumerate(HTTP_PORTS):
+            result = cluster.join_node(port, 2, "127.0.0.1:7002")
+            assert result.get("success") is True, (
+                f"Join via node {NODES[i]} (port {port}) failed: {result}"
+            )
 
 
 class TestConcurrency:

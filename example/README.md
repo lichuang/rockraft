@@ -219,6 +219,44 @@ curl -X POST http://localhost:8001/getset \
 }
 ```
 
+### POST /join
+
+Add a node to the cluster (only works on leader node, forwarded automatically).
+
+**Example:**
+```bash
+curl -X POST http://localhost:8001/join \
+  -H "Content-Type: application/json" \
+  -d '{"node_id": 4, "endpoint": "127.0.0.1:7004"}'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Node 4 joined the cluster successfully"
+}
+```
+
+### POST /leave
+
+Remove a node from the cluster (only works on leader node, forwarded automatically).
+
+**Example:**
+```bash
+curl -X POST http://localhost:8001/leave \
+  -H "Content-Type: application/json" \
+  -d '{"node_id": 3}'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Node 3 left the cluster successfully"
+}
+```
+
 ### GET /health
 
 Health check endpoint.

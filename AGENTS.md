@@ -190,8 +190,9 @@ pub fn process_response(response: CreateChatCompletionResponse) {
   - `POST /txn` - Execute transaction with conditions
   - `POST /getset` - Get old value and set new value atomically
   - `GET /prefix?prefix=<prefix>` - Scan keys by prefix
-  - `GET /members` - Get cluster membership
-  - `POST /leave` - Remove node from cluster
+- `GET /members` - Get cluster membership
+- `POST /join` - Add node to cluster
+- `POST /leave` - Remove node from cluster
   - `GET /health` - Health check
   - `GET /metrics` - Cluster metrics
 - Run tests: `./run_tests.sh` (requires Python and pytest)

@@ -690,6 +690,32 @@ impl RaftNode {
     }
   }
 
+  /// Add a node to the raft cluster
+  ///
+  /// This function adds a node to the raft cluster. If this node is the leader,
+  /// it handles the request directly. Otherwise, it forwards the request to the leader.
+  ///
+  /// # Arguments
+  /// * `req` - The JoinRequest containing the node_id and endpoint of the new node
+  ///
+  /// # Returns
+  /// * `Ok(())` - If the node was successfully added to the cluster
+  /// * `Err(Status)` - If the operation failed
+  pub async fn join(&self, req: JoinRequest) -> StdResult<(), Status> {
+    debug!("join node: {:?}", req);
+
+    let request = ForwardRequest {
+      forward_to_leader: 1,
+      body: ForwardRequestBody::Join(req),
+    };
+
+    match self.handle_forward_request(request).await {
+      Ok(ForwardResponse::Join(())) => Ok(()),
+      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
+      Err(e) => Err(Self::error_to_status(e)),
+    }
+  }
+
   /// Remove a node from the raft cluster
   ///
   /// This function removes a node from the raft cluster. If this node is the leader,
