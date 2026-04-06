@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-04-06
+
+### 🚀 Features
+
+- Add daily test
+- Add transaction support with conditional operations
+- Add transaction support with conditional operations and previous value return
+- Add more snapshot test cases
+- Implement RaftNode.join() API for adding nodes to the cluster
+
+### 🐛 Bug Fixes
+
+- Add protoc installation to workflows
+
+### 🧪 Testing
+
+- Add concurrent operation tests for thread safety and consistency
+
 ## [0.1.4] - 2025-03-21
 
 ### Added
