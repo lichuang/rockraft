@@ -1,3 +1,4 @@
+use std::io;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -162,7 +163,7 @@ pub fn snapshot_id_dir(snapshot_dir: &Path, snapshot_id: &str) -> PathBuf {
 pub async fn save_last_snapshot_id_file(
   snapshot_dir: &Path,
   last_snapshot_id: &str,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
   let last_snapshot_id_file = snapshot_last_snapshot_id_file(snapshot_dir);
 
   let mut file = File::create(&last_snapshot_id_file).await?;
@@ -193,7 +194,7 @@ pub async fn save_last_snapshot_id_file(
 /// - There are insufficient permissions to read the file
 /// - The file contains invalid UTF-8 data
 /// - The file system experiences an I/O error
-pub(crate) async fn get_last_snapshot_id(snapshot_dir: &Path) -> std::io::Result<String> {
+pub(crate) async fn get_last_snapshot_id(snapshot_dir: &Path) -> io::Result<String> {
   let last_snapshot_file = snapshot_last_snapshot_id_file(snapshot_dir);
 
   let mut file = File::open(&last_snapshot_file).await?;
@@ -226,11 +227,11 @@ pub(crate) async fn get_last_snapshot_id(snapshot_dir: &Path) -> std::io::Result
 /// - There are insufficient permissions to create or write the file
 /// - The disk is full
 /// - The file system experiences an I/O error
-pub async fn save_snapshot_meta(snapshot_id_dir: &Path, meta: SnapshotMeta) -> std::io::Result<()> {
+pub async fn save_snapshot_meta(snapshot_id_dir: &Path, meta: SnapshotMeta) -> io::Result<()> {
   let meta_file = snapshot_meta_file(snapshot_id_dir);
 
   let data = encode(&meta).map_err(|e| {
-    std::io::Error::new(
+    io::Error::new(
       ErrorKind::InvalidData,
       format!("Serialize meta data error: {}", e),
     )
@@ -264,13 +265,13 @@ pub async fn save_snapshot_meta(snapshot_id_dir: &Path, meta: SnapshotMeta) -> s
 /// - There are insufficient permissions to read the file
 /// - The file contains invalid or corrupted data (ErrorKind::InvalidData)
 /// - The file system experiences an I/O error
-pub async fn get_snapshot_meta(snapshot_id_dir: &PathBuf) -> std::io::Result<SnapshotMeta> {
+pub async fn get_snapshot_meta(snapshot_id_dir: &PathBuf) -> io::Result<SnapshotMeta> {
   let mut file = File::open(snapshot_id_dir).await?;
   let mut data = Vec::new();
   file.read_to_end(&mut data).await?;
 
   decode(&data)
-    .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, format!("Deserialize error: {}", e)))
+    .map_err(|e| io::Error::new(ErrorKind::InvalidData, format!("Deserialize error: {}", e)))
 }
 
 /// Retrieve the current (most recent) snapshot from the snapshot directory.
@@ -303,7 +304,7 @@ pub async fn get_snapshot_meta(snapshot_id_dir: &PathBuf) -> std::io::Result<Sna
 /// - Any unexpected I/O error occurs
 ///
 /// Note that missing files are not considered errors and result in `Ok(None)`.
-pub async fn get_current_snapshot(snapshot_dir: &Path) -> std::io::Result<Option<Snapshot>> {
+pub async fn get_current_snapshot(snapshot_dir: &Path) -> io::Result<Option<Snapshot>> {
   let snapshot_id = match get_last_snapshot_id(snapshot_dir).await {
     Ok(id) => id,
     Err(e) if e.kind() == ErrorKind::NotFound => {

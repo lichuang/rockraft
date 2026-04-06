@@ -1,13 +1,12 @@
+use std::io;
 use std::time::Duration;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use dashmap::DashMap;
 use mobc::{Connection, Pool};
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
-
-use crate::error::RockRaftError;
 
 use super::raft_service_manager::RaftServiceManager;
 
@@ -73,16 +72,14 @@ impl ClientPool {
             addr, e, pool_state_before, pool_state_after
           );
 
-          return Err(RockRaftError::NoAvailableGrpcConnection(format!(
+          return Err(Error::retryable(io::Error::other(format!(
             "get grpc client failed, err: {}, state: {:?}",
             e, pool_state_after
-          )));
+          ))));
         }
       }
     }
 
-    Err(RockRaftError::NoAvailableGrpcConnection(
-      "connection pool is not initialized".to_string(),
-    ))
+    Err(Error::internal("connection pool is not initialized"))
   }
 }

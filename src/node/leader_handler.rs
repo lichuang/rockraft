@@ -1,6 +1,4 @@
-use crate::error::OpenRaft;
-use crate::error::Result;
-use crate::error::RockRaftError;
+use crate::error::{Error, Result};
 use crate::node::RaftNode;
 use crate::raft::types::AppliedState;
 use crate::raft::types::BatchWriteReq;
@@ -25,7 +23,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
-use tonic::Status;
+
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -103,10 +101,10 @@ impl<'a> LeaderHandler<'a> {
       });
       if let Err(e) = self.write(entry).await {
         error!("Failed to sync node {}: {:?}", id, e);
-        return Err(RockRaftError::TonicStatus(Status::internal(format!(
+        return Err(Error::internal(format!(
           "Failed to sync node {}: {}",
           id, e
-        ))));
+        )));
       }
     }
 
@@ -124,10 +122,7 @@ impl<'a> LeaderHandler<'a> {
 
     if let Err(e) = self.write(entry).await {
       error!("Failed to write AddNode entry: {:?}", e);
-      return Err(RockRaftError::TonicStatus(Status::internal(format!(
-        "Failed to join node: {}",
-        e
-      ))));
+      return Err(Error::internal(format!("Failed to join node: {}", e)));
     }
     info!("AddNode command written successfully for node {}", node_id);
 
@@ -139,10 +134,7 @@ impl<'a> LeaderHandler<'a> {
     let msg = ChangeMembers::AddVoters(add_voters);
     if let Err(e) = self.raft().change_membership(msg, false).await {
       error!("Failed to change membership: {:?}", e);
-      return Err(RockRaftError::TonicStatus(Status::internal(format!(
-        "Failed to join node: {}",
-        e
-      ))));
+      return Err(Error::internal(format!("Failed to join node: {}", e)));
     }
     info!("Node {} joined successfully", node_id);
 
@@ -171,10 +163,7 @@ impl<'a> LeaderHandler<'a> {
 
     if let Err(e) = self.write(entry).await {
       error!("Failed to leave node: {:?}", e);
-      return Err(RockRaftError::TonicStatus(Status::internal(format!(
-        "Failed to leave node: {}",
-        e
-      ))));
+      return Err(Error::internal(format!("Failed to leave node: {}", e)));
     }
 
     // Change membership to remove the node
@@ -183,10 +172,7 @@ impl<'a> LeaderHandler<'a> {
 
     if let Err(e) = self.raft().change_membership(remove_voters, true).await {
       error!("Failed to leave node: {:?}", e);
-      return Err(RockRaftError::TonicStatus(Status::internal(format!(
-        "Failed to leave node: {}",
-        e
-      ))));
+      return Err(Error::internal(format!("Failed to leave node: {}", e)));
     }
 
     Ok(ForwardResponse::Leave(()))
@@ -198,10 +184,7 @@ impl<'a> LeaderHandler<'a> {
       Ok(applied_state) => Ok(ForwardResponse::Write(applied_state)),
       Err(e) => {
         error!("Failed to write log entry: {:?}", e);
-        Err(RockRaftError::TonicStatus(Status::internal(format!(
-          "Failed to write log entry: {}",
-          e
-        ))))
+        Err(Error::internal(format!("Failed to write log entry: {}", e)))
       }
     }
   }
@@ -223,10 +206,10 @@ impl<'a> LeaderHandler<'a> {
       Ok(applied_state) => Ok(ForwardResponse::BatchWrite(applied_state)),
       Err(e) => {
         error!("Failed to write batch log entry: {:?}", e);
-        Err(RockRaftError::TonicStatus(Status::internal(format!(
+        Err(Error::internal(format!(
           "Failed to write batch log entry: {}",
           e
-        ))))
+        )))
       }
     }
   }
@@ -237,10 +220,7 @@ impl<'a> LeaderHandler<'a> {
       Ok(value) => Ok(ForwardResponse::GetKV(value)),
       Err(e) => {
         error!("Failed to get kv: {:?}", e);
-        Err(RockRaftError::TonicStatus(Status::internal(format!(
-          "Failed to get kv: {}",
-          e
-        ))))
+        Err(Error::internal(format!("Failed to get kv: {}", e)))
       }
     }
   }
@@ -255,10 +235,7 @@ impl<'a> LeaderHandler<'a> {
       Ok(results) => Ok(ForwardResponse::ScanPrefix(results)),
       Err(e) => {
         error!("Failed to scan prefix: {:?}", e);
-        Err(RockRaftError::TonicStatus(Status::internal(format!(
-          "Failed to scan prefix: {}",
-          e
-        ))))
+        Err(Error::internal(format!("Failed to scan prefix: {}", e)))
       }
     }
   }
@@ -272,10 +249,7 @@ impl<'a> LeaderHandler<'a> {
       Ok(nodes) => Ok(ForwardResponse::GetMembers(nodes)),
       Err(e) => {
         error!("Failed to get members: {:?}", e);
-        Err(RockRaftError::TonicStatus(Status::internal(format!(
-          "Failed to get members: {}",
-          e
-        ))))
+        Err(Error::internal(format!("Failed to get members: {}", e)))
       }
     }
   }
@@ -296,16 +270,14 @@ impl<'a> LeaderHandler<'a> {
       Ok(_) => {
         // Should not happen - Txn command always returns AppliedState::Txn
         error!("Unexpected AppliedState from transaction");
-        Err(RockRaftError::TonicStatus(Status::internal(
-          "Unexpected response from transaction".to_string(),
-        )))
+        Err(Error::internal("Unexpected response from transaction"))
       }
       Err(e) => {
         error!("Failed to execute transaction: {:?}", e);
-        Err(RockRaftError::TonicStatus(Status::internal(format!(
+        Err(Error::internal(format!(
           "Failed to execute transaction: {}",
           e
-        ))))
+        )))
       }
     }
   }
@@ -322,7 +294,7 @@ impl<'a> LeaderHandler<'a> {
   ///
   /// # Returns
   /// * `Ok(AppliedState)` - The result of applying the log entry
-  /// * `Err(RockRaftError)` - If the operation failed or this node is not the leader
+  /// * `Err(Error)` - If the operation failed or this node is not the leader
   pub async fn write(&self, mut entry: LogEntry) -> Result<AppliedState> {
     // Set the current timestamp in milliseconds, safe to unwrap
     let now = SystemTime::now()
@@ -350,9 +322,11 @@ impl<'a> LeaderHandler<'a> {
         );
         match e {
           RaftError::APIError(api_err) => {
-            Err(RockRaftError::OpenRaft(OpenRaft::ClientWrite(api_err)))
+            Err(Error::internal(format!("client write error: {}", api_err)))
           }
-          RaftError::Fatal(fatal_err) => Err(RockRaftError::OpenRaft(OpenRaft::Fatal(fatal_err))),
+          RaftError::Fatal(fatal_err) => {
+            Err(Error::internal(format!("fatal raft error: {}", fatal_err)))
+          }
         }
       }
     }

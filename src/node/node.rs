@@ -1,13 +1,10 @@
-use crate::error::ManagementError;
-use crate::error::Result;
-use crate::error::RockRaftError;
-use crate::error::StartupError;
+use crate::error::{Error, Result};
 use crate::grpc::JoinConnectionFactory;
 use crate::raft::protobuf as pb;
 use crate::raft::protobuf::raft_service_client::RaftServiceClient;
 use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::JoinRequest;
-use anyerror::AnyError;
+
 use openraft::error::{InitializeError, RaftError};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -26,7 +23,7 @@ use tokio::time::sleep;
 use openraft::Config as OpenRaftConfig;
 use openraft::Raft;
 use openraft::async_runtime::watch::WatchReceiver;
-use tonic::Status;
+
 use tonic::transport::Server;
 
 use super::LeaderHandler;
@@ -126,7 +123,7 @@ impl RaftNode {
         state_machine.clone(),
       )
       .await
-      .map_err(crate::error::OpenRaft::Fatal)?,
+      .map_err(|e| Error::internal(format!("Failed to create raft: {}", e)))?,
     );
 
     // Create shutdown channel
@@ -239,14 +236,14 @@ impl RaftNode {
       Ok(Err(err_msg)) => {
         // Wait for the task to finish to ensure proper cleanup
         let _ = handle.await;
-        Err(RockRaftError::Startup(StartupError::OtherError(err_msg)))
+        Err(Error::internal(err_msg))
       }
       Err(_) => {
         // Channel closed unexpectedly (task panicked)
         let _ = handle.await;
-        Err(RockRaftError::Startup(StartupError::OtherError(
-          "gRPC service startup task failed unexpectedly".to_string(),
-        )))
+        Err(Error::internal(
+          "gRPC service startup task failed unexpectedly",
+        ))
       }
     }
   }
@@ -265,7 +262,7 @@ impl RaftNode {
           // or receiver lagged. Return the error to the caller
           let error_msg = format!("Metrics watch error: {:?}", e);
           tracing::debug!("{}", error_msg);
-          return Err(AnyError::error(error_msg).into());
+          return Err(Error::internal(error_msg));
         }
       }
     })
@@ -319,7 +316,7 @@ impl RaftNode {
     let last_membership = self
       .state_machine
       .get_last_membership()
-      .map_err(|e| AnyError::error(format!("get_last_membership error: {}", e)))?;
+      .map_err(|e| Error::internal(format!("get_last_membership error: {}", e)))?;
     let node_id = *self.raft.node_id();
 
     // Only check voter_ids
@@ -333,30 +330,28 @@ impl RaftNode {
 
   /// Initialize the Raft cluster with a single node
   /// * `Ok(())` - Successfully initialized the cluster
-  /// * `Err(AnyError)` - Failed to initialize with StartupError variants:
-  ///   - `StartupError::InvalidConfig` if node configuration is invalid
-  ///   - `StartupError::AddNodeError` if adding node to cluster fails
+  /// * `Err(Error)` - Failed to initialize:
+  ///   - `InvalidConfig` if node configuration is invalid
+  ///   - `Internal` if adding node to cluster fails
   async fn init_cluster(&self, node: Node) -> Result<()> {
     if node.node_id != *self.raft.node_id() {
-      let err = StartupError::invalid_config(format!(
+      return Err(Error::config(format!(
         "Node ID {} does not match current node ID {}",
         node.node_id,
         self.raft.node_id()
-      ));
-      return Err(crate::error::RockRaftError::from(err));
+      )));
     }
 
     // Validate endpoint
     if node.endpoint.addr().is_empty() {
-      let err = StartupError::invalid_config("Node endpoint address cannot be empty");
-      return Err(crate::error::RockRaftError::from(err));
+      return Err(Error::config("Node endpoint address cannot be empty"));
     }
 
     // Add current node to state machine first
     info!("Adding node {} to state machine", node.node_id);
     self.state_machine.add_node(node.clone()).map_err(|e| {
       error!("Failed to add node: {}", e);
-      StartupError::OtherError(format!("Failed to add node: {}", e))
+      Error::internal(format!("Failed to add node: {}", e))
     })?;
     info!("Node {} added to state machine successfully", node.node_id);
 
@@ -372,13 +367,11 @@ impl RaftNode {
             info!("Already initialized: {}", e);
           }
           InitializeError::NotInMembers(e) => {
-            let err = StartupError::InvalidConfig(e.to_string());
-            return Err(err.into());
+            return Err(Error::config(e.to_string()));
           }
         },
         RaftError::Fatal(e) => {
-          let err = StartupError::OtherError(e.to_string());
-          return Err(err.into());
+          return Err(Error::internal(e.to_string()));
         }
       }
     }
@@ -402,7 +395,7 @@ impl RaftNode {
     Ok(())
   }
 
-  async fn do_join_cluster(&self) -> StdResult<(), ManagementError> {
+  async fn do_join_cluster(&self) -> Result<()> {
     let config = &self.config;
     let addrs = &config.raft_join;
     let mut errors = vec![];
@@ -436,7 +429,7 @@ impl RaftNode {
       }
     }
 
-    Err(ManagementError::Join(AnyError::error(format!(
+    Err(Error::internal(format!(
       "fail to join node-{} to cluster via {:?}, errors: {}",
       self.raft.node_id(),
       addrs,
@@ -445,7 +438,7 @@ impl RaftNode {
         .map(|e| e.to_string())
         .collect::<Vec<_>>()
         .join(", ")
-    ))))
+    )))
   }
 
   async fn send_forward_request(
@@ -468,7 +461,7 @@ impl RaftNode {
     let response = raft_client
       .forward(request)
       .await
-      .map_err(|e| Status::internal(format!("Failed to forward request: {}", e)))?;
+      .map_err(|e| Error::internal(format!("Failed to forward request: {}", e)))?;
 
     Ok(response.into_inner())
   }
@@ -491,7 +484,7 @@ impl RaftNode {
     if reply.error.is_empty() {
       Ok(())
     } else {
-      Err(RockRaftError::Raft(format!(
+      Err(Error::internal(format!(
         "Join failed: {:?}",
         String::from_utf8_lossy(&reply.error)
       )))
@@ -508,8 +501,8 @@ impl RaftNode {
   ///
   /// # Returns
   /// * `Ok(AppliedState)` - The result of applying the log entry
-  /// * `Err(Status)` - If the operation failed
-  pub async fn write(&self, entry: LogEntry) -> StdResult<AppliedState, Status> {
+  /// * `Err(Error)` - If the operation failed
+  pub async fn write(&self, entry: LogEntry) -> Result<AppliedState> {
     debug!("write log entry: {:?}", entry);
 
     let request = ForwardRequest {
@@ -519,8 +512,8 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::Write(applied_state)) => Ok(applied_state),
-      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(Self::error_to_status(e)),
+      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
     }
   }
 
@@ -538,8 +531,8 @@ impl RaftNode {
   ///
   /// # Returns
   /// * `Ok(BatchWriteReply)` - The result of applying the batch
-  /// * `Err(Status)` - If the operation failed
-  pub async fn batch_write(&self, req: BatchWriteReq) -> StdResult<BatchWriteReply, Status> {
+  /// * `Err(Error)` - If the operation failed
+  pub async fn batch_write(&self, req: BatchWriteReq) -> Result<BatchWriteReply> {
     debug!("batch write: {:?}", req);
 
     let request = ForwardRequest {
@@ -549,8 +542,8 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::BatchWrite(applied_state)) => Ok(applied_state),
-      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(Self::error_to_status(e)),
+      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
     }
   }
 
@@ -565,7 +558,7 @@ impl RaftNode {
   ///
   /// # Returns
   /// * `Ok(TxnReply)` - The result of the transaction execution
-  /// * `Err(Status)` - If the operation failed
+  /// * `Err(Error)` - If the operation failed
   ///
   /// # Example
   /// ```rust,no_run
@@ -575,7 +568,7 @@ impl RaftNode {
   ///   .if_then(UpsertKV::insert("key", b"new_value"));
   /// // raft_node.txn(req).await;
   /// ```
-  pub async fn txn(&self, req: TxnReq) -> StdResult<TxnReply, Status> {
+  pub async fn txn(&self, req: TxnReq) -> Result<TxnReply> {
     debug!("transaction: {:?}", req);
 
     let request = ForwardRequest {
@@ -585,8 +578,8 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::Txn(reply)) => Ok(reply),
-      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(Self::error_to_status(e)),
+      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
     }
   }
 
@@ -606,7 +599,7 @@ impl RaftNode {
   /// # Returns
   /// * `Ok(Some(Vec<u8>))` - The previous value if the key existed
   /// * `Ok(None)` - If the key did not exist
-  /// * `Err(Status)` - If the operation failed
+  /// * `Err(Error)` - If the operation failed
   ///
   /// # Example
   /// ```rust,no_run
@@ -624,7 +617,7 @@ impl RaftNode {
     &self,
     key: impl ToString,
     value: impl AsRef<[u8]>,
-  ) -> StdResult<Option<Vec<u8>>, Status> {
+  ) -> Result<Option<Vec<u8>>> {
     use crate::raft::types::UpsertKV;
 
     let req = TxnReq::new(vec![]) // No conditions, always execute
@@ -647,8 +640,8 @@ impl RaftNode {
   ///
   /// # Returns
   /// * `Ok(GetKVReply)` - The value associated with the key, or None if not found
-  /// * `Err(Status)` - If the operation failed
-  pub async fn read(&self, req: GetKVReq) -> StdResult<GetKVReply, Status> {
+  /// * `Err(Error)` - If the operation failed
+  pub async fn read(&self, req: GetKVReq) -> Result<GetKVReply> {
     debug!("read kv: {:?}", req);
 
     let request = ForwardRequest {
@@ -658,8 +651,8 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::GetKV(value)) => Ok(value),
-      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(Self::error_to_status(e)),
+      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
     }
   }
 
@@ -674,8 +667,8 @@ impl RaftNode {
   ///
   /// # Returns
   /// * `Ok(ScanPrefixReply)` - A vector of (key, value) pairs matching the prefix
-  /// * `Err(Status)` - If the operation failed
-  pub async fn scan_prefix(&self, req: ScanPrefixReq) -> StdResult<ScanPrefixReply, Status> {
+  /// * `Err(Error)` - If the operation failed
+  pub async fn scan_prefix(&self, req: ScanPrefixReq) -> Result<ScanPrefixReply> {
     debug!("scan_prefix: {:?}", req);
 
     let request = ForwardRequest {
@@ -685,8 +678,8 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::ScanPrefix(results)) => Ok(results),
-      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(Self::error_to_status(e)),
+      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
     }
   }
 
@@ -700,8 +693,8 @@ impl RaftNode {
   ///
   /// # Returns
   /// * `Ok(())` - If the node was successfully added to the cluster
-  /// * `Err(Status)` - If the operation failed
-  pub async fn join(&self, req: JoinRequest) -> StdResult<(), Status> {
+  /// * `Err(Error)` - If the operation failed
+  pub async fn join(&self, req: JoinRequest) -> Result<()> {
     debug!("join node: {:?}", req);
 
     let request = ForwardRequest {
@@ -711,8 +704,8 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::Join(())) => Ok(()),
-      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(Self::error_to_status(e)),
+      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
     }
   }
 
@@ -726,8 +719,8 @@ impl RaftNode {
   ///
   /// # Returns
   /// * `Ok(())` - If the node was successfully removed from the cluster
-  /// * `Err(Status)` - If the operation failed
-  pub async fn leave(&self, req: LeaveRequest) -> StdResult<(), Status> {
+  /// * `Err(Error)` - If the operation failed
+  pub async fn leave(&self, req: LeaveRequest) -> Result<()> {
     debug!("leave node: {:?}", req);
 
     let request = ForwardRequest {
@@ -737,8 +730,8 @@ impl RaftNode {
 
     match self.handle_forward_request(request).await {
       Ok(ForwardResponse::Leave(())) => Ok(()),
-      Ok(_) => Err(Status::internal("Unexpected response type from leader")),
-      Err(e) => Err(Self::error_to_status(e)),
+      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
+      Err(e) => Err(e),
     }
   }
 
@@ -752,8 +745,8 @@ impl RaftNode {
   ///
   /// # Returns
   /// * `Ok(GetMembersReply)` - A map of node_id to Node containing all cluster members
-  /// * `Err(Status)` - If the operation failed
-  pub async fn get_members(&self, req: GetMembersReq) -> StdResult<GetMembersReply, Status> {
+  /// * `Err(Error)` - If the operation failed
+  pub async fn get_members(&self, req: GetMembersReq) -> Result<GetMembersReply> {
     debug!("get members: {:?}", req);
 
     // This operation can be handled by any node, use LeaderHandler for code reuse
@@ -763,8 +756,8 @@ impl RaftNode {
       .await
     {
       Ok(ForwardResponse::GetMembers(members)) => Ok(members),
-      Ok(_) => Err(Status::internal("Unexpected response type")),
-      Err(e) => Err(Self::error_to_status(e)),
+      Ok(_) => Err(Error::internal("Unexpected response type")),
+      Err(e) => Err(e),
     }
   }
 
@@ -774,16 +767,15 @@ impl RaftNode {
     request: ForwardRequest,
   ) -> Result<ForwardResponse> {
     // Get leader's endpoint from membership
-    let membership = self.state_machine.get_last_membership().map_err(|e| {
-      RockRaftError::TonicStatus(Status::internal(format!("Failed to get membership: {}", e)))
-    })?;
+    let membership = self
+      .state_machine
+      .get_last_membership()
+      .map_err(|e| Error::internal(format!("Failed to get membership: {}", e)))?;
 
     let leader_node = membership
       .membership()
       .get_node(&leader_id)
-      .ok_or_else(|| {
-        RockRaftError::TonicStatus(Status::internal("Leader id not found in membership"))
-      })?;
+      .ok_or_else(|| Error::internal("Leader id not found in membership"))?;
 
     let leader_addr = leader_node.endpoint.to_string();
 
@@ -791,37 +783,20 @@ impl RaftNode {
 
     if reply.error.is_empty() {
       // Deserialize the response data
-      let forward_response: ForwardResponse = decode(&reply.data).map_err(|e| {
-        RockRaftError::TonicStatus(Status::internal(format!(
-          "Failed to deserialize response: {}",
-          e
-        )))
-      })?;
+      let forward_response: ForwardResponse = decode(&reply.data)
+        .map_err(|e| Error::internal(format!("Failed to deserialize response: {}", e)))?;
       Ok(forward_response)
     } else {
-      Err(RockRaftError::TonicStatus(Status::internal(format!(
+      Err(Error::internal(format!(
         "Leader returned error: {:?}",
         String::from_utf8_lossy(&reply.error)
-      ))))
-    }
-  }
-
-  /// Convert RockRaftError to tonic::Status
-  fn error_to_status(error: RockRaftError) -> Status {
-    match error {
-      RockRaftError::TonicStatus(status) => status,
-      _ => Status::internal(error.to_string()),
+      )))
     }
   }
 
   /// Check if the error is retriable (network/connection related)
-  fn is_retriable_error(error: &RockRaftError) -> bool {
-    match error {
-      RockRaftError::TonicStatus(status) => {
-        matches!(status.code(), tonic::Code::Unavailable)
-      }
-      _ => error.is_retryable(),
-    }
+  fn is_retriable_error(error: &Error) -> bool {
+    error.is_retryable()
   }
 
   pub async fn handle_forward_request(&self, request: ForwardRequest) -> Result<ForwardResponse> {
@@ -872,16 +847,16 @@ impl RaftNode {
             continue;
           }
 
-          return Err(RockRaftError::TonicStatus(Status::internal(
+          return Err(Error::internal(
             "No leader available to forward request after max retries",
-          )));
+          ));
         }
       }
     }
 
-    Err(RockRaftError::TonicStatus(Status::internal(
+    Err(Error::internal(
       "No leader available to forward request after max retries",
-    )))
+    ))
   }
 }
 

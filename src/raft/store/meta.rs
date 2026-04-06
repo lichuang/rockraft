@@ -1,3 +1,5 @@
+use std::error::Error as StdError;
+
 use openraft::ErrorSubject;
 use openraft::ErrorVerb;
 use openraft::StorageError;
@@ -19,7 +21,7 @@ pub trait StoreMeta {
   /// The subject this meta belongs to, and will be embedded into the returned storage error.
   fn subject(v: Option<&Self::Value>) -> ErrorSubject<TypeConfig>;
 
-  fn read_err(e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
+  fn read_err(e: impl StdError + 'static) -> StorageError<TypeConfig> {
     StorageError::new(
       Self::subject(None),
       ErrorVerb::Read,
@@ -27,7 +29,7 @@ pub trait StoreMeta {
     )
   }
 
-  fn write_err(v: &Self::Value, e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
+  fn write_err(v: &Self::Value, e: impl StdError + 'static) -> StorageError<TypeConfig> {
     StorageError::new(
       Self::subject(Some(v)),
       ErrorVerb::Write,
@@ -35,7 +37,7 @@ pub trait StoreMeta {
     )
   }
 
-  fn delete_err(e: impl std::error::Error + 'static) -> StorageError<TypeConfig> {
+  fn delete_err(e: impl StdError + 'static) -> StorageError<TypeConfig> {
     StorageError::new(
       Self::subject(None),
       ErrorVerb::Delete,

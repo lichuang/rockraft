@@ -1,9 +1,8 @@
 use super::{client_config::RpcClientTlsConfig, dns_resolver::DNSService};
-use crate::error::GrpcConnectionError;
-use crate::error::Result;
-use crate::error::RockRaftError;
+use crate::error::{Error, Result};
 use hyper_util::client::legacy::connect::HttpConnector;
 use std::fs;
+use std::io;
 use std::time::Duration;
 use tonic::transport::Certificate;
 use tonic::transport::Channel;
@@ -31,12 +30,11 @@ impl JoinConnectionFactory {
     // check connection immediately
     match endpoint.connect_with_connector(inner_connector).await {
       Ok(channel) => Ok(channel),
-      Err(error) => Err(RockRaftError::GrpcConnection(
-        GrpcConnectionError::CannotConnect {
-          uri: endpoint.uri().to_string(),
-          msg: error.to_string(),
-        },
-      )),
+      Err(error) => Err(Error::retryable(io::Error::other(format!(
+        "Cannot connect to {}: {}",
+        endpoint.uri(),
+        error
+      )))),
     }
   }
 
@@ -51,27 +49,16 @@ impl JoinConnectionFactory {
       format!("http://{}", addr)
     };
     match u.parse::<Uri>() {
-      Err(error) => Err(RockRaftError::GrpcConnection(
-        GrpcConnectionError::InvalidUri {
-          uri: addr.to_string(),
-          msg: error.to_string(),
-        },
-      )),
+      Err(error) => Err(Error::config(format!("Invalid URI '{}': {}", addr, error))),
       Ok(uri) => {
         let builder = Channel::builder(uri);
         let mut endpoint = if let Some(conf) = rpc_client_tls_config {
           info!("tls rpc enabled");
-          let client_tls_config =
-            Self::client_tls_config(&conf).map_err(|e| GrpcConnectionError::TLSConfigError {
-              action: "loading".to_string(),
-              msg: e.to_string(),
-            })?;
-          builder.tls_config(client_tls_config).map_err(|e| {
-            GrpcConnectionError::TLSConfigError {
-              action: "building".to_string(),
-              msg: e.to_string(),
-            }
-          })?
+          let client_tls_config = Self::client_tls_config(&conf)
+            .map_err(|e| Error::config(format!("TLS config loading error: {}", e)))?;
+          builder
+            .tls_config(client_tls_config)
+            .map_err(|e| Error::config(format!("TLS config building error: {}", e)))?
         } else {
           builder
         };
@@ -176,10 +163,10 @@ mod tests {
     // Start a mock gRPC server on a random port
     let listener = TcpListener::bind("127.0.0.1:0")
       .await
-      .map_err(|e| RockRaftError::TokioError(format!("Failed to bind TCP listener: {}", e)))?;
+      .map_err(|e| Error::internal(format!("Failed to bind TCP listener: {}", e)))?;
     let addr = listener
       .local_addr()
-      .map_err(|e| RockRaftError::TokioError(format!("Failed to get local address: {}", e)))?;
+      .map_err(|e| Error::internal(format!("Failed to get local address: {}", e)))?;
 
     // Spawn the gRPC server in a background task
     let server_handle = tokio::spawn(async move {

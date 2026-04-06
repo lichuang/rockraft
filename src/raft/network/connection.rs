@@ -22,8 +22,7 @@ use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 
-use crate::error::APIError;
-use crate::error::Result;
+use crate::error::{ApiError, Result};
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::protobuf::AppendRequest;
 use crate::raft::protobuf::RaftReply;
@@ -74,7 +73,7 @@ impl NetworkConnection {
     let reply: RaftReply = grpc_response.into_inner();
 
     if !reply.error.is_empty() {
-      let error: APIError = decode(&reply.error)?;
+      let error: ApiError = decode(&reply.error)?;
       Err(error.into())
     } else {
       let result: ForwardResponse = decode(&reply.data)?;

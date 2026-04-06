@@ -1,5 +1,4 @@
-use crate::error::Result;
-use crate::error::RockRaftError;
+use crate::error::{Error, Result};
 use hickory_resolver::TokioResolver;
 use hyper_util::client::legacy::connect::dns::Name;
 use std::net::IpAddr;
@@ -10,6 +9,7 @@ use std::sync::LazyLock;
 use std::task;
 use std::task::Context;
 use std::task::Poll;
+use std::vec::IntoIter;
 use tokio::spawn;
 use tokio::task::JoinHandle;
 
@@ -19,7 +19,7 @@ pub struct DNSResolver {
 
 static INSTANCE: LazyLock<Result<Arc<DNSResolver>>> =
   LazyLock::new(|| match TokioResolver::builder_tokio() {
-    Err(error) => Err(RockRaftError::DnsParseError(format!(
+    Err(error) => Err(Error::internal(format!(
       "DNS resolver create error: {}",
       error
     ))),
@@ -32,7 +32,7 @@ impl DNSResolver {
   pub fn instance() -> Result<Arc<DNSResolver>> {
     match INSTANCE.as_ref() {
       Ok(resolver) => Ok(resolver.clone()),
-      Err(error) => Err(RockRaftError::DnsParseError(error.to_string())),
+      Err(error) => Err(Error::internal(error.to_string())),
     }
   }
 
@@ -40,7 +40,7 @@ impl DNSResolver {
     let hostname = hostname.into();
     match self.inner.lookup_ip(hostname.clone()).await {
       Ok(lookup_ip) => Ok(lookup_ip.iter().collect::<Vec<_>>()),
-      Err(error) => Err(RockRaftError::DnsParseError(format!(
+      Err(error) => Err(Error::internal(format!(
         "Cannot lookup ip {} : {}",
         hostname, error
       ))),
@@ -53,7 +53,7 @@ pub struct DNSService;
 
 impl tower_service::Service<Name> for DNSService {
   type Response = DNSServiceAddrs;
-  type Error = RockRaftError;
+  type Error = Error;
   type Future = DNSServiceFuture;
 
   fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
@@ -80,7 +80,7 @@ pub struct DNSServiceFuture {
 }
 
 pub struct DNSServiceAddrs {
-  inner: std::vec::IntoIter<IpAddr>,
+  inner: IntoIter<IpAddr>,
 }
 
 impl Iterator for DNSServiceAddrs {
@@ -98,10 +98,7 @@ impl Future for DNSServiceFuture {
     Pin::new(&mut self.inner).poll(cx).map(|res| match res {
       Ok(Err(err)) => Err(err),
       Ok(Ok(addrs)) => Ok(addrs),
-      Err(join_err) => Err(RockRaftError::TokioError(format!(
-        "Interrupted future: {}",
-        join_err
-      ))),
+      Err(join_err) => Err(Error::internal(format!("Interrupted future: {}", join_err))),
     })
   }
 }
