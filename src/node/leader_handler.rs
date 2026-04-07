@@ -3,15 +3,16 @@ use crate::node::RaftNode;
 use crate::raft::types::AppliedState;
 use crate::raft::types::BatchWriteReq;
 use crate::raft::types::Cmd;
-use crate::raft::types::ForwardRequestBody;
-use crate::raft::types::ForwardResponse;
 use crate::raft::types::GetKVReq;
+use crate::raft::types::GetMembersReply;
 use crate::raft::types::GetMembersReq;
 use crate::raft::types::JoinRequest;
 use crate::raft::types::LeaveRequest;
 use crate::raft::types::LogEntry;
 use crate::raft::types::Node;
+use crate::raft::types::ScanPrefixReply;
 use crate::raft::types::ScanPrefixReq;
+use crate::raft::types::TxnReply;
 use crate::raft::types::TxnReq;
 use crate::raft::types::TypeConfig;
 use openraft::ChangeMembers;
@@ -81,35 +82,28 @@ impl<'a> LeaderHandler<'a> {
     self.node.raft()
   }
 
-  /// Handle a forward request body
+  /// Write a log entry to the raft cluster
   ///
-  /// This function handles different types of forward requests based on the body type.
+  /// This function writes a LogEntry to the raft log and waits for it to be applied.
   /// It can only be called on the leader node.
   ///
+  /// The `time_ms` field of the entry will be set to the current timestamp before writing.
+  ///
   /// # Arguments
-  /// * `body` - The ForwardRequestBody to handle
+  /// * `entry` - The LogEntry to write
   ///
   /// # Returns
-  /// * `Ok(ForwardResponse)` - The response to the request
-  /// * `Err(Status)` - If the operation failed
-  pub async fn handle(&self, body: ForwardRequestBody) -> Result<ForwardResponse> {
-    match body {
-      ForwardRequestBody::Join(req) => self.handle_join(req).await,
-      ForwardRequestBody::Leave(req) => self.handle_leave(req).await,
-      ForwardRequestBody::GetMembers(req) => self.handle_get_members(req).await,
-      ForwardRequestBody::Write(entry) => self.handle_write(entry).await,
-      ForwardRequestBody::GetKV(req) => self.handle_get_kv(req).await,
-      ForwardRequestBody::ScanPrefix(req) => self.handle_scan_prefix(req).await,
-      ForwardRequestBody::BatchWrite(req) => self.handle_batch_write(req).await,
-      ForwardRequestBody::Txn(req) => self.handle_txn(req).await,
-    }
+  /// * `Ok(AppliedState)` - The result of applying the log entry
+  /// * `Err(Error)` - If the operation failed or this node is not the leader
+  pub async fn write(&self, entry: LogEntry) -> Result<AppliedState> {
+    self.do_write(entry).await
   }
 
-  /// Handle join request
+  /// Join a node to the raft cluster
   ///
   /// This function adds a node to the raft cluster. It first writes a log entry
   /// to add the node, then changes the membership to include the new node as a voter.
-  async fn handle_join(&self, req: JoinRequest) -> Result<ForwardResponse> {
+  pub async fn join(&self, req: JoinRequest) -> Result<()> {
     let node_id = req.node_id;
     info!("Handling join request for node {}", node_id);
 
@@ -120,7 +114,7 @@ impl<'a> LeaderHandler<'a> {
     let voters: BTreeSet<u64> = membership.voter_ids().collect();
     if voters.contains(&node_id) {
       info!("Node {} already in membership, skipping join", node_id);
-      return Ok(ForwardResponse::Join(()));
+      return Ok(());
     }
 
     // First, sync all existing nodes to state machine (to ensure new node gets all node info)
@@ -165,14 +159,14 @@ impl<'a> LeaderHandler<'a> {
     )?;
     info!("Node {} joined successfully", node_id);
 
-    Ok(ForwardResponse::Join(()))
+    Ok(())
   }
 
-  /// Handle leave request
+  /// Leave the raft cluster (remove a node)
   ///
   /// This function removes a node from the raft cluster. It first writes a log entry
   /// to remove the node, then changes the membership to exclude the node.
-  async fn handle_leave(&self, req: LeaveRequest) -> Result<ForwardResponse> {
+  pub async fn leave(&self, req: LeaveRequest) -> Result<()> {
     let node_id = req.node_id;
 
     // Get current membership and check if node exists
@@ -182,7 +176,7 @@ impl<'a> LeaderHandler<'a> {
     let voters: BTreeSet<u64> = membership.voter_ids().collect();
     if !voters.contains(&node_id) {
       // Node not in cluster, consider it already left
-      return Ok(ForwardResponse::Leave(()));
+      return Ok(());
     }
 
     // Write a log entry to remove the node
@@ -199,79 +193,66 @@ impl<'a> LeaderHandler<'a> {
       "Failed to leave node"
     )?;
 
-    Ok(ForwardResponse::Leave(()))
+    Ok(())
   }
 
-  /// Handle write request
-  async fn handle_write(&self, entry: LogEntry) -> Result<ForwardResponse> {
-    let applied_state = map_err_log!(self.write(entry).await, "Failed to write log entry")?;
-    Ok(ForwardResponse::Write(applied_state))
-  }
-
-  /// Handle batch write request
+  /// Batch write multiple entries atomically
   ///
-  /// This function writes multiple entries atomically to the raft cluster.
   /// All entries are applied as a single log entry, ensuring atomicity.
-  async fn handle_batch_write(&self, req: BatchWriteReq) -> Result<ForwardResponse> {
+  pub async fn batch_write(&self, req: BatchWriteReq) -> Result<AppliedState> {
     if req.entries.is_empty() {
-      return Ok(ForwardResponse::BatchWrite(AppliedState::None));
+      return Ok(AppliedState::None);
     }
 
     let entry = LogEntry::new(Cmd::BatchUpsertKV {
       entries: req.entries,
     });
 
-    let applied_state = map_err_log!(self.write(entry).await, "Failed to write batch log entry")?;
-    Ok(ForwardResponse::BatchWrite(applied_state))
+    map_err_log!(
+      self.do_write(entry).await,
+      "Failed to write batch log entry"
+    )
   }
 
-  /// Handle get_kv request
-  async fn handle_get_kv(&self, req: GetKVReq) -> Result<ForwardResponse> {
-    let value = map_err_log!(
+  /// Read a value from the KV store
+  pub async fn read(&self, req: GetKVReq) -> Result<Option<Vec<u8>>> {
+    map_err_log!(
       self.node.state_machine().get_kv(&req.key),
       "Failed to get kv"
-    )?;
-    Ok(ForwardResponse::GetKV(value))
+    )
   }
 
-  /// Handle scan_prefix request
+  /// Scan key-value pairs with the given prefix
   ///
-  /// This function scans all key-value pairs with the given prefix from the KV store.
   /// Note: This is a read-only operation and can be handled by any node, but for
   /// consistency, it's forwarded to the leader.
-  async fn handle_scan_prefix(&self, req: ScanPrefixReq) -> Result<ForwardResponse> {
-    let results = map_err_log!(
+  pub async fn scan_prefix(&self, req: ScanPrefixReq) -> Result<ScanPrefixReply> {
+    map_err_log!(
       self.node.state_machine().scan_prefix(&req.prefix),
       "Failed to scan prefix"
-    )?;
-    Ok(ForwardResponse::ScanPrefix(results))
+    )
   }
 
-  /// Handle get_members request
+  /// Get the current cluster members
   ///
-  /// This function returns the current cluster members.
   /// Note: This operation can be handled by any node, not just the leader.
-  async fn handle_get_members(&self, _req: GetMembersReq) -> Result<ForwardResponse> {
-    let nodes = map_err_log!(
+  pub async fn get_members(&self, _req: GetMembersReq) -> Result<GetMembersReply> {
+    map_err_log!(
       self.node.state_machine().get_nodes(),
       "Failed to get members"
-    )?;
-    Ok(ForwardResponse::GetMembers(nodes))
+    )
   }
 
-  /// Handle transaction request
+  /// Execute a transaction
   ///
-  /// This function executes a transaction that checks conditions and performs
+  /// Executes a transaction that checks conditions and performs
   /// operations atomically based on the condition results.
-  async fn handle_txn(&self, req: TxnReq) -> Result<ForwardResponse> {
+  pub async fn txn(&self, req: TxnReq) -> Result<TxnReply> {
     // Build a transaction command
     let entry = LogEntry::new(Cmd::Txn { req, result: None });
 
-    match map_err_log!(self.write(entry).await, "Failed to execute transaction")? {
-      AppliedState::Txn(reply) => {
-        // Transaction was applied successfully
-        Ok(ForwardResponse::Txn(reply))
-      }
+    match map_err_log!(self.do_write(entry).await, "Failed to execute transaction")? {
+      AppliedState::Txn(reply) => Ok(reply),
       _ => {
         // Should not happen - Txn command always returns AppliedState::Txn
         error!("Unexpected AppliedState from transaction");
@@ -280,7 +261,10 @@ impl<'a> LeaderHandler<'a> {
     }
   }
 
-  /// Write a log entry to the raft cluster
+  /// Internal write method
+  ///
+  /// This is the core implementation that all write operations use.
+  /// The public `write` method delegates to this.
   ///
   /// This function writes a LogEntry to the raft log and waits for it to be applied.
   /// It can only be called on the leader node.
@@ -293,7 +277,7 @@ impl<'a> LeaderHandler<'a> {
   /// # Returns
   /// * `Ok(AppliedState)` - The result of applying the log entry
   /// * `Err(Error)` - If the operation failed or this node is not the leader
-  pub async fn write(&self, mut entry: LogEntry) -> Result<AppliedState> {
+  async fn do_write(&self, mut entry: LogEntry) -> Result<AppliedState> {
     // Set the current timestamp in milliseconds, safe to unwrap
     let now = SystemTime::now()
       .duration_since(UNIX_EPOCH)

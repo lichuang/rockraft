@@ -46,6 +46,10 @@ use crate::raft::types::{
 };
 use crate::service::RaftServiceImpl;
 
+/// Retry configuration for forward operations
+const MAX_RETRIES: u32 = 20;
+const RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
 pub struct RaftNode {
   #[allow(dead_code)]
   engine: Arc<RocksDBEngine>,
@@ -505,15 +509,32 @@ impl RaftNode {
   pub async fn write(&self, entry: LogEntry) -> Result<AppliedState> {
     debug!("write log entry: {:?}", entry);
 
+    // Check if this node is the leader
+    match self.assume_leader().await {
+      Ok(leader) => leader.write(entry).await,
+      Err(forward_err) => {
+        // Forward to remote leader
+        self
+          .forward_write_to_leader(forward_err.leader_id, entry)
+          .await
+      }
+    }
+  }
+
+  async fn forward_write_to_leader(
+    &self,
+    leader_id: Option<NodeId>,
+    entry: LogEntry,
+  ) -> Result<AppliedState> {
     let request = ForwardRequest {
       forward_to_leader: 1,
       body: ForwardRequestBody::Write(entry),
     };
 
-    match self.handle_forward_request(request).await {
-      Ok(ForwardResponse::Write(applied_state)) => Ok(applied_state),
-      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+    let response = self.forward_with_leader_id(leader_id, request).await?;
+    match response {
+      ForwardResponse::Write(applied_state) => Ok(applied_state),
+      _ => Err(Error::internal("Unexpected response type from leader")),
     }
   }
 
@@ -535,15 +556,21 @@ impl RaftNode {
   pub async fn batch_write(&self, req: BatchWriteReq) -> Result<BatchWriteReply> {
     debug!("batch write: {:?}", req);
 
-    let request = ForwardRequest {
-      forward_to_leader: 1,
-      body: ForwardRequestBody::BatchWrite(req),
-    };
-
-    match self.handle_forward_request(request).await {
-      Ok(ForwardResponse::BatchWrite(applied_state)) => Ok(applied_state),
-      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+    match self.assume_leader().await {
+      Ok(leader) => leader.batch_write(req).await,
+      Err(forward_err) => {
+        let request = ForwardRequest {
+          forward_to_leader: 1,
+          body: ForwardRequestBody::BatchWrite(req),
+        };
+        let response = self
+          .forward_with_leader_id(forward_err.leader_id, request)
+          .await?;
+        match response {
+          ForwardResponse::BatchWrite(applied_state) => Ok(applied_state),
+          _ => Err(Error::internal("Unexpected response type from leader")),
+        }
+      }
     }
   }
 
@@ -571,15 +598,21 @@ impl RaftNode {
   pub async fn txn(&self, req: TxnReq) -> Result<TxnReply> {
     debug!("transaction: {:?}", req);
 
-    let request = ForwardRequest {
-      forward_to_leader: 1,
-      body: ForwardRequestBody::Txn(req),
-    };
-
-    match self.handle_forward_request(request).await {
-      Ok(ForwardResponse::Txn(reply)) => Ok(reply),
-      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+    match self.assume_leader().await {
+      Ok(leader) => leader.txn(req).await,
+      Err(forward_err) => {
+        let request = ForwardRequest {
+          forward_to_leader: 1,
+          body: ForwardRequestBody::Txn(req),
+        };
+        let response = self
+          .forward_with_leader_id(forward_err.leader_id, request)
+          .await?;
+        match response {
+          ForwardResponse::Txn(reply) => Ok(reply),
+          _ => Err(Error::internal("Unexpected response type from leader")),
+        }
+      }
     }
   }
 
@@ -644,15 +677,21 @@ impl RaftNode {
   pub async fn read(&self, req: GetKVReq) -> Result<GetKVReply> {
     debug!("read kv: {:?}", req);
 
-    let request = ForwardRequest {
-      forward_to_leader: 1,
-      body: ForwardRequestBody::GetKV(req),
-    };
-
-    match self.handle_forward_request(request).await {
-      Ok(ForwardResponse::GetKV(value)) => Ok(value),
-      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+    match self.assume_leader().await {
+      Ok(leader) => leader.read(req).await,
+      Err(forward_err) => {
+        let request = ForwardRequest {
+          forward_to_leader: 1,
+          body: ForwardRequestBody::GetKV(req),
+        };
+        let response = self
+          .forward_with_leader_id(forward_err.leader_id, request)
+          .await?;
+        match response {
+          ForwardResponse::GetKV(value) => Ok(value),
+          _ => Err(Error::internal("Unexpected response type from leader")),
+        }
+      }
     }
   }
 
@@ -671,15 +710,21 @@ impl RaftNode {
   pub async fn scan_prefix(&self, req: ScanPrefixReq) -> Result<ScanPrefixReply> {
     debug!("scan_prefix: {:?}", req);
 
-    let request = ForwardRequest {
-      forward_to_leader: 1,
-      body: ForwardRequestBody::ScanPrefix(req),
-    };
-
-    match self.handle_forward_request(request).await {
-      Ok(ForwardResponse::ScanPrefix(results)) => Ok(results),
-      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+    match self.assume_leader().await {
+      Ok(leader) => leader.scan_prefix(req).await,
+      Err(forward_err) => {
+        let request = ForwardRequest {
+          forward_to_leader: 1,
+          body: ForwardRequestBody::ScanPrefix(req),
+        };
+        let response = self
+          .forward_with_leader_id(forward_err.leader_id, request)
+          .await?;
+        match response {
+          ForwardResponse::ScanPrefix(results) => Ok(results),
+          _ => Err(Error::internal("Unexpected response type from leader")),
+        }
+      }
     }
   }
 
@@ -697,15 +742,24 @@ impl RaftNode {
   pub async fn join(&self, req: JoinRequest) -> Result<()> {
     debug!("join node: {:?}", req);
 
-    let request = ForwardRequest {
-      forward_to_leader: 1,
-      body: ForwardRequestBody::Join(req),
-    };
-
-    match self.handle_forward_request(request).await {
-      Ok(ForwardResponse::Join(())) => Ok(()),
-      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+    match self.assume_leader().await {
+      Ok(leader) => {
+        leader.join(req).await?;
+        Ok(())
+      }
+      Err(forward_err) => {
+        let request = ForwardRequest {
+          forward_to_leader: 1,
+          body: ForwardRequestBody::Join(req),
+        };
+        let response = self
+          .forward_with_leader_id(forward_err.leader_id, request)
+          .await?;
+        match response {
+          ForwardResponse::Join(()) => Ok(()),
+          _ => Err(Error::internal("Unexpected response type from leader")),
+        }
+      }
     }
   }
 
@@ -723,15 +777,24 @@ impl RaftNode {
   pub async fn leave(&self, req: LeaveRequest) -> Result<()> {
     debug!("leave node: {:?}", req);
 
-    let request = ForwardRequest {
-      forward_to_leader: 1,
-      body: ForwardRequestBody::Leave(req),
-    };
-
-    match self.handle_forward_request(request).await {
-      Ok(ForwardResponse::Leave(())) => Ok(()),
-      Ok(_) => Err(Error::internal("Unexpected response type from leader")),
-      Err(e) => Err(e),
+    match self.assume_leader().await {
+      Ok(leader) => {
+        leader.leave(req).await?;
+        Ok(())
+      }
+      Err(forward_err) => {
+        let request = ForwardRequest {
+          forward_to_leader: 1,
+          body: ForwardRequestBody::Leave(req),
+        };
+        let response = self
+          .forward_with_leader_id(forward_err.leader_id, request)
+          .await?;
+        match response {
+          ForwardResponse::Leave(()) => Ok(()),
+          _ => Err(Error::internal("Unexpected response type from leader")),
+        }
+      }
     }
   }
 
@@ -749,16 +812,9 @@ impl RaftNode {
   pub async fn get_members(&self, req: GetMembersReq) -> Result<GetMembersReply> {
     debug!("get members: {:?}", req);
 
-    // This operation can be handled by any node, use LeaderHandler for code reuse
+    // This operation can be handled by any node via LeaderHandler
     let leader_handler = LeaderHandler::new(self);
-    match leader_handler
-      .handle(ForwardRequestBody::GetMembers(req))
-      .await
-    {
-      Ok(ForwardResponse::GetMembers(members)) => Ok(members),
-      Ok(_) => Err(Error::internal("Unexpected response type")),
-      Err(e) => Err(e),
-    }
+    leader_handler.get_members(req).await
   }
 
   async fn forward_request_to_leader(
@@ -799,22 +855,22 @@ impl RaftNode {
     error.is_retryable()
   }
 
+  /// Handle a forwarded request (gRPC entry point)
+  ///
+  /// This is the entry point for requests coming from other nodes via gRPC.
+  /// It handles the request using LeaderHandler if this node is leader,
+  /// or forwards to the actual leader if not.
   pub async fn handle_forward_request(&self, request: ForwardRequest) -> Result<ForwardResponse> {
     debug!("recv forward req: {:?}", request);
 
-    const MAX_RETRIES: u32 = 20;
-    const RETRY_INTERVAL: Duration = Duration::from_secs(1);
-
     for attempt in 0..MAX_RETRIES {
-      // Check if this node is the leader
       match self.assume_leader().await {
-        Ok(_) => {
-          // This node is leader, handle the request using LeaderHandler
-          let leader_handler = LeaderHandler::new(self);
-          return leader_handler.handle(request.body.clone()).await;
+        Ok(leader) => {
+          // This node is leader, handle using LeaderHandler
+          return Self::dispatch_leader_handler(leader, request.body).await;
         }
         Err(forward_err) => {
-          // This node is not the leader, forward the entire request to the leader
+          // Forward to the actual leader
           let retry_reason = match forward_err.leader_id {
             Some(leader_id) => {
               match self
@@ -823,7 +879,6 @@ impl RaftNode {
               {
                 Ok(response) => return Ok(response),
                 Err(e) => {
-                  // Only retry on retriable errors, otherwise return the error
                   if Self::is_retriable_error(&e) {
                     Some(format!("Failed to forward request ({e})"))
                   } else {
@@ -832,13 +887,9 @@ impl RaftNode {
                 }
               }
             }
-            None => {
-              // No leader available, need to retry
-              Some("No leader available to forward request".to_string())
-            }
+            None => Some("No leader available to forward request".to_string()),
           };
 
-          // Retry if we have a reason and attempts remain
           if let Some(reason) = retry_reason
             && attempt < MAX_RETRIES - 1
           {
@@ -857,6 +908,67 @@ impl RaftNode {
     Err(Error::internal(
       "No leader available to forward request after max retries",
     ))
+  }
+
+  /// Dispatch a request body to the appropriate LeaderHandler method
+  ///
+  /// This is a compatibility layer that routes ForwardRequestBody to the
+  /// corresponding type-safe LeaderHandler method.
+  async fn dispatch_leader_handler(
+    leader: LeaderHandler<'_>,
+    body: ForwardRequestBody,
+  ) -> Result<ForwardResponse> {
+    match body {
+      ForwardRequestBody::Write(entry) => {
+        let result = leader.write(entry).await?;
+        Ok(ForwardResponse::Write(result))
+      }
+      ForwardRequestBody::BatchWrite(req) => {
+        let result = leader.batch_write(req).await?;
+        Ok(ForwardResponse::BatchWrite(result))
+      }
+      ForwardRequestBody::Txn(req) => {
+        let result = leader.txn(req).await?;
+        Ok(ForwardResponse::Txn(result))
+      }
+      ForwardRequestBody::GetKV(req) => {
+        let result = leader.read(req).await?;
+        Ok(ForwardResponse::GetKV(result))
+      }
+      ForwardRequestBody::ScanPrefix(req) => {
+        let result = leader.scan_prefix(req).await?;
+        Ok(ForwardResponse::ScanPrefix(result))
+      }
+      ForwardRequestBody::Join(req) => {
+        leader.join(req).await?;
+        Ok(ForwardResponse::Join(()))
+      }
+      ForwardRequestBody::Leave(req) => {
+        leader.leave(req).await?;
+        Ok(ForwardResponse::Leave(()))
+      }
+      ForwardRequestBody::GetMembers(req) => {
+        let result = leader.get_members(req).await?;
+        Ok(ForwardResponse::GetMembers(result))
+      }
+    }
+  }
+
+  /// Forward a request to a specific leader by ID
+  ///
+  /// Looks up the leader's endpoint and forwards the request via gRPC.
+  async fn forward_with_leader_id(
+    &self,
+    leader_id: Option<NodeId>,
+    request: ForwardRequest,
+  ) -> Result<ForwardResponse> {
+    let leader_id = leader_id.ok_or_else(|| {
+      Error::retryable(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "No leader available",
+      ))
+    })?;
+    self.forward_request_to_leader(leader_id, request).await
   }
 }
 
