@@ -28,6 +28,38 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
+/// Helper macro to convert errors with logging.
+///
+/// Usage: `map_err_log!(result, "operation name")`
+///
+/// This logs the error at error level with the operation name and returns
+/// an `Error::internal` with a descriptive message.
+#[macro_export]
+macro_rules! map_err_log {
+  ($result:expr, $context:expr) => {
+    $result.map_err(|e| {
+      error!("{}: {:?}", $context, e);
+      Error::internal(format!("{}: {}", $context, e))
+    })
+  };
+}
+
+/// Helper macro to convert RaftError to internal Error with logging.
+#[macro_export]
+macro_rules! map_raft_err_log {
+  ($result:expr, $context:expr) => {
+    $result.map_err(|e| {
+      error!("{}: {:?}", $context, e);
+      match e {
+        RaftError::APIError(api_err) => Error::internal(format!("{}: {}", $context, api_err)),
+        RaftError::Fatal(fatal_err) => {
+          Error::internal(format!("{}: fatal raft error: {}", $context, fatal_err))
+        }
+      }
+    })
+  };
+}
+
 /// LeaderHandler provides methods that can only be called on a leader node
 pub struct LeaderHandler<'a> {
   node: &'a RaftNode,
@@ -100,11 +132,9 @@ impl<'a> LeaderHandler<'a> {
         overriding: true,
       });
       if let Err(e) = self.write(entry).await {
-        error!("Failed to sync node {}: {:?}", id, e);
-        return Err(Error::internal(format!(
-          "Failed to sync node {}: {}",
-          id, e
-        )));
+        let msg = format!("Failed to sync node {}: {}", id, e);
+        error!(msg);
+        return Err(Error::internal(msg));
       }
     }
 
@@ -120,10 +150,7 @@ impl<'a> LeaderHandler<'a> {
       overriding: false,
     });
 
-    if let Err(e) = self.write(entry).await {
-      error!("Failed to write AddNode entry: {:?}", e);
-      return Err(Error::internal(format!("Failed to join node: {}", e)));
-    }
+    map_err_log!(self.write(entry).await, "Failed to join node")?;
     info!("AddNode command written successfully for node {}", node_id);
 
     // Change membership to add the new node as voter (retain removed voters as learners)
@@ -132,10 +159,10 @@ impl<'a> LeaderHandler<'a> {
     add_voters.insert(node_id, node);
 
     let msg = ChangeMembers::AddVoters(add_voters);
-    if let Err(e) = self.raft().change_membership(msg, false).await {
-      error!("Failed to change membership: {:?}", e);
-      return Err(Error::internal(format!("Failed to join node: {}", e)));
-    }
+    map_err_log!(
+      self.raft().change_membership(msg, false).await,
+      "Failed to join node"
+    )?;
     info!("Node {} joined successfully", node_id);
 
     Ok(ForwardResponse::Join(()))
@@ -161,32 +188,24 @@ impl<'a> LeaderHandler<'a> {
     // Write a log entry to remove the node
     let entry = LogEntry::new(Cmd::RemoveNode { node_id });
 
-    if let Err(e) = self.write(entry).await {
-      error!("Failed to leave node: {:?}", e);
-      return Err(Error::internal(format!("Failed to leave node: {}", e)));
-    }
+    map_err_log!(self.write(entry).await, "Failed to leave node")?;
 
     // Change membership to remove the node
     let mut remove_voters: BTreeSet<u64> = BTreeSet::new();
     remove_voters.insert(node_id);
 
-    if let Err(e) = self.raft().change_membership(remove_voters, true).await {
-      error!("Failed to leave node: {:?}", e);
-      return Err(Error::internal(format!("Failed to leave node: {}", e)));
-    }
+    map_err_log!(
+      self.raft().change_membership(remove_voters, true).await,
+      "Failed to leave node"
+    )?;
 
     Ok(ForwardResponse::Leave(()))
   }
 
   /// Handle write request
   async fn handle_write(&self, entry: LogEntry) -> Result<ForwardResponse> {
-    match self.write(entry).await {
-      Ok(applied_state) => Ok(ForwardResponse::Write(applied_state)),
-      Err(e) => {
-        error!("Failed to write log entry: {:?}", e);
-        Err(Error::internal(format!("Failed to write log entry: {}", e)))
-      }
-    }
+    let applied_state = map_err_log!(self.write(entry).await, "Failed to write log entry")?;
+    Ok(ForwardResponse::Write(applied_state))
   }
 
   /// Handle batch write request
@@ -202,27 +221,17 @@ impl<'a> LeaderHandler<'a> {
       entries: req.entries,
     });
 
-    match self.write(entry).await {
-      Ok(applied_state) => Ok(ForwardResponse::BatchWrite(applied_state)),
-      Err(e) => {
-        error!("Failed to write batch log entry: {:?}", e);
-        Err(Error::internal(format!(
-          "Failed to write batch log entry: {}",
-          e
-        )))
-      }
-    }
+    let applied_state = map_err_log!(self.write(entry).await, "Failed to write batch log entry")?;
+    Ok(ForwardResponse::BatchWrite(applied_state))
   }
 
   /// Handle get_kv request
   async fn handle_get_kv(&self, req: GetKVReq) -> Result<ForwardResponse> {
-    match self.node.state_machine().get_kv(&req.key) {
-      Ok(value) => Ok(ForwardResponse::GetKV(value)),
-      Err(e) => {
-        error!("Failed to get kv: {:?}", e);
-        Err(Error::internal(format!("Failed to get kv: {}", e)))
-      }
-    }
+    let value = map_err_log!(
+      self.node.state_machine().get_kv(&req.key),
+      "Failed to get kv"
+    )?;
+    Ok(ForwardResponse::GetKV(value))
   }
 
   /// Handle scan_prefix request
@@ -231,13 +240,11 @@ impl<'a> LeaderHandler<'a> {
   /// Note: This is a read-only operation and can be handled by any node, but for
   /// consistency, it's forwarded to the leader.
   async fn handle_scan_prefix(&self, req: ScanPrefixReq) -> Result<ForwardResponse> {
-    match self.node.state_machine().scan_prefix(&req.prefix) {
-      Ok(results) => Ok(ForwardResponse::ScanPrefix(results)),
-      Err(e) => {
-        error!("Failed to scan prefix: {:?}", e);
-        Err(Error::internal(format!("Failed to scan prefix: {}", e)))
-      }
-    }
+    let results = map_err_log!(
+      self.node.state_machine().scan_prefix(&req.prefix),
+      "Failed to scan prefix"
+    )?;
+    Ok(ForwardResponse::ScanPrefix(results))
   }
 
   /// Handle get_members request
@@ -245,13 +252,11 @@ impl<'a> LeaderHandler<'a> {
   /// This function returns the current cluster members.
   /// Note: This operation can be handled by any node, not just the leader.
   async fn handle_get_members(&self, _req: GetMembersReq) -> Result<ForwardResponse> {
-    match self.node.state_machine().get_nodes() {
-      Ok(nodes) => Ok(ForwardResponse::GetMembers(nodes)),
-      Err(e) => {
-        error!("Failed to get members: {:?}", e);
-        Err(Error::internal(format!("Failed to get members: {}", e)))
-      }
-    }
+    let nodes = map_err_log!(
+      self.node.state_machine().get_nodes(),
+      "Failed to get members"
+    )?;
+    Ok(ForwardResponse::GetMembers(nodes))
   }
 
   /// Handle transaction request
@@ -262,22 +267,15 @@ impl<'a> LeaderHandler<'a> {
     // Build a transaction command
     let entry = LogEntry::new(Cmd::Txn { req, result: None });
 
-    match self.write(entry).await {
-      Ok(AppliedState::Txn(reply)) => {
+    match map_err_log!(self.write(entry).await, "Failed to execute transaction")? {
+      AppliedState::Txn(reply) => {
         // Transaction was applied successfully
         Ok(ForwardResponse::Txn(reply))
       }
-      Ok(_) => {
+      _ => {
         // Should not happen - Txn command always returns AppliedState::Txn
         error!("Unexpected AppliedState from transaction");
         Err(Error::internal("Unexpected response from transaction"))
-      }
-      Err(e) => {
-        error!("Failed to execute transaction: {:?}", e);
-        Err(Error::internal(format!(
-          "Failed to execute transaction: {}",
-          e
-        )))
       }
     }
   }
@@ -320,14 +318,14 @@ impl<'a> LeaderHandler<'a> {
           error = %e,
           "Failed to write log entry"
         );
-        match e {
+        Err(match e {
           RaftError::APIError(api_err) => {
-            Err(Error::internal(format!("client write error: {}", api_err)))
+            Error::internal(format!("client write error: {}", api_err))
           }
           RaftError::Fatal(fatal_err) => {
-            Err(Error::internal(format!("fatal raft error: {}", fatal_err)))
+            Error::internal(format!("fatal raft error: {}", fatal_err))
           }
-        }
+        })
       }
     }
   }

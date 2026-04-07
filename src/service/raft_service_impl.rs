@@ -18,6 +18,18 @@ use crate::raft::types::{ForwardRequest, ForwardResponse, Snapshot, TypeConfig, 
 use openraft::async_runtime::watch::WatchReceiver;
 use pb::raft_service_server::RaftService;
 
+/// Helper trait for converting errors to tonic::Status
+trait IntoStatus<T> {
+  /// Convert error to Status::internal with the given context message
+  fn map_internal(self, context: &str) -> Result<T, Status>;
+}
+
+impl<T, E: std::fmt::Display> IntoStatus<T> for Result<T, E> {
+  fn map_internal(self, context: &str) -> Result<T, Status> {
+    self.map_err(|e| Status::internal(format!("{}: {}", context, e)))
+  }
+}
+
 /// State for receiving a snapshot chunk
 struct StreamingSnapshot {
   snapshot_id: String,
@@ -65,8 +77,8 @@ impl RaftService for RaftServiceImpl {
     request: Request<pb::RaftRequest>,
   ) -> Result<Response<pb::RaftReply>, Status> {
     let req = request.into_inner();
-    let forward_req: ForwardRequest = decode(&req.data)
-      .map_err(|e| Status::internal(format!("Failed to deserialize forward request: {}", e)))?;
+    let forward_req: ForwardRequest =
+      decode(&req.data).map_internal("Failed to deserialize forward request")?;
     let response = self.node.handle_forward_request(forward_req).await;
     let reply = Self::result_to_raft_reply(response);
     Ok(Response::new(reply))
@@ -80,8 +92,8 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
 
     // Deserialize the request
-    let append_req: AppendEntriesRequest<TypeConfig> = decode(&req.value)
-      .map_err(|e| Status::internal(format!("Failed to deserialize append request: {}", e)))?;
+    let append_req: AppendEntriesRequest<TypeConfig> =
+      decode(&req.value).map_internal("Failed to deserialize append request")?;
 
     // Forward to Raft instance
     let result = self
@@ -89,11 +101,10 @@ impl RaftService for RaftServiceImpl {
       .raft()
       .append_entries(append_req)
       .await
-      .map_err(|e| Status::internal(format!("AppendEntries failed: {}", e)))?;
+      .map_internal("AppendEntries failed")?;
 
     // Serialize the response
-    let response_data = encode(&result)
-      .map_err(|e| Status::internal(format!("Failed to serialize append response: {}", e)))?;
+    let response_data = encode(&result).map_internal("Failed to serialize append response")?;
 
     let reply = pb::AppendReply {
       value: response_data,
@@ -110,8 +121,8 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
 
     // Deserialize the request
-    let vote_req: VoteRequest<TypeConfig> = decode(&req.value)
-      .map_err(|e| Status::internal(format!("Failed to deserialize vote request: {}", e)))?;
+    let vote_req: VoteRequest<TypeConfig> =
+      decode(&req.value).map_internal("Failed to deserialize vote request")?;
 
     // Forward to Raft instance
     let result = self
@@ -119,11 +130,10 @@ impl RaftService for RaftServiceImpl {
       .raft()
       .vote(vote_req)
       .await
-      .map_err(|e| Status::internal(format!("Vote failed: {}", e)))?;
+      .map_internal("Vote failed")?;
 
     // Serialize the response
-    let response_data = encode(&result)
-      .map_err(|e| Status::internal(format!("Failed to serialize vote response: {}", e)))?;
+    let response_data = encode(&result).map_internal("Failed to serialize vote response")?;
 
     let reply = pb::VoteReply {
       value: response_data,
@@ -143,8 +153,8 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
 
     // Deserialize the request
-    let snapshot_req: InstallSnapshotRequest<TypeConfig> = decode(&req.value)
-      .map_err(|e| Status::internal(format!("Failed to deserialize snapshot request: {}", e)))?;
+    let snapshot_req: InstallSnapshotRequest<TypeConfig> =
+      decode(&req.value).map_internal("Failed to deserialize snapshot request")?;
 
     let vote = snapshot_req.vote;
     let snapshot_id = snapshot_req.meta.snapshot_id.clone();
@@ -171,7 +181,7 @@ impl RaftService for RaftServiceImpl {
       // Create a temporary file for receiving the snapshot
       let std_file =
         File::create(std::env::temp_dir().join(format!("rockraft_snapshot_{}", snapshot_id)))
-          .map_err(|e| Status::internal(format!("Failed to create temp file: {}", e)))?;
+          .map_internal("Failed to create temp file")?;
       let tokio_file = tokio::fs::File::from_std(std_file);
 
       streaming_guard.insert(
@@ -193,13 +203,13 @@ impl RaftService for RaftServiceImpl {
       .data
       .seek(SeekFrom::Start(offset))
       .await
-      .map_err(|e| Status::internal(format!("Failed to seek: {}", e)))?;
+      .map_internal("Failed to seek")?;
 
     streaming
       .data
       .write_all(&snapshot_req.data)
       .await
-      .map_err(|e| Status::internal(format!("Failed to write snapshot data: {}", e)))?;
+      .map_internal("Failed to write snapshot data")?;
 
     // If done, finalize the snapshot
     if done {
@@ -213,7 +223,7 @@ impl RaftService for RaftServiceImpl {
       data
         .shutdown()
         .await
-        .map_err(|e| Status::internal(format!("Failed to shutdown file: {}", e)))?;
+        .map_internal("Failed to shutdown file")?;
 
       // Create the snapshot and install it
       let snapshot = Snapshot {
@@ -226,11 +236,10 @@ impl RaftService for RaftServiceImpl {
         .raft()
         .install_full_snapshot(vote, snapshot)
         .await
-        .map_err(|e| Status::internal(format!("InstallFullSnapshot failed: {}", e)))?;
+        .map_internal("InstallFullSnapshot failed")?;
 
       // Serialize the response
-      let response_data = encode(&result)
-        .map_err(|e| Status::internal(format!("Failed to serialize snapshot response: {}", e)))?;
+      let response_data = encode(&result).map_internal("Failed to serialize snapshot response")?;
 
       let reply = pb::SnapshotReply {
         value: response_data,
@@ -242,8 +251,7 @@ impl RaftService for RaftServiceImpl {
     // Return intermediate response with current vote
     let my_vote = WatchReceiver::borrow_watched(&self.node.raft().metrics()).vote;
     let resp = InstallSnapshotResponse::<TypeConfig> { vote: my_vote };
-    let response_data = encode(&resp)
-      .map_err(|e| Status::internal(format!("Failed to serialize snapshot response: {}", e)))?;
+    let response_data = encode(&resp).map_internal("Failed to serialize snapshot response")?;
 
     let reply = pb::SnapshotReply {
       value: response_data,
