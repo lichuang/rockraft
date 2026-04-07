@@ -269,7 +269,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
   println!("Configuration loaded:");
   println!("  node_id: {}", config.base.node_id);
-  println!("  raft_addr: {}", config.base.raft.address);
+  println!("  raft_addr: {}", config.base.raft.endpoint);
   println!("  http_addr: {}", config.http_addr);
   println!("  data_path: {}", config.base.rocksdb.data_path);
   println!("  single: {}", config.base.raft.single);

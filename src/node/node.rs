@@ -27,7 +27,6 @@ use openraft::async_runtime::watch::WatchReceiver;
 use tonic::transport::Server;
 
 use super::LeaderHandler;
-use super::parsed_config::ParsedConfig;
 use crate::config::Config;
 use crate::engine::RocksDBEngine;
 use crate::raft::grpc_client::ClientPool;
@@ -55,7 +54,7 @@ pub struct RaftNode {
   engine: Arc<RocksDBEngine>,
   raft: Arc<Raft<TypeConfig>>,
 
-  config: ParsedConfig,
+  config: Config,
 
   #[allow(dead_code)]
   factory: NetworkFactory,
@@ -136,7 +135,7 @@ impl RaftNode {
     Ok(Arc::new(Self {
       engine,
       raft,
-      config: ParsedConfig::from(config)?,
+      config: config.clone(),
       factory,
       state_machine: Arc::new(state_machine),
       shutdown_tx,
@@ -150,10 +149,10 @@ impl RaftNode {
 
     Self::start_raft_service(raft_node.clone()).await?;
 
-    if config.raft_single {
+    if config.raft.single {
       let node = Node {
         node_id: config.node_id,
-        endpoint: config.raft_endpoint.clone(),
+        endpoint: config.raft.endpoint.clone(),
       };
       raft_node.init_cluster(node).await?;
     } else {
@@ -168,7 +167,7 @@ impl RaftNode {
   /// This function spawns the gRPC server in a background task and waits for
   /// the service to successfully bind to the endpoint before returning.
   async fn start_raft_service(raft_node: Arc<Self>) -> Result<()> {
-    let raft_endpoint = raft_node.config.raft_endpoint.clone();
+    let raft_endpoint = raft_node.config.raft.endpoint.clone();
 
     // Subscribe to shutdown signal
     let mut shutdown_rx = raft_node.shutdown_tx.subscribe();
@@ -385,7 +384,7 @@ impl RaftNode {
 
   pub async fn join_cluster(&self) -> Result<()> {
     let config = &self.config;
-    if config.raft_join.is_empty() {
+    if config.raft.join.is_empty() {
       info!("'--join' is empty, do not need joining cluster");
       return Ok(());
     }
@@ -401,10 +400,10 @@ impl RaftNode {
 
   async fn do_join_cluster(&self) -> Result<()> {
     let config = &self.config;
-    let addrs = &config.raft_join;
+    let addrs = &config.raft.join;
     let mut errors = vec![];
-    let raft_address = config.raft_endpoint.to_string();
-    let raft_advertise_address = config.raft_advertise_endpoint.to_string();
+    let raft_address = config.raft.endpoint.to_string();
+    let raft_advertise_address = config.raft.advertise_endpoint.to_string();
 
     for addr in addrs {
       if addr == &raft_address || addr == &raft_advertise_address {
@@ -475,7 +474,7 @@ impl RaftNode {
 
     let join_req = JoinRequest {
       node_id: config.node_id,
-      endpoint: config.raft_endpoint.clone(),
+      endpoint: config.raft.endpoint.clone(),
     };
 
     let req = ForwardRequest {
@@ -982,11 +981,14 @@ mod tests {
 
   /// Helper function to create a test config
   fn create_test_config(data_dir: &str, node_id: u64, addr: &str) -> Config {
+    use crate::config::Endpoint;
+
+    let endpoint = Endpoint::parse(addr).expect("Invalid test address");
     Config {
       node_id,
       raft: RaftConfig {
-        address: addr.to_string(),
-        advertise_host: "".to_string(),
+        endpoint: endpoint.clone(),
+        advertise_endpoint: endpoint,
         single: true,
         join: vec![],
       },

@@ -1,7 +1,8 @@
-use super::config::{RaftConfig, RocksdbConfig};
+use super::config::RawRaftConfig;
+use super::config::RocksdbConfig;
 
-pub fn default_raft_config() -> RaftConfig {
-  RaftConfig {
+pub fn default_raft_config() -> RawRaftConfig {
+  RawRaftConfig {
     address: "127.0.0.1:6682".to_string(),
     advertise_host: "localhost".to_string(),
     single: true,

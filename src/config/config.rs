@@ -1,59 +1,130 @@
-use std::net::SocketAddr;
-
 use serde::Deserialize;
 use serde::Serialize;
 
 use super::default::default_raft_config;
 use super::default::default_rocksdb_config;
+use super::endpoint::Endpoint;
 use crate::error::{Error, Result};
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+/// Node configuration with all fields parsed and validated.
+///
+/// This struct is the single source of truth for configuration.
+/// All string parsing (e.g., address strings to Endpoint) happens during construction.
+#[derive(Debug, Clone)]
 pub struct Config {
+  pub node_id: u64,
+  pub raft: RaftConfig,
+  pub rocksdb: RocksdbConfig,
+}
+
+/// RocksDB configuration
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RocksdbConfig {
+  pub data_path: String,
+  pub max_open_files: i32,
+}
+
+/// Raft configuration with parsed endpoints
+#[derive(Debug, Clone)]
+pub struct RaftConfig {
+  /// The endpoint this node listens on (parsed from address string)
+  pub endpoint: Endpoint,
+  /// The advertised endpoint for other nodes to connect to
+  pub advertise_endpoint: Endpoint,
+  /// Single node raft cluster
+  pub single: bool,
+  /// Addresses of nodes to join
+  pub join: Vec<String>,
+}
+
+/// Raw configuration for deserialization
+///
+/// This is an internal struct used only for deserializing from files/JSON.
+/// Users should use `Config` which has all fields parsed.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub(crate) struct RawConfig {
   pub node_id: u64,
 
   #[serde(default = "default_raft_config")]
-  pub raft: RaftConfig,
+  pub raft: RawRaftConfig,
 
   #[serde(default = "default_rocksdb_config")]
   pub rocksdb: RocksdbConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct RocksdbConfig {
-  pub data_path: String,
-  pub max_open_files: i32,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct RaftConfig {
+pub(crate) struct RawRaftConfig {
   pub address: String,
-
   pub advertise_host: String,
-
-  /// Single node raft cluster.
   pub single: bool,
-
-  /// Bring up a raft node and join a cluster.
-  ///
-  /// The value is one or more addresses of a node in the cluster, to which this node sends a `join` request.
   pub join: Vec<String>,
 }
 
 impl Config {
-  /// Validate the configuration to ensure it is correct.
-  pub fn validate(&self) -> Result<()> {
-    if self.raft.single && !self.raft.join.is_empty() {
+  /// Validate and parse the configuration
+  ///
+  /// This method parses all string fields into their typed representations
+  /// and validates the configuration.
+  pub(crate) fn validate_and_parse(raw: RawConfig) -> Result<Self> {
+    // Validate basic constraints
+    if raw.raft.single && !raw.raft.join.is_empty() {
       return Err(Error::config(
         "'single' mode cannot be used together with 'join' configuration",
       ));
     }
 
-    let _a: SocketAddr = self
-      .raft
-      .address
-      .parse()
-      .map_err(|e| Error::config(format!("{} while parsing {}", e, self.raft.address)))?;
+    // Parse raft endpoint
+    let endpoint = Endpoint::parse(&raw.raft.address)?;
 
-    Ok(())
+    // Parse advertise endpoint (use same port if not specified)
+    let advertise_endpoint = if raw.raft.advertise_host.is_empty() {
+      endpoint.clone()
+    } else {
+      Endpoint::new(&raw.raft.advertise_host, endpoint.port())
+    };
+
+    Ok(Config {
+      node_id: raw.node_id,
+      raft: RaftConfig {
+        endpoint,
+        advertise_endpoint,
+        single: raw.raft.single,
+        join: raw.raft.join,
+      },
+      rocksdb: RocksdbConfig {
+        data_path: raw.rocksdb.data_path,
+        max_open_files: raw.rocksdb.max_open_files,
+      },
+    })
+  }
+}
+
+impl<'de> Deserialize<'de> for Config {
+  fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    let raw = RawConfig::deserialize(deserializer)?;
+    Self::validate_and_parse(raw).map_err(serde::de::Error::custom)
+  }
+}
+
+impl Serialize for Config {
+  fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+  where
+    S: serde::Serializer,
+  {
+    // Convert back to RawConfig for serialization
+    let raw = RawConfig {
+      node_id: self.node_id,
+      raft: RawRaftConfig {
+        address: self.raft.endpoint.to_string(),
+        advertise_host: self.raft.advertise_endpoint.addr().to_string(),
+        single: self.raft.single,
+        join: self.raft.join.clone(),
+      },
+      rocksdb: self.rocksdb.clone(),
+    };
+    raw.serialize(serializer)
   }
 }

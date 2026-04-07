@@ -182,6 +182,26 @@ main() {
     print_info "Discovering tests..."
     echo ""
     
+    # Build core library and example before running tests
+    print_section "Building Core Library"
+    cd "$SCRIPT_DIR/.."
+    if ! cargo build --release 2>&1 | tee /tmp/build_core.log; then
+        print_error "Core library build failed!"
+        cat /tmp/build_core.log
+        exit 1
+    fi
+    print_success "Core library built successfully"
+    
+    print_section "Building Example"
+    cd "$SCRIPT_DIR"
+    if ! cargo build --release 2>&1 | tee /tmp/build_example.log; then
+        print_error "Example build failed!"
+        cat /tmp/build_example.log
+        exit 1
+    fi
+    print_success "Example built successfully"
+    echo ""
+    
     # Run pytest
     local exit_code=0
     run_pytest "${pytest_args[@]}" || exit_code=$?
