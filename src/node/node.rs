@@ -162,11 +162,11 @@ impl RaftNode {
     Ok(())
   }
 
-  /// Start the Raft gRPC service in a separate thread
+  /// Start the Raft gRPC service (for builder use)
   ///
   /// This function spawns the gRPC server in a background task and waits for
   /// the service to successfully bind to the endpoint before returning.
-  async fn start_raft_service(raft_node: Arc<Self>) -> Result<()> {
+  pub(crate) async fn start_raft_service(raft_node: Arc<Self>) -> Result<()> {
     let raft_endpoint = raft_node.config.raft.endpoint.clone();
 
     // Subscribe to shutdown signal
@@ -331,12 +331,12 @@ impl RaftNode {
     Ok(is_voter)
   }
 
-  /// Initialize the Raft cluster with a single node
+  /// Initialize the Raft cluster with a single node (for builder use)
   /// * `Ok(())` - Successfully initialized the cluster
   /// * `Err(Error)` - Failed to initialize:
   ///   - `InvalidConfig` if node configuration is invalid
   ///   - `Internal` if adding node to cluster fails
-  async fn init_cluster(&self, node: Node) -> Result<()> {
+  pub(crate) async fn init_cluster(&self, node: Node) -> Result<()> {
     if node.node_id != *self.raft.node_id() {
       return Err(Error::config(format!(
         "Node ID {} does not match current node ID {}",
@@ -382,7 +382,7 @@ impl RaftNode {
     Ok(())
   }
 
-  pub async fn join_cluster(&self) -> Result<()> {
+  pub(crate) async fn join_cluster(&self) -> Result<()> {
     let config = &self.config;
     if config.raft.join.is_empty() {
       info!("'--join' is empty, do not need joining cluster");

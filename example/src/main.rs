@@ -278,7 +278,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
   // Create Raft node
   info!("Creating Raft node...");
-  let raft_node = RaftNodeBuilder::build(&config.base).await?;
+  let raft_node = RaftNodeBuilder::from_config(&config.base).await?;
   info!("Raft node created successfully");
 
   // Create application state
