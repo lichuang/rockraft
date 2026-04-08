@@ -496,15 +496,23 @@ impl RaftNode {
 
   /// Write a log entry to the raft cluster
   ///
-  /// This function writes a LogEntry to the raft log. If this node is the leader,
-  /// it writes directly. Otherwise, it forwards the request to the leader.
+  /// The entry is appended to the raft log and replicated to a majority of nodes
+  /// before returning. This provides strong consistency - once the call returns,
+  /// the entry is guaranteed to be durable and will not be lost even if the
+  /// current leader fails.
   ///
-  /// # Arguments
-  /// * `entry` - The LogEntry to write
+  /// # Consistency
+  /// - Linearizable writes: all nodes agree on the same write order
+  /// - Durable on majority: returns only after replication to majority
   ///
-  /// # Returns
-  /// * `Ok(AppliedState)` - The result of applying the log entry
-  /// * `Err(Error)` - If the operation failed
+  /// # Leader Handling
+  /// - If this node is leader: writes directly to local log
+  /// - If not leader: transparently forwards to current leader with retry
+  /// - If leader changes during operation: automatically retries with new leader
+  ///
+  /// # Errors
+  /// - Returns retryable error if no leader is available (cluster electing)
+  /// - Returns permanent error for invalid entries or internal failures
   pub async fn write(&self, entry: LogEntry) -> Result<AppliedState> {
     debug!("write log entry: {:?}", entry);
 
@@ -537,21 +545,23 @@ impl RaftNode {
     }
   }
 
-  /// Batch write multiple entries to the raft cluster atomically
+  /// Batch write multiple entries atomically
   ///
-  /// This function writes multiple entries atomically to the raft log.
-  /// If this node is the leader, it writes directly. Otherwise, it forwards
-  /// the request to the leader.
+  /// All entries in the batch are applied as a single atomic unit - either
+  /// all succeed or all fail. This is useful for maintaining referential
+  /// integrity across multiple keys.
   ///
-  /// All entries in the batch are applied as a single log entry, ensuring
-  /// atomicity - either all entries are applied or none are.
+  /// The batch is replicated to a majority of nodes as a single log entry,
+  /// ensuring atomicity even during leader failures.
   ///
-  /// # Arguments
-  /// * `req` - The BatchWriteReq containing entries to write
+  /// # Performance
+  /// - More efficient than individual writes for multiple entries
+  /// - Single network round-trip when leader is local
+  /// - Amortized fsync cost across all entries in batch
   ///
-  /// # Returns
-  /// * `Ok(BatchWriteReply)` - The result of applying the batch
-  /// * `Err(Error)` - If the operation failed
+  /// # Consistency
+  /// - Atomic: all entries visible together or not at all
+  /// - Same durability guarantees as single write
   pub async fn batch_write(&self, req: BatchWriteReq) -> Result<BatchWriteReply> {
     debug!("batch write: {:?}", req);
 
@@ -573,26 +583,32 @@ impl RaftNode {
     }
   }
 
-  /// Execute a transaction with conditional operations
+  /// Execute an atomic compare-and-swap transaction
   ///
-  /// This function executes a transaction that checks conditions and performs
-  /// operations atomically based on the condition results. If this node is the
-  /// leader, it executes directly. Otherwise, it forwards the request to the leader.
+  /// Checks all conditions against the current state, then atomically executes
+  /// either `if_then` (conditions met) or `else_then` (conditions not met).
   ///
-  /// # Arguments
-  /// * `req` - The TxnReq containing conditions and operations
+  /// This enables optimistic concurrency control - read a value, compute new
+  /// state based on it, then commit only if the value hasn't changed.
   ///
-  /// # Returns
-  /// * `Ok(TxnReply)` - The result of the transaction execution
-  /// * `Err(Error)` - If the operation failed
+  /// # Use Cases
+  /// - Atomic increments: read counter, increment, write only if unchanged
+  /// - Lock acquisition: set lock only if not already held
+  /// - Conditional updates: update field only if preconditions hold
+  ///
+  /// # Performance Notes
+  /// - Conditions are evaluated on the leader without writing to log
+  /// - Only the chosen branch (if_then or else_then) is logged
+  /// - Failed conditions still cost a round-trip but no log write
   ///
   /// # Example
   /// ```rust,no_run
   /// use rockraft::raft::types::{TxnReq, TxnCondition, UpsertKV};
   ///
+  /// // Only update if key still has expected value
   /// let req = TxnReq::new(vec![TxnCondition::eq("key", b"expected_value")])
   ///   .if_then(UpsertKV::insert("key", b"new_value"));
-  /// // raft_node.txn(req).await;
+  /// let reply = raft_node.txn(req).await?;
   /// ```
   pub async fn txn(&self, req: TxnReq) -> Result<TxnReply> {
     debug!("transaction: {:?}", req);
@@ -615,23 +631,18 @@ impl RaftNode {
     }
   }
 
-  /// Atomically get the old value and set a new value
+  /// Atomically swap a value, returning the previous value
   ///
-  /// This function retrieves the previous value associated with the key and
-  /// updates it with the new value atomically. If the key does not exist,
-  /// it returns `None` and creates the new key.
+  /// Combines a read and write into a single atomic operation. Useful for
+  /// atomic updates where you need to know what was there before.
   ///
-  /// Internally, this is implemented as a transaction that always succeeds
-  /// and returns the previous values of modified keys.
+  /// Implemented as a transaction with `return_previous` enabled.
   ///
-  /// # Arguments
-  /// * `key` - The key to update
-  /// * `value` - The new value to set
-  ///
-  /// # Returns
-  /// * `Ok(Some(Vec<u8>))` - The previous value if the key existed
-  /// * `Ok(None)` - If the key did not exist
-  /// * `Err(Error)` - If the operation failed
+  /// # Concurrency
+  /// The swap is atomic - no other write can interleave between the read
+  /// and write. If multiple nodes call getset concurrently, they will
+  /// be serialized through raft and each will see the value set by the
+  /// previous successful call.
   ///
   /// # Example
   /// ```rust,no_run
@@ -663,16 +674,18 @@ impl RaftNode {
 
   /// Read a value from the KV store
   ///
-  /// This function reads a value from the KV store. If this node is the leader,
-  /// it reads directly from the state machine. Otherwise, it forwards the request
-  /// to the leader.
+  /// Returns the value as of the latest committed log entry. Reads may
+  /// be served by any node (not just the leader) for better throughput.
   ///
-  /// # Arguments
-  /// * `req` - The GetKVReq containing the key to read
+  /// # Consistency
+  /// - Monotonic reads: once you see a value, you'll never see an older one
+  /// - May return stale data briefly after leader change (until state catches up)
+  /// - For strongly consistent reads, use a transaction
   ///
-  /// # Returns
-  /// * `Ok(GetKVReply)` - The value associated with the key, or None if not found
-  /// * `Err(Error)` - If the operation failed
+  /// # Performance
+  /// - Served locally if this node has applied the latest log entry
+  /// - No network round-trip in the common case
+  /// - Linearizable with respect to writes
   pub async fn read(&self, req: GetKVReq) -> Result<GetKVReply> {
     debug!("read kv: {:?}", req);
 
@@ -694,18 +707,20 @@ impl RaftNode {
     }
   }
 
-  /// Scan key-value pairs with the given prefix from the KV store
+  /// Scan keys with a given prefix
   ///
-  /// This function scans all key-value pairs with the given prefix from the KV store.
-  /// If this node is the leader, it handles the request directly. Otherwise, it forwards
-  /// the request to the leader.
+  /// Returns all key-value pairs where the key starts with the given prefix.
+  /// Results are returned in lexicographic order by key.
   ///
-  /// # Arguments
-  /// * `req` - The ScanPrefixReq containing the prefix to scan
+  /// # Use Cases
+  /// - Listing items in a "directory" (e.g., all keys under "users/")
+  /// - Range queries when keys have structured prefixes
+  /// - Pagination when combined with key boundaries
   ///
-  /// # Returns
-  /// * `Ok(ScanPrefixReply)` - A vector of (key, value) pairs matching the prefix
-  /// * `Err(Error)` - If the operation failed
+  /// # Performance Notes
+  /// - Iterates over all keys with prefix - O(n) where n = matching keys
+  /// - Consider using transactions for large result sets
+  /// - No snapshot isolation - may see interleaved writes during scan
   pub async fn scan_prefix(&self, req: ScanPrefixReq) -> Result<ScanPrefixReply> {
     debug!("scan_prefix: {:?}", req);
 
@@ -727,17 +742,21 @@ impl RaftNode {
     }
   }
 
-  /// Add a node to the raft cluster
+  /// Add a new node to the raft cluster
   ///
-  /// This function adds a node to the raft cluster. If this node is the leader,
-  /// it handles the request directly. Otherwise, it forwards the request to the leader.
+  /// The new node will be added as a learner initially, then promoted to voter
+  /// once it catches up with the log. This is a two-phase process coordinated
+  /// by the leader.
   ///
-  /// # Arguments
-  /// * `req` - The JoinRequest containing the node_id and endpoint of the new node
+  /// # Membership Changes
+  /// - New node starts as non-voting learner (receives log but doesn't vote)
+  /// - Once caught up, automatically promoted to voter
+  /// - Cluster availability maintained during the process (majority still valid)
   ///
-  /// # Returns
-  /// * `Ok(())` - If the node was successfully added to the cluster
-  /// * `Err(Error)` - If the operation failed
+  /// # Safety
+  /// - Only one membership change at a time (raft invariant)
+  /// - Returns error if another change is in progress
+  /// - Idempotent: returns success if node already in cluster
   pub async fn join(&self, req: JoinRequest) -> Result<()> {
     debug!("join node: {:?}", req);
 
@@ -764,15 +783,19 @@ impl RaftNode {
 
   /// Remove a node from the raft cluster
   ///
-  /// This function removes a node from the raft cluster. If this node is the leader,
-  /// it handles the request directly. Otherwise, it forwards the request to the leader.
+  /// The node is demoted to learner first (stops voting), then removed from
+  /// the cluster. This ensures the cluster maintains availability during
+  /// the removal process.
   ///
-  /// # Arguments
-  /// * `req` - The LeaveRequest containing the node_id to remove
+  /// # Use Cases
+  /// - Graceful node decommission (drain and remove)
+  /// - Removing failed nodes that won't rejoin
+  /// - Shrinking cluster size
   ///
-  /// # Returns
-  /// * `Ok(())` - If the node was successfully removed from the cluster
-  /// * `Err(Error)` - If the operation failed
+  /// # Safety
+  /// - Cannot remove the last node (would lose quorum)
+  /// - Only one membership change at a time
+  /// - Idempotent: returns success if node already not in cluster
   pub async fn leave(&self, req: LeaveRequest) -> Result<()> {
     debug!("leave node: {:?}", req);
 
@@ -797,17 +820,15 @@ impl RaftNode {
     }
   }
 
-  /// Get the current cluster members
+  /// Get the current cluster membership
   ///
-  /// This function returns the current cluster members.
-  /// It can be called on any node, not just the leader.
+  /// Returns all nodes currently in the cluster, including their IDs and
+  /// network endpoints. This reflects the committed membership configuration.
   ///
-  /// # Arguments
-  /// * `req` - The GetMembersReq (empty)
-  ///
-  /// # Returns
-  /// * `Ok(GetMembersReply)` - A map of node_id to Node containing all cluster members
-  /// * `Err(Error)` - If the operation failed
+  /// # Note on Staleness
+  /// The returned membership may be slightly stale if a configuration change
+  /// (join/leave) is in progress. For critical decisions, check the latest
+  /// membership from the raft metrics instead.
   pub async fn get_members(&self, req: GetMembersReq) -> Result<GetMembersReply> {
     debug!("get members: {:?}", req);
 

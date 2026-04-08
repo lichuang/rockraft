@@ -82,27 +82,28 @@ impl<'a> LeaderHandler<'a> {
     self.node.raft()
   }
 
-  /// Write a log entry to the raft cluster
+  /// Write a log entry to the raft log (leader-only)
   ///
-  /// This function writes a LogEntry to the raft log and waits for it to be applied.
-  /// It can only be called on the leader node.
+  /// Appends the entry to the local log and replicates it to followers.
+  /// Returns after the entry is committed (majority acknowledgment).
   ///
-  /// The `time_ms` field of the entry will be set to the current timestamp before writing.
+  /// # Leader Requirement
+  /// This method **must** only be called when this node is the leader.
+  /// Callers should use `RaftNode::assume_leader()` to verify leadership first.
   ///
-  /// # Arguments
-  /// * `entry` - The LogEntry to write
-  ///
-  /// # Returns
-  /// * `Ok(AppliedState)` - The result of applying the log entry
-  /// * `Err(Error)` - If the operation failed or this node is not the leader
+  /// # Timestamp
+  /// The `time_ms` field is automatically set to the current time before writing.
   pub async fn write(&self, entry: LogEntry) -> Result<AppliedState> {
     self.do_write(entry).await
   }
 
-  /// Join a node to the raft cluster
+  /// Add a new node to the cluster (leader-only)
   ///
-  /// This function adds a node to the raft cluster. It first writes a log entry
-  /// to add the node, then changes the membership to include the new node as a voter.
+  /// Adds the node as a learner first, then promotes to voter.
+  /// Syncs all existing nodes to the new node before promotion.
+  ///
+  /// # Leader Requirement
+  /// Must be called on the leader. Use `RaftNode::assume_leader()` first.
   pub async fn join(&self, req: JoinRequest) -> Result<()> {
     let node_id = req.node_id;
     info!("Handling join request for node {}", node_id);
@@ -162,10 +163,13 @@ impl<'a> LeaderHandler<'a> {
     Ok(())
   }
 
-  /// Leave the raft cluster (remove a node)
+  /// Remove a node from the cluster (leader-only)
   ///
-  /// This function removes a node from the raft cluster. It first writes a log entry
-  /// to remove the node, then changes the membership to exclude the node.
+  /// Demotes to learner first, then removes from membership.
+  /// Safe to call even if node is already not in cluster (idempotent).
+  ///
+  /// # Leader Requirement
+  /// Must be called on the leader. Use `RaftNode::assume_leader()` first.
   pub async fn leave(&self, req: LeaveRequest) -> Result<()> {
     let node_id = req.node_id;
 
@@ -196,9 +200,13 @@ impl<'a> LeaderHandler<'a> {
     Ok(())
   }
 
-  /// Batch write multiple entries atomically
+  /// Batch write entries atomically (leader-only)
   ///
-  /// All entries are applied as a single log entry, ensuring atomicity.
+  /// All entries are committed as a single raft log entry.
+  /// Atomic: either all entries are applied or none are.
+  ///
+  /// # Leader Requirement
+  /// Must be called on the leader. Use `RaftNode::assume_leader()` first.
   pub async fn batch_write(&self, req: BatchWriteReq) -> Result<AppliedState> {
     if req.entries.is_empty() {
       return Ok(AppliedState::None);
@@ -214,7 +222,10 @@ impl<'a> LeaderHandler<'a> {
     )
   }
 
-  /// Read a value from the KV store
+  /// Read a value from the state machine (leader-only)
+  ///
+  /// Reads directly from the local state machine.
+  /// Consider using `RaftNode::read()` which can read from any node.
   pub async fn read(&self, req: GetKVReq) -> Result<Option<Vec<u8>>> {
     map_err_log!(
       self.node.state_machine().get_kv(&req.key),
@@ -222,10 +233,10 @@ impl<'a> LeaderHandler<'a> {
     )
   }
 
-  /// Scan key-value pairs with the given prefix
+  /// Scan keys by prefix from the state machine (leader-only)
   ///
-  /// Note: This is a read-only operation and can be handled by any node, but for
-  /// consistency, it's forwarded to the leader.
+  /// Returns all key-value pairs with keys starting with the given prefix.
+  /// Results are sorted lexicographically by key.
   pub async fn scan_prefix(&self, req: ScanPrefixReq) -> Result<ScanPrefixReply> {
     map_err_log!(
       self.node.state_machine().scan_prefix(&req.prefix),
@@ -233,9 +244,10 @@ impl<'a> LeaderHandler<'a> {
     )
   }
 
-  /// Get the current cluster members
+  /// Get cluster membership from state machine (leader-only)
   ///
-  /// Note: This operation can be handled by any node, not just the leader.
+  /// Returns the committed membership configuration.
+  /// This reflects the last applied membership change.
   pub async fn get_members(&self, _req: GetMembersReq) -> Result<GetMembersReply> {
     map_err_log!(
       self.node.state_machine().get_nodes(),
@@ -243,10 +255,13 @@ impl<'a> LeaderHandler<'a> {
     )
   }
 
-  /// Execute a transaction
+  /// Execute a conditional transaction (leader-only)
   ///
-  /// Executes a transaction that checks conditions and performs
-  /// operations atomically based on the condition results.
+  /// Evaluates conditions, then atomically executes if_then or else_then branch.
+  /// Used for optimistic concurrency control.
+  ///
+  /// # Leader Requirement
+  /// Must be called on the leader. Use `RaftNode::assume_leader()` first.
   pub async fn txn(&self, req: TxnReq) -> Result<TxnReply> {
     // Build a transaction command
     let entry = LogEntry::new(Cmd::Txn { req, result: None });
@@ -261,22 +276,13 @@ impl<'a> LeaderHandler<'a> {
     }
   }
 
-  /// Internal write method
+  /// Core write implementation (leader-only)
   ///
-  /// This is the core implementation that all write operations use.
-  /// The public `write` method delegates to this.
+  /// Appends entry to raft log, replicates to followers, waits for commit.
+  /// All write operations (write, batch_write, txn) delegate to this method.
   ///
-  /// This function writes a LogEntry to the raft log and waits for it to be applied.
-  /// It can only be called on the leader node.
-  ///
-  /// The `time_ms` field of the entry will be set to the current timestamp before writing.
-  ///
-  /// # Arguments
-  /// * `entry` - The LogEntry to write
-  ///
-  /// # Returns
-  /// * `Ok(AppliedState)` - The result of applying the log entry
-  /// * `Err(Error)` - If the operation failed or this node is not the leader
+  /// # Safety
+  /// Caller must ensure this node is the leader. This method does not check.
   async fn do_write(&self, mut entry: LogEntry) -> Result<AppliedState> {
     // Set the current timestamp in milliseconds, safe to unwrap
     let now = SystemTime::now()
