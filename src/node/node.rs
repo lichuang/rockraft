@@ -80,7 +80,7 @@ impl RaftNode {
       &config.rocksdb.data_path,
       config.rocksdb.max_open_files,
       column_family_list(),
-    ));
+    )?);
 
     let node_id = config.node_id;
 

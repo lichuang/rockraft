@@ -525,7 +525,8 @@ mod tests {
         .unwrap(),
       1024,
       vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
-    );
+    )
+    .unwrap();
 
     RocksStateMachine::new(engine.db().clone(), temp_data_dir)
       .await
@@ -578,7 +579,8 @@ mod tests {
         .unwrap(),
       1024,
       vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
-    );
+    )
+    .unwrap();
 
     // Create state machine and write data
     let sm1 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
@@ -630,7 +632,8 @@ mod tests {
         .unwrap(),
       1024,
       vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
-    );
+    )
+    .unwrap();
 
     // Create state machine and add nodes
     let sm1 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
@@ -704,7 +707,8 @@ mod tests {
         .unwrap(),
       1024,
       vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
-    );
+    )
+    .unwrap();
 
     // Create state machine and write all fields
     let sm1 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::error::{Error, Result};
 use rocksdb::BlockBasedOptions;
 use rocksdb::Cache;
 use rocksdb::ColumnFamilyDescriptor;
@@ -42,7 +43,7 @@ impl RocksDBEngine {
 }
 
 impl RocksDBEngine {
-  pub fn new(data_path: &str, max_open_files: i32, cf_list: Vec<String>) -> Self {
+  pub fn new(data_path: &str, max_open_files: i32, cf_list: Vec<String>) -> Result<Self> {
     Self::new_with_config(data_path, max_open_files, None, cf_list)
   }
 
@@ -51,7 +52,7 @@ impl RocksDBEngine {
     max_open_files: i32,
     config: Option<&RocksDBConfig>,
     cf_list: Vec<String>,
-  ) -> Self {
+  ) -> Result<Self> {
     let default_config = RocksDBConfig::default();
     let cfg = config.unwrap_or(&default_config);
 
@@ -65,12 +66,13 @@ impl RocksDBEngine {
       })
       .collect();
 
-    let instance = DB::open_cf_descriptors(&opts, data_path, cf_column_family)
-      .unwrap_or_else(|e| panic!("Open RocksDB Fail: {e}"));
+    let instance = DB::open_cf_descriptors(&opts, data_path, cf_column_family).map_err(|e| {
+      Error::internal_with_source(format!("Failed to open RocksDB at {}", data_path), e)
+    })?;
 
-    RocksDBEngine {
+    Ok(RocksDBEngine {
       db: Arc::new(instance),
-    }
+    })
   }
 
   fn open_db_opts_with_config(max_open_files: i32, config: &RocksDBConfig) -> Options {
