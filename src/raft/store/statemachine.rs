@@ -5,8 +5,6 @@ use std::io::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::MutexGuard;
-use std::sync::PoisonError;
 
 use crate::raft::types::{decode, encode};
 use futures::Stream;
@@ -50,11 +48,6 @@ pub struct RocksStateMachine {
   snapshot_dir: PathBuf,
 
   sys_data: Arc<Mutex<SysData>>,
-}
-
-/// Convert Mutex lock error to io::Error
-fn mutex_lock_err(e: PoisonError<MutexGuard<'_, SysData>>) -> Error {
-  io::Error::other(format!("Mutex lock failed: {}", e))
 }
 
 /// Evaluate a transaction condition against the actual value
@@ -148,7 +141,13 @@ impl RocksStateMachine {
   }
 
   fn get_last_applied_log_id(&self) -> Result<Option<LogId>, io::Error> {
-    Ok(self.sys_data.lock().map_err(mutex_lock_err)?.last_applied)
+    Ok(
+      self
+        .sys_data
+        .lock()
+        .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?
+        .last_applied,
+    )
   }
 
   /// Get last membership (constructed from nodes)
@@ -158,7 +157,10 @@ impl RocksStateMachine {
 
   /// Build StoredMembership from current nodes
   fn build_membership_from_nodes(&self) -> Result<StoredMembership, io::Error> {
-    let sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
+    let sys_data = self
+      .sys_data
+      .lock()
+      .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?;
     let node_ids: BTreeSet<NodeId> = sys_data.nodes.keys().cloned().collect();
     let nodes = sys_data.nodes.clone();
 
@@ -210,7 +212,10 @@ impl RocksStateMachine {
   }
 
   fn set_last_applied_log_id(&self, log_id: Option<LogId>) -> Result<(), io::Error> {
-    let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
+    let mut sys_data = self
+      .sys_data
+      .lock()
+      .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?;
 
     match log_id {
       Some(id) => {
@@ -234,11 +239,21 @@ impl RocksStateMachine {
 
   /// Get all nodes from the state machine
   pub fn get_nodes(&self) -> Result<BTreeMap<NodeId, Node>, io::Error> {
-    Ok(self.sys_data.lock().map_err(mutex_lock_err)?.nodes.clone())
+    Ok(
+      self
+        .sys_data
+        .lock()
+        .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?
+        .nodes
+        .clone(),
+    )
   }
 
   pub fn add_node(&self, node: Node) -> Result<(), io::Error> {
-    let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
+    let mut sys_data = self
+      .sys_data
+      .lock()
+      .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?;
 
     sys_data.nodes.insert(node.node_id, node);
 
@@ -252,7 +267,10 @@ impl RocksStateMachine {
   }
 
   fn remove_node(&self, node_id: NodeId) -> Result<(), io::Error> {
-    let mut sys_data = self.sys_data.lock().map_err(mutex_lock_err)?;
+    let mut sys_data = self
+      .sys_data
+      .lock()
+      .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?;
 
     sys_data.nodes.remove(&node_id);
 
