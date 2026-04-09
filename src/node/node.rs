@@ -84,10 +84,10 @@ impl RaftNode {
 
     let node_id = config.node_id;
 
-    let log_store = RocksLogStore::create(engine.db.clone())?;
+    let log_store = RocksLogStore::create(engine.db().clone())?;
 
     let data_dir = PathBuf::from(&config.rocksdb.data_path);
-    let state_machine = RocksStateMachine::new(engine.db.clone(), data_dir).await?;
+    let state_machine = RocksStateMachine::new(engine.db().clone(), data_dir).await?;
 
     let client_pool = Arc::new(ClientPool::new(10));
     let factory = NetworkFactory::new(client_pool);

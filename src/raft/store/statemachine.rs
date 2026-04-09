@@ -527,7 +527,7 @@ mod tests {
       vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
     );
 
-    RocksStateMachine::new(engine.db.clone(), temp_data_dir)
+    RocksStateMachine::new(engine.db().clone(), temp_data_dir)
       .await
       .unwrap()
   }
@@ -581,7 +581,7 @@ mod tests {
     );
 
     // Create state machine and write data
-    let sm1 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+    let sm1 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
       .await
       .unwrap();
 
@@ -590,7 +590,7 @@ mod tests {
 
     // Create a new state machine instance from the same database
     // This should recover the data from the database
-    let sm2 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+    let sm2 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
       .await
       .unwrap();
 
@@ -607,7 +607,7 @@ mod tests {
     sm2.set_last_applied_log_id(Some(new_log_id))?;
 
     // Create another instance and verify the updated data
-    let sm3 = RocksStateMachine::new(engine.db.clone(), temp_data_dir)
+    let sm3 = RocksStateMachine::new(engine.db().clone(), temp_data_dir)
       .await
       .unwrap();
 
@@ -633,7 +633,7 @@ mod tests {
     );
 
     // Create state machine and add nodes
-    let sm1 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+    let sm1 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
       .await
       .unwrap();
 
@@ -650,7 +650,7 @@ mod tests {
     sm1.add_node(node2)?;
 
     // Create a new state machine instance from the same database
-    let sm2 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+    let sm2 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
       .await
       .unwrap();
 
@@ -678,7 +678,7 @@ mod tests {
     sm2.remove_node(1)?;
 
     // Create another instance and verify
-    let sm3 = RocksStateMachine::new(engine.db.clone(), temp_data_dir)
+    let sm3 = RocksStateMachine::new(engine.db().clone(), temp_data_dir)
       .await
       .unwrap();
 
@@ -707,7 +707,7 @@ mod tests {
     );
 
     // Create state machine and write all fields
-    let sm1 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+    let sm1 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
       .await
       .unwrap();
 
@@ -735,7 +735,7 @@ mod tests {
     sm1.add_node(node3)?;
 
     // Create a new state machine instance and verify all data is recovered
-    let sm2 = RocksStateMachine::new(engine.db.clone(), temp_data_dir.clone())
+    let sm2 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
       .await
       .unwrap();
 

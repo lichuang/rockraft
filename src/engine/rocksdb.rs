@@ -28,7 +28,17 @@ impl Default for RocksDBConfig {
 
 #[derive(Debug)]
 pub struct RocksDBEngine {
-  pub db: Arc<DB>,
+  db: Arc<DB>,
+}
+
+impl RocksDBEngine {
+  /// Returns a shared reference to the underlying RocksDB instance.
+  ///
+  /// This is `pub(crate)` to prevent external crates from depending on
+  /// the storage implementation detail.
+  pub(crate) fn db(&self) -> &Arc<DB> {
+    &self.db
+  }
 }
 
 impl RocksDBEngine {
