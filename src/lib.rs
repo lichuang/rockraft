@@ -30,27 +30,26 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use rockraft::node::{RaftNode, RaftNodeBuilder};
-//! use rockraft::config::NodeConfig;
-//! use std::sync::Arc;
+//! use rockraft::node::RaftNodeBuilder;
+//! use rockraft::config::Config;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Configure the node
-//!     let config = NodeConfig::new(1, "127.0.0.1:50051".to_string())
-//!         .data_dir("/tmp/rockraft".to_string());
+//!     // Load configuration
+//!     let config: Config = load_config(); // Your config loading logic
 //!
 //!     // Create and start the Raft node
-//!     let node = RaftNodeBuilder::build(&config).await?;
+//!     let node = RaftNodeBuilder::from_config(&config).await?;
 //!
-//!     // Write data (only works on leader)
-//!     let raft = node.raft.clone();
-//!     if let Ok(leader) = raft.assume_leader() {
-//!         // Perform write operations
-//!         // leader.write(...).await?;
-//!     }
+//!     // Use the node (see examples for more details)
+//!     // node.write(...).await?;
 //!
 //!     Ok(())
+//! }
+//!
+//! fn load_config() -> Config {
+//!     // Your config loading logic here
+//!     todo!("Load your configuration")
 //! }
 //! ```
 //!
@@ -73,18 +72,17 @@
 //! 2. Add additional nodes using the cluster management API:
 //!
 //! ```no_run
-//! use rockraft::raft::types::{AddNodeReq, NodeInfo};
-//! use rockraft::raft::types::NodeId;
+//! use rockraft::node::RaftNode;
+//! use rockraft::raft::types::{JoinRequest, Endpoint};
 //!
 //! // Add a new node to the cluster
-//! async fn add_node(raft: &openraft::Raft<...>) {
-//!     let req = AddNodeReq {
-//!         node_id: NodeId::new(2),
-//!         info: NodeInfo {
-//!             rpc_addr: "127.0.0.1:50052".to_string(),
-//!         },
+//! async fn add_node(node: &RaftNode) -> Result<(), Box<dyn std::error::Error>> {
+//!     let req = JoinRequest {
+//!         node_id: 2,
+//!         endpoint: Endpoint::parse("127.0.0.1:50052")?,
 //!     };
-//!     // raft.add_node(req).await?;
+//!     node.add_node(req).await?;
+//!     Ok(())
 //! }
 //! ```
 //!

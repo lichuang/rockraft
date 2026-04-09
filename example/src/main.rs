@@ -545,7 +545,7 @@ async fn leave_handler(
     node_id: payload.node_id,
   };
 
-  match state.raft_node.leave(req).await {
+  match state.raft_node.remove_node(req).await {
     Ok(()) => Ok(Json(SuccessResponse {
       success: true,
       message: format!("Node {} left the cluster successfully", payload.node_id),
@@ -582,7 +582,7 @@ async fn join_handler(
     endpoint,
   };
 
-  match state.raft_node.join(req).await {
+  match state.raft_node.add_node(req).await {
     Ok(()) => Ok(Json(SuccessResponse {
       success: true,
       message: format!("Node {} joined the cluster successfully", payload.node_id),

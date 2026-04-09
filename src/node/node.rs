@@ -2,8 +2,8 @@ use crate::error::{Error, Result};
 use crate::grpc::JoinConnectionFactory;
 use crate::raft::protobuf as pb;
 use crate::raft::protobuf::raft_service_client::RaftServiceClient;
-use crate::raft::types::ForwardRequestBody;
 use crate::raft::types::JoinRequest;
+use crate::raft::types::RequestPayload;
 
 use openraft::error::{InitializeError, RaftError};
 use std::collections::BTreeMap;
@@ -382,7 +382,14 @@ impl RaftNode {
     Ok(())
   }
 
-  pub(crate) async fn join_cluster(&self) -> Result<()> {
+  /// Join the raft cluster using the configured join addresses
+  ///
+  /// This method attempts to join an existing cluster by contacting
+  /// the nodes listed in `config.raft.join`.
+  ///
+  /// # Errors
+  /// Returns error if unable to join via any of the specified addresses.
+  pub async fn join_cluster(&self) -> Result<()> {
     let config = &self.config;
     if config.raft.join.is_empty() {
       info!("'--join' is empty, do not need joining cluster");
@@ -479,7 +486,7 @@ impl RaftNode {
 
     let req = ForwardRequest {
       forward_to_leader: 1,
-      body: ForwardRequestBody::Join(join_req),
+      body: RequestPayload::Join(join_req),
     };
 
     let reply = self.send_forward_request(addr, req).await?;
@@ -535,7 +542,7 @@ impl RaftNode {
   ) -> Result<AppliedState> {
     let request = ForwardRequest {
       forward_to_leader: 1,
-      body: ForwardRequestBody::Write(entry),
+      body: RequestPayload::Write(entry),
     };
 
     let response = self.forward_with_leader_id(leader_id, request).await?;
@@ -570,7 +577,7 @@ impl RaftNode {
       Err(forward_err) => {
         let request = ForwardRequest {
           forward_to_leader: 1,
-          body: ForwardRequestBody::BatchWrite(req),
+          body: RequestPayload::BatchWrite(req),
         };
         let response = self
           .forward_with_leader_id(forward_err.leader_id, request)
@@ -605,10 +612,13 @@ impl RaftNode {
   /// ```rust,no_run
   /// use rockraft::raft::types::{TxnReq, TxnCondition, UpsertKV};
   ///
-  /// // Only update if key still has expected value
-  /// let req = TxnReq::new(vec![TxnCondition::eq("key", b"expected_value")])
-  ///   .if_then(UpsertKV::insert("key", b"new_value"));
-  /// let reply = raft_node.txn(req).await?;
+  /// async fn example(node: &rockraft::node::RaftNode) -> Result<(), Box<dyn std::error::Error>> {
+  ///     // Only update if key still has expected value
+  ///     let req = TxnReq::new(vec![TxnCondition::eq("key", b"expected_value")])
+  ///       .if_then(UpsertKV::insert("key", b"new_value"));
+  ///     let reply = node.txn(req).await?;
+  ///     Ok(())
+  /// }
   /// ```
   pub async fn txn(&self, req: TxnReq) -> Result<TxnReply> {
     debug!("transaction: {:?}", req);
@@ -618,7 +628,7 @@ impl RaftNode {
       Err(forward_err) => {
         let request = ForwardRequest {
           forward_to_leader: 1,
-          body: ForwardRequestBody::Txn(req),
+          body: RequestPayload::Txn(req),
         };
         let response = self
           .forward_with_leader_id(forward_err.leader_id, request)
@@ -694,7 +704,7 @@ impl RaftNode {
       Err(forward_err) => {
         let request = ForwardRequest {
           forward_to_leader: 1,
-          body: ForwardRequestBody::GetKV(req),
+          body: RequestPayload::GetKV(req),
         };
         let response = self
           .forward_with_leader_id(forward_err.leader_id, request)
@@ -729,7 +739,7 @@ impl RaftNode {
       Err(forward_err) => {
         let request = ForwardRequest {
           forward_to_leader: 1,
-          body: ForwardRequestBody::ScanPrefix(req),
+          body: RequestPayload::ScanPrefix(req),
         };
         let response = self
           .forward_with_leader_id(forward_err.leader_id, request)
@@ -757,18 +767,18 @@ impl RaftNode {
   /// - Only one membership change at a time (raft invariant)
   /// - Returns error if another change is in progress
   /// - Idempotent: returns success if node already in cluster
-  pub async fn join(&self, req: JoinRequest) -> Result<()> {
+  pub async fn add_node(&self, req: JoinRequest) -> Result<()> {
     debug!("join node: {:?}", req);
 
     match self.assume_leader().await {
       Ok(leader) => {
-        leader.join(req).await?;
+        leader.add_node(req).await?;
         Ok(())
       }
       Err(forward_err) => {
         let request = ForwardRequest {
           forward_to_leader: 1,
-          body: ForwardRequestBody::Join(req),
+          body: RequestPayload::Join(req),
         };
         let response = self
           .forward_with_leader_id(forward_err.leader_id, request)
@@ -796,18 +806,18 @@ impl RaftNode {
   /// - Cannot remove the last node (would lose quorum)
   /// - Only one membership change at a time
   /// - Idempotent: returns success if node already not in cluster
-  pub async fn leave(&self, req: LeaveRequest) -> Result<()> {
+  pub async fn remove_node(&self, req: LeaveRequest) -> Result<()> {
     debug!("leave node: {:?}", req);
 
     match self.assume_leader().await {
       Ok(leader) => {
-        leader.leave(req).await?;
+        leader.remove_node(req).await?;
         Ok(())
       }
       Err(forward_err) => {
         let request = ForwardRequest {
           forward_to_leader: 1,
-          body: ForwardRequestBody::Leave(req),
+          body: RequestPayload::Leave(req),
         };
         let response = self
           .forward_with_leader_id(forward_err.leader_id, request)
@@ -932,42 +942,42 @@ impl RaftNode {
 
   /// Dispatch a request body to the appropriate LeaderHandler method
   ///
-  /// This is a compatibility layer that routes ForwardRequestBody to the
+  /// This is a compatibility layer that routes RequestPayload to the
   /// corresponding type-safe LeaderHandler method.
   async fn dispatch_leader_handler(
     leader: LeaderHandler<'_>,
-    body: ForwardRequestBody,
+    body: RequestPayload,
   ) -> Result<ForwardResponse> {
     match body {
-      ForwardRequestBody::Write(entry) => {
+      RequestPayload::Write(entry) => {
         let result = leader.write(entry).await?;
         Ok(ForwardResponse::Write(result))
       }
-      ForwardRequestBody::BatchWrite(req) => {
+      RequestPayload::BatchWrite(req) => {
         let result = leader.batch_write(req).await?;
         Ok(ForwardResponse::BatchWrite(result))
       }
-      ForwardRequestBody::Txn(req) => {
+      RequestPayload::Txn(req) => {
         let result = leader.txn(req).await?;
         Ok(ForwardResponse::Txn(result))
       }
-      ForwardRequestBody::GetKV(req) => {
+      RequestPayload::GetKV(req) => {
         let result = leader.read(req).await?;
         Ok(ForwardResponse::GetKV(result))
       }
-      ForwardRequestBody::ScanPrefix(req) => {
+      RequestPayload::ScanPrefix(req) => {
         let result = leader.scan_prefix(req).await?;
         Ok(ForwardResponse::ScanPrefix(result))
       }
-      ForwardRequestBody::Join(req) => {
-        leader.join(req).await?;
+      RequestPayload::Join(req) => {
+        leader.add_node(req).await?;
         Ok(ForwardResponse::Join(()))
       }
-      ForwardRequestBody::Leave(req) => {
-        leader.leave(req).await?;
+      RequestPayload::Leave(req) => {
+        leader.remove_node(req).await?;
         Ok(ForwardResponse::Leave(()))
       }
-      ForwardRequestBody::GetMembers(req) => {
+      RequestPayload::GetMembers(req) => {
         let result = leader.get_members(req).await?;
         Ok(ForwardResponse::GetMembers(result))
       }

@@ -104,7 +104,7 @@ impl<'a> LeaderHandler<'a> {
   ///
   /// # Leader Requirement
   /// Must be called on the leader. Use `RaftNode::assume_leader()` first.
-  pub async fn join(&self, req: JoinRequest) -> Result<()> {
+  pub async fn add_node(&self, req: JoinRequest) -> Result<()> {
     let node_id = req.node_id;
     info!("Handling join request for node {}", node_id);
 
@@ -170,7 +170,7 @@ impl<'a> LeaderHandler<'a> {
   ///
   /// # Leader Requirement
   /// Must be called on the leader. Use `RaftNode::assume_leader()` first.
-  pub async fn leave(&self, req: LeaveRequest) -> Result<()> {
+  pub async fn remove_node(&self, req: LeaveRequest) -> Result<()> {
     let node_id = req.node_id;
 
     // Get current membership and check if node exists

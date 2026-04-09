@@ -36,14 +36,15 @@ pub struct BatchWriteReq {
 /// Response for batch write operation
 pub type BatchWriteReply = AppliedState;
 
-/// Request for transaction operation
-pub type TxnRequest = TxnReq;
+// TxnReq and TxnReply are defined in crate::raft::types::cmd::txn
+// They are re-exported in crate::raft::types::mod for convenience
 
-/// Response for transaction operation
-pub type TxnResponse = TxnReply;
-
+/// The payload of a forwarded request
+///
+/// This enum represents all possible operations that can be forwarded
+/// to the leader for execution.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum ForwardRequestBody {
+pub enum RequestPayload {
   Join(JoinRequest),
   Leave(LeaveRequest),
   GetMembers(GetMembersReq),
@@ -51,13 +52,18 @@ pub enum ForwardRequestBody {
   GetKV(GetKVReq),
   ScanPrefix(ScanPrefixReq),
   BatchWrite(BatchWriteReq),
-  Txn(TxnRequest),
+  Txn(TxnReq),
 }
+
+/// Deprecated: Use `RequestPayload` instead
+#[deprecated(since = "0.1.6", note = "Use RequestPayload instead")]
+#[allow(dead_code)]
+pub type ForwardRequestBody = RequestPayload;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ForwardRequest {
   pub forward_to_leader: u64,
-  pub body: ForwardRequestBody,
+  pub body: RequestPayload,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -69,7 +75,7 @@ pub enum ForwardResponse {
   GetKV(GetKVReply),
   ScanPrefix(ScanPrefixReply),
   BatchWrite(BatchWriteReply),
-  Txn(TxnResponse),
+  Txn(TxnReply),
 }
 
 impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {

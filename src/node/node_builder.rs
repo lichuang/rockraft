@@ -15,13 +15,10 @@ use tracing::info;
 ///
 /// ```rust,no_run
 /// use rockraft::node::RaftNodeBuilder;
-/// use rockraft::config::Config;
 ///
-/// async fn example() -> Result<(), Box<dyn std::error::Error>> {
-///     let config = load_config(); // Load your config
-///     
+/// async fn example(config: &rockraft::config::Config) -> Result<(), Box<dyn std::error::Error>> {
 ///     let node = RaftNodeBuilder::new()
-///         .config(&config)
+///         .config(config)
 ///         .auto_init_cluster(true)
 ///         .grpc_timeout_seconds(30)
 ///         .build()
@@ -167,7 +164,12 @@ impl<'a> RaftNodeBuilder<'a> {
   ///
   /// This is the simplest way to create a node:
   /// ```rust,no_run
-  /// let node = RaftNodeBuilder::from_config(&config).await?;
+  /// use rockraft::node::RaftNodeBuilder;
+  ///
+  /// async fn example(config: &rockraft::config::Config) -> Result<(), Box<dyn std::error::Error>> {
+  ///     let node = RaftNodeBuilder::from_config(config).await?;
+  ///     Ok(())
+  /// }
   /// ```
   pub async fn from_config(config: &'a Config) -> Result<Arc<RaftNode>> {
     Self::new().config(config).build().await
@@ -177,9 +179,14 @@ impl<'a> RaftNodeBuilder<'a> {
   ///
   /// Use this when you need to defer cluster membership:
   /// ```rust,no_run
-  /// let node = RaftNodeBuilder::standalone(&config).await?;
-  /// // ... later ...
-  /// node.join_cluster().await?;
+  /// use rockraft::node::RaftNodeBuilder;
+  ///
+  /// async fn example(config: &rockraft::config::Config) -> Result<(), Box<dyn std::error::Error>> {
+  ///     let node = RaftNodeBuilder::standalone(config).await?;
+  ///     // ... later ...
+  ///     node.join_cluster().await?;
+  ///     Ok(())
+  /// }
   /// ```
   pub async fn standalone(config: &'a Config) -> Result<Arc<RaftNode>> {
     Self::new()
