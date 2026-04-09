@@ -314,6 +314,26 @@ impl RaftNode {
     }
   }
 
+  /// Execute a request locally as leader, or forward to the current leader.
+  ///
+  /// This method unifies the assume_leader/forward pattern used by all
+  /// client-facing operations: check if this node is the leader, dispatch
+  /// locally via [`LeaderHandler`] if so, or forward via gRPC if not.
+  async fn execute_or_forward(&self, payload: RequestPayload) -> Result<ForwardResponse> {
+    match self.assume_leader().await {
+      Ok(leader) => Self::dispatch_leader_handler(leader, payload).await,
+      Err(forward_err) => {
+        let request = ForwardRequest {
+          forward_to_leader: 1,
+          body: payload,
+        };
+        self
+          .forward_with_leader_id(forward_err.leader_id, request)
+          .await
+      }
+    }
+  }
+
   /// Check if this node is in the cluster membership
   fn is_in_cluster(&self) -> Result<bool> {
     let last_membership = self
@@ -522,34 +542,10 @@ impl RaftNode {
   /// - Returns permanent error for invalid entries or internal failures
   pub async fn write(&self, entry: LogEntry) -> Result<AppliedState> {
     debug!("write log entry: {:?}", entry);
-
-    // Check if this node is the leader
-    match self.assume_leader().await {
-      Ok(leader) => leader.write(entry).await,
-      Err(forward_err) => {
-        // Forward to remote leader
-        self
-          .forward_write_to_leader(forward_err.leader_id, entry)
-          .await
-      }
-    }
-  }
-
-  async fn forward_write_to_leader(
-    &self,
-    leader_id: Option<NodeId>,
-    entry: LogEntry,
-  ) -> Result<AppliedState> {
-    let request = ForwardRequest {
-      forward_to_leader: 1,
-      body: RequestPayload::Write(entry),
-    };
-
-    let response = self.forward_with_leader_id(leader_id, request).await?;
-    match response {
-      ForwardResponse::Write(applied_state) => Ok(applied_state),
-      _ => Err(Error::internal("Unexpected response type from leader")),
-    }
+    self
+      .execute_or_forward(RequestPayload::Write(entry))
+      .await?
+      .into_write()
   }
 
   /// Batch write multiple entries atomically
@@ -571,23 +567,10 @@ impl RaftNode {
   /// - Same durability guarantees as single write
   pub async fn batch_write(&self, req: BatchWriteReq) -> Result<BatchWriteReply> {
     debug!("batch write: {:?}", req);
-
-    match self.assume_leader().await {
-      Ok(leader) => leader.batch_write(req).await,
-      Err(forward_err) => {
-        let request = ForwardRequest {
-          forward_to_leader: 1,
-          body: RequestPayload::BatchWrite(req),
-        };
-        let response = self
-          .forward_with_leader_id(forward_err.leader_id, request)
-          .await?;
-        match response {
-          ForwardResponse::BatchWrite(applied_state) => Ok(applied_state),
-          _ => Err(Error::internal("Unexpected response type from leader")),
-        }
-      }
-    }
+    self
+      .execute_or_forward(RequestPayload::BatchWrite(req))
+      .await?
+      .into_batch_write()
   }
 
   /// Execute an atomic compare-and-swap transaction
@@ -622,23 +605,10 @@ impl RaftNode {
   /// ```
   pub async fn txn(&self, req: TxnReq) -> Result<TxnReply> {
     debug!("transaction: {:?}", req);
-
-    match self.assume_leader().await {
-      Ok(leader) => leader.txn(req).await,
-      Err(forward_err) => {
-        let request = ForwardRequest {
-          forward_to_leader: 1,
-          body: RequestPayload::Txn(req),
-        };
-        let response = self
-          .forward_with_leader_id(forward_err.leader_id, request)
-          .await?;
-        match response {
-          ForwardResponse::Txn(reply) => Ok(reply),
-          _ => Err(Error::internal("Unexpected response type from leader")),
-        }
-      }
-    }
+    self
+      .execute_or_forward(RequestPayload::Txn(req))
+      .await?
+      .into_txn()
   }
 
   /// Atomically swap a value, returning the previous value
@@ -698,23 +668,10 @@ impl RaftNode {
   /// - Linearizable with respect to writes
   pub async fn read(&self, req: GetKVReq) -> Result<GetKVReply> {
     debug!("read kv: {:?}", req);
-
-    match self.assume_leader().await {
-      Ok(leader) => leader.read(req).await,
-      Err(forward_err) => {
-        let request = ForwardRequest {
-          forward_to_leader: 1,
-          body: RequestPayload::GetKV(req),
-        };
-        let response = self
-          .forward_with_leader_id(forward_err.leader_id, request)
-          .await?;
-        match response {
-          ForwardResponse::GetKV(value) => Ok(value),
-          _ => Err(Error::internal("Unexpected response type from leader")),
-        }
-      }
-    }
+    self
+      .execute_or_forward(RequestPayload::GetKV(req))
+      .await?
+      .into_get_kv()
   }
 
   /// Scan keys with a given prefix
@@ -733,23 +690,10 @@ impl RaftNode {
   /// - No snapshot isolation - may see interleaved writes during scan
   pub async fn scan_prefix(&self, req: ScanPrefixReq) -> Result<ScanPrefixReply> {
     debug!("scan_prefix: {:?}", req);
-
-    match self.assume_leader().await {
-      Ok(leader) => leader.scan_prefix(req).await,
-      Err(forward_err) => {
-        let request = ForwardRequest {
-          forward_to_leader: 1,
-          body: RequestPayload::ScanPrefix(req),
-        };
-        let response = self
-          .forward_with_leader_id(forward_err.leader_id, request)
-          .await?;
-        match response {
-          ForwardResponse::ScanPrefix(results) => Ok(results),
-          _ => Err(Error::internal("Unexpected response type from leader")),
-        }
-      }
-    }
+    self
+      .execute_or_forward(RequestPayload::ScanPrefix(req))
+      .await?
+      .into_scan_prefix()
   }
 
   /// Add a new node to the raft cluster
@@ -769,26 +713,10 @@ impl RaftNode {
   /// - Idempotent: returns success if node already in cluster
   pub async fn add_node(&self, req: JoinRequest) -> Result<()> {
     debug!("join node: {:?}", req);
-
-    match self.assume_leader().await {
-      Ok(leader) => {
-        leader.add_node(req).await?;
-        Ok(())
-      }
-      Err(forward_err) => {
-        let request = ForwardRequest {
-          forward_to_leader: 1,
-          body: RequestPayload::Join(req),
-        };
-        let response = self
-          .forward_with_leader_id(forward_err.leader_id, request)
-          .await?;
-        match response {
-          ForwardResponse::Join(()) => Ok(()),
-          _ => Err(Error::internal("Unexpected response type from leader")),
-        }
-      }
-    }
+    self
+      .execute_or_forward(RequestPayload::Join(req))
+      .await?
+      .into_join()
   }
 
   /// Remove a node from the raft cluster
@@ -808,26 +736,10 @@ impl RaftNode {
   /// - Idempotent: returns success if node already not in cluster
   pub async fn remove_node(&self, req: LeaveRequest) -> Result<()> {
     debug!("leave node: {:?}", req);
-
-    match self.assume_leader().await {
-      Ok(leader) => {
-        leader.remove_node(req).await?;
-        Ok(())
-      }
-      Err(forward_err) => {
-        let request = ForwardRequest {
-          forward_to_leader: 1,
-          body: RequestPayload::Leave(req),
-        };
-        let response = self
-          .forward_with_leader_id(forward_err.leader_id, request)
-          .await?;
-        match response {
-          ForwardResponse::Leave(()) => Ok(()),
-          _ => Err(Error::internal("Unexpected response type from leader")),
-        }
-      }
-    }
+    self
+      .execute_or_forward(RequestPayload::Leave(req))
+      .await?
+      .into_leave()
   }
 
   /// Get the current cluster membership
