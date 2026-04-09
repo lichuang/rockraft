@@ -124,7 +124,9 @@ impl<'a> RaftNodeBuilder<'a> {
   pub async fn build(self) -> Result<Arc<RaftNode>> {
     // Validate configuration
     self.validate()?;
-    let config = self.config.unwrap();
+    let config = self
+      .config
+      .ok_or_else(|| Error::config("Config is required. Use .config() to provide one."))?;
 
     info!("Building RaftNode with node_id={}", config.node_id);
 
