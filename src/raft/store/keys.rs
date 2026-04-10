@@ -6,7 +6,7 @@ pub const SM_DATA_FAMILY: &str = "_sm_data";
 pub const LAST_APPLIED_LOG_KEY: &str = "last_applied_log";
 pub const NODES_KEY: &str = "nodes";
 
-pub fn column_family_list() -> Vec<String> {
+pub(crate) fn column_family_list() -> Vec<String> {
   vec![
     LOG_META_FAMILY.to_string(),
     LOG_DATA_FAMILY.to_string(),

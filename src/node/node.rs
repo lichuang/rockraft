@@ -20,9 +20,9 @@ use crate::engine::RocksDBEngine;
 use crate::error::{Error, Result};
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::network::NetworkFactory;
+use crate::raft::store;
 use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
-use crate::raft::store::column_family_list;
 use crate::raft::types::{
   AppliedState, BatchWriteReply, BatchWriteReq, GetKVReply, GetKVReq, GetMembersReply,
   GetMembersReq, JoinRequest, LeaveRequest, LogEntry, RequestPayload, ScanPrefixReply,
@@ -74,10 +74,9 @@ impl RaftNode {
   }
 
   pub async fn create(config: &Config) -> Result<Arc<Self>> {
-    let engine = Arc::new(RocksDBEngine::new(
+    let engine = Arc::new(store::create_storage_engine(
       &config.rocksdb.data_path,
       config.rocksdb.max_open_files,
-      column_family_list(),
     )?);
 
     let node_id = config.node_id;
