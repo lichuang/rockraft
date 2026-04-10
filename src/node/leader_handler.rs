@@ -118,19 +118,25 @@ impl<'a> LeaderHandler<'a> {
       return Ok(());
     }
 
-    // First, sync all existing nodes to state machine (to ensure new node gets all node info)
-    info!("Syncing existing nodes to state machine");
+    // Sync existing nodes that are missing from the state machine.
+    // This ensures new nodes learn about all cluster members via log replay.
+    let sm = self.node.state_machine();
     for (id, node) in membership.nodes() {
-      info!("Syncing node {} to state machine", id);
+      if sm
+        .contains_node(*id)
+        .map_err(|e| Error::internal(format!("contains_node check failed: {}", e)))?
+      {
+        continue;
+      }
+      info!("Syncing missing node {} to state machine", id);
       let entry = LogEntry::new(Cmd::AddNode {
         node: node.clone(),
         overriding: true,
       });
-      if let Err(e) = self.write(entry).await {
-        let msg = format!("Failed to sync node {}: {}", id, e);
-        error!(msg);
-        return Err(Error::internal(msg));
-      }
+      map_err_log!(
+        self.write(entry).await,
+        format!("Failed to sync node {}", id)
+      )?;
     }
 
     let node = Node {

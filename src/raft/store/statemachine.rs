@@ -249,6 +249,17 @@ impl RocksStateMachine {
     )
   }
 
+  pub fn contains_node(&self, node_id: NodeId) -> Result<bool, io::Error> {
+    Ok(
+      self
+        .sys_data
+        .lock()
+        .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?
+        .nodes
+        .contains_key(&node_id),
+    )
+  }
+
   pub fn add_node(&self, node: Node) -> Result<(), io::Error> {
     let mut sys_data = self
       .sys_data
