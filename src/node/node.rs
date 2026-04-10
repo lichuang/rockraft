@@ -21,7 +21,6 @@ use crate::error::{Error, Result};
 use crate::raft::grpc_client::ClientPool;
 use crate::raft::network::NetworkFactory;
 use crate::raft::store;
-use crate::raft::store::RocksLogStore;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::types::{
   AppliedState, BatchWriteReply, BatchWriteReq, GetKVReply, GetKVReq, GetMembersReply,
@@ -73,18 +72,14 @@ impl RaftNode {
     Ok(())
   }
 
-  pub async fn create(config: &Config) -> Result<Arc<Self>> {
+  pub(crate) async fn create(config: &Config) -> Result<Arc<Self>> {
     let engine = Arc::new(store::create_storage_engine(
       &config.rocksdb.data_path,
       config.rocksdb.max_open_files,
     )?);
 
-    let node_id = config.node_id;
-
-    let log_store = RocksLogStore::create(engine.db().clone())?;
-
     let data_dir = PathBuf::from(&config.rocksdb.data_path);
-    let state_machine = RocksStateMachine::new(engine.db().clone(), data_dir).await?;
+    let (log_store, state_machine) = store::create_stores(&engine, data_dir).await?;
 
     let client_pool = Arc::new(ClientPool::new(10));
     let factory = NetworkFactory::new(client_pool);
@@ -92,7 +87,7 @@ impl RaftNode {
 
     let raft = Arc::new(
       Raft::new(
-        node_id,
+        config.node_id,
         Arc::new(raft_config),
         factory.clone(),
         log_store,

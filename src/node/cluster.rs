@@ -25,25 +25,6 @@ use crate::service::RaftServiceImpl;
 use super::node::RaftNode;
 
 impl RaftNode {
-  /// Start the Raft node: launch gRPC service and join or init the cluster.
-  pub async fn start(raft_node: Arc<Self>) -> Result<()> {
-    let config = &raft_node.config;
-
-    Self::start_raft_service(raft_node.clone()).await?;
-
-    if config.raft.single {
-      let node = Node {
-        node_id: config.node_id,
-        endpoint: config.raft.endpoint.clone(),
-      };
-      raft_node.init_cluster(node).await?;
-    } else {
-      raft_node.join_cluster().await?;
-    }
-
-    Ok(())
-  }
-
   /// Start the Raft gRPC service (for builder use)
   ///
   /// This function spawns the gRPC server in a background task and waits for
