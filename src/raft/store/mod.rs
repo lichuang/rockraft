@@ -1,4 +1,4 @@
-mod keys;
+pub mod keys;
 mod log_store;
 mod meta;
 mod snapshot;

@@ -314,52 +314,10 @@ fn bin_to_id(buf: &[u8]) -> Result<u64, Error> {
 
 #[cfg(test)]
 mod tests {
+  use crate::utils::test::{append_entries, create_entry, create_log_id, create_test_log_store};
   use openraft::Vote;
-  use rocksdb::Options;
-
-  use crate::raft::types::{Cmd, LeaderId, LogEntry, LogId, Operation, UpsertKV};
 
   use super::*;
-
-  fn create_test_log_store() -> RocksLogStore<TypeConfig> {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let mut opts = Options::default();
-    opts.create_if_missing(true);
-    opts.create_missing_column_families(true);
-    let db = DB::open_cf(
-      &opts,
-      temp_dir.path(),
-      vec![LOG_META_FAMILY, LOG_DATA_FAMILY],
-    )
-    .unwrap();
-
-    RocksLogStore::create(Arc::new(db)).unwrap()
-  }
-
-  fn create_log_id(term: u64, node_id: u64, index: u64) -> LogId {
-    LogId {
-      leader_id: LeaderId { term, node_id },
-      index,
-    }
-  }
-
-  fn create_entry(term: u64, node_id: u64, index: u64) -> Entry {
-    Entry {
-      log_id: create_log_id(term, node_id, index),
-      payload: openraft::EntryPayload::Normal(LogEntry::new(Cmd::UpsertKV(UpsertKV::new(
-        format!("key_{}_{}", term, index),
-        Operation::Update(format!("data_{}_{}", term, index).into_bytes()),
-        None,
-      )))),
-    }
-  }
-
-  async fn append_entries(
-    log_store: &mut RocksLogStore<TypeConfig>,
-    entries: Vec<Entry>,
-  ) -> Result<(), io::Error> {
-    log_store.append(entries, IOFlushed::noop()).await
-  }
 
   #[tokio::test]
   async fn test_raft_log_operations() -> Result<(), io::Error> {

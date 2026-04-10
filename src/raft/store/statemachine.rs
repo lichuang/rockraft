@@ -516,35 +516,9 @@ mod tests {
 
   use std::collections::HashMap;
 
-  use crate::{
-    engine::RocksDBEngine,
-    raft::types::{Endpoint, LeaderId, Node},
-  };
-
-  async fn create_test_state_machine() -> RocksStateMachine {
-    let temp_data_dir = tempfile::tempdir().unwrap().keep();
-    let engine = RocksDBEngine::new(
-      &temp_data_dir
-        .clone()
-        .into_os_string()
-        .into_string()
-        .unwrap(),
-      1024,
-      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
-    )
-    .unwrap();
-
-    RocksStateMachine::new(engine.db().clone(), temp_data_dir)
-      .await
-      .unwrap()
-  }
-
-  fn create_log_id(term: u64, node_id: u64, index: u64) -> LogId {
-    LogId {
-      leader_id: LeaderId { term, node_id },
-      index,
-    }
-  }
+  use crate::engine::RocksDBEngine;
+  use crate::raft::types::{Endpoint, Node};
+  use crate::utils::test::{create_log_id, create_test_state_machine};
 
   #[tokio::test]
   async fn test_set_and_get_last_applied() -> Result<(), io::Error> {
