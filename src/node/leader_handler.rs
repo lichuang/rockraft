@@ -166,7 +166,7 @@ impl<'a> LeaderHandler<'a> {
     add_voters.insert(node_id, node);
 
     let msg = ChangeMembers::AddVoters(add_voters);
-    map_err_log!(
+    map_raft_err_log!(
       self.raft().change_membership(msg, false).await,
       "Failed to join node"
     )?;
@@ -198,7 +198,7 @@ impl<'a> LeaderHandler<'a> {
     let mut remove_voters: BTreeSet<u64> = BTreeSet::new();
     remove_voters.insert(node_id);
 
-    map_err_log!(
+    map_raft_err_log!(
       self.raft().change_membership(remove_voters, true).await,
       "Failed to leave node"
     )?;
@@ -294,7 +294,7 @@ impl<'a> LeaderHandler<'a> {
 
     let node_id = self.raft().node_id();
 
-    match self.raft().client_write(entry).await {
+    match map_raft_err_log!(self.raft().client_write(entry).await, "client write") {
       Ok(response) => {
         debug!(
           node_id = %node_id,
@@ -309,14 +309,7 @@ impl<'a> LeaderHandler<'a> {
           error = %e,
           "Failed to write log entry"
         );
-        Err(match e {
-          RaftError::APIError(api_err) => {
-            Error::internal(format!("client write error: {}", api_err))
-          }
-          RaftError::Fatal(fatal_err) => {
-            Error::internal(format!("fatal raft error: {}", fatal_err))
-          }
-        })
+        Err(e)
       }
     }
   }

@@ -96,9 +96,9 @@ impl RocksStateMachine {
 
   pub async fn new(db: Arc<DB>, data_dir: PathBuf) -> Result<RocksStateMachine, Error> {
     db.cf_handle(SM_META_FAMILY)
-      .ok_or_else(|| Error::other("column family `_log_meta` not found"))?;
+      .ok_or_else(|| Error::other("column family `_sm_meta` not found"))?;
     db.cf_handle(SM_DATA_FAMILY)
-      .ok_or_else(|| Error::other("column family `_log_data` not found"))?;
+      .ok_or_else(|| Error::other("column family `_sm_data` not found"))?;
 
     let snapshot_dir = data_dir.join("snapshot");
     let sys_data = Self::recover_sys_data(&db)?;
@@ -121,16 +121,15 @@ impl RocksStateMachine {
   fn recover_sys_data(db: &Arc<DB>) -> Result<SysData, io::Error> {
     let cf_meta = db
       .cf_handle(SM_META_FAMILY)
-      .ok_or_else(|| Error::other("column family `_sm_meta` not found"))?;
+      .ok_or_else(|| io::Error::other("column family `_sm_meta` not found"))?;
 
-    // Recover last_applied
     let last_applied = match db.get_cf(&cf_meta, LAST_APPLIED_LOG_KEY) {
       Ok(Some(v)) => {
         let log_id = decode(&v).map_err(read_logs_err)?;
         Some(log_id)
       }
       Ok(None) => None,
-      Err(e) => return Err(io::Error::other(e)),
+      Err(e) => return Err(read_logs_err(e)),
     };
 
     // Recover nodes
@@ -148,13 +147,7 @@ impl RocksStateMachine {
   }
 
   fn get_last_applied_log_id(&self) -> Result<Option<LogId>, io::Error> {
-    Ok(
-      self
-        .sys_data
-        .lock()
-        .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?
-        .last_applied,
-    )
+    Ok(self.lock_sys_data()?.last_applied)
   }
 
   /// Get last membership (constructed from nodes)
@@ -202,7 +195,7 @@ impl RocksStateMachine {
     );
 
     for item in iter {
-      let (key, value) = item.map_err(|e| io::Error::other(e.to_string()))?;
+      let (key, value) = item.map_err(read_logs_err)?;
 
       // Check if the key has the prefix
       if !key.starts_with(prefix) {
@@ -240,25 +233,11 @@ impl RocksStateMachine {
 
   /// Get all nodes from the state machine
   pub fn get_nodes(&self) -> Result<BTreeMap<NodeId, Node>, io::Error> {
-    Ok(
-      self
-        .sys_data
-        .lock()
-        .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?
-        .nodes
-        .clone(),
-    )
+    Ok(self.lock_sys_data()?.nodes.clone())
   }
 
   pub fn contains_node(&self, node_id: NodeId) -> Result<bool, io::Error> {
-    Ok(
-      self
-        .sys_data
-        .lock()
-        .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?
-        .nodes
-        .contains_key(&node_id),
-    )
+    Ok(self.lock_sys_data()?.nodes.contains_key(&node_id))
   }
 
   pub fn add_node(&self, node: Node) -> Result<(), io::Error> {
@@ -451,10 +430,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     }
 
     // Atomic write of all data
-    self
-      .db
-      .write(batch)
-      .map_err(|e| io::Error::other(e.to_string()))?;
+    self.db.write(batch).map_err(read_logs_err)?;
 
     if let Some(last_applied_log_id) = last_applied_log_id {
       self.set_last_applied_log_id(Some(last_applied_log_id))?;
