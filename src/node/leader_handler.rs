@@ -23,8 +23,6 @@ use openraft::error::RaftError;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use tracing::debug;
 use tracing::error;
@@ -292,12 +290,7 @@ impl<'a> LeaderHandler<'a> {
   /// # Safety
   /// Caller must ensure this node is the leader. This method does not check.
   async fn do_write(&self, mut entry: LogEntry) -> Result<AppliedState> {
-    // Set the current timestamp in milliseconds, safe to unwrap
-    let now = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .unwrap_or_default()
-      .as_millis() as u64;
-    entry.time_ms = Some(now);
+    entry.time_ms = Some(crate::utils::now_millis());
 
     let node_id = self.raft().node_id();
 
