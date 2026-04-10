@@ -4,8 +4,6 @@ pub const SM_META_FAMILY: &str = "_sm_meta";
 pub const SM_DATA_FAMILY: &str = "_sm_data";
 
 pub const LAST_APPLIED_LOG_KEY: &str = "last_applied_log";
-#[allow(dead_code)]
-pub const LAST_MEMBERSHIP_KEY: &str = "last_membership";
 pub const NODES_KEY: &str = "nodes";
 
 pub fn column_family_list() -> Vec<String> {

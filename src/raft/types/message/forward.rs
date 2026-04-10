@@ -56,11 +56,6 @@ pub enum RequestPayload {
   Txn(TxnReq),
 }
 
-/// Deprecated: Use `RequestPayload` instead
-#[deprecated(since = "0.1.6", note = "Use RequestPayload instead")]
-#[allow(dead_code)]
-pub type ForwardRequestBody = RequestPayload;
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ForwardRequest {
   pub forward_to_leader: u64,

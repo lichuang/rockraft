@@ -42,8 +42,6 @@ pub struct RaftNode {
   pub(crate) factory: NetworkFactory,
   pub(crate) state_machine: Arc<RocksStateMachine>,
   pub(crate) shutdown_tx: broadcast::Sender<()>,
-  #[allow(dead_code)]
-  pub(crate) _shutdown_rx: broadcast::Receiver<()>,
   pub(crate) service_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -105,7 +103,7 @@ impl RaftNode {
       .map_err(|e| Error::internal(format!("Failed to create raft: {}", e)))?,
     );
 
-    let (shutdown_tx, shutdown_rx_for_struct) = broadcast::channel(1);
+    let (shutdown_tx, _) = broadcast::channel(1);
 
     Ok(Arc::new(Self {
       engine,
@@ -114,7 +112,6 @@ impl RaftNode {
       factory,
       state_machine: Arc::new(state_machine),
       shutdown_tx,
-      _shutdown_rx: shutdown_rx_for_struct,
       service_handle: Mutex::new(None),
     }))
   }
