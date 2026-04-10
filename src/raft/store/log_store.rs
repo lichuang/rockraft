@@ -41,7 +41,7 @@ pub struct RocksLogStore<C>
 where
   C: RaftTypeConfig,
 {
-  pub db: Arc<DB>,
+  pub(crate) db: Arc<DB>,
   _p: PhantomData<C>,
 }
 
