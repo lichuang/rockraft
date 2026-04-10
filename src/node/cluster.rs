@@ -251,7 +251,6 @@ impl RaftNode {
     };
 
     let req = ForwardRequest {
-      forward_to_leader: 1,
       body: RequestPayload::Join(join_req),
     };
 

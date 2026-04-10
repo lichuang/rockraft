@@ -58,7 +58,6 @@ pub enum RequestPayload {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ForwardRequest {
-  pub forward_to_leader: u64,
   pub body: RequestPayload,
 }
 

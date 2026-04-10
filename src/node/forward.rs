@@ -93,10 +93,7 @@ impl RaftNode {
     match self.assume_leader().await {
       Ok(leader) => Self::dispatch_leader_handler(leader, payload).await,
       Err(forward_err) => {
-        let request = ForwardRequest {
-          forward_to_leader: 1,
-          body: payload,
-        };
+        let request = ForwardRequest { body: payload };
         self
           .forward_with_leader_id(forward_err.leader_id, request)
           .await
