@@ -17,7 +17,7 @@ NODES=("node1" "node2" "node3")
 PIDS=()
 LOG_DIR="logs"
 PID_DIR="pids"
-BIN="target/debug/cluster_example"
+BIN="target/release/cluster_example"
 DEFAULT_LOG_LEVEL="info"
 
 # Function to print colored messages

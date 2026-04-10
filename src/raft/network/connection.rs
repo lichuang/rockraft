@@ -36,6 +36,28 @@ use crate::raft::types::TypeConfig;
 use crate::raft::types::decode;
 use crate::raft::types::encode;
 
+trait ReplyValue {
+  fn value(&self) -> &[u8];
+}
+
+impl ReplyValue for crate::raft::protobuf::AppendReply {
+  fn value(&self) -> &[u8] {
+    &self.value
+  }
+}
+
+impl ReplyValue for crate::raft::protobuf::VoteReply {
+  fn value(&self) -> &[u8] {
+    &self.value
+  }
+}
+
+impl ReplyValue for crate::raft::protobuf::SnapshotReply {
+  fn value(&self) -> &[u8] {
+    &self.value
+  }
+}
+
 /// Represents a network connection to a specific Raft node.
 ///
 /// This struct handles the actual RPC communication with a target node using gRPC.
@@ -81,85 +103,58 @@ impl NetworkConnection {
     }
   }
 
-  /// Internal function to send AppendEntries RPC to the target node.
-  /// This function handles serialization of the request and deserialization of the response.
+  async fn send_rpc<Req, Resp, Reply, F, Fut>(&mut self, req: &Req, send: F) -> Result<Resp>
+  where
+    Req: serde::Serialize,
+    Resp: serde::de::DeserializeOwned,
+    Reply: ReplyValue,
+    F: FnOnce(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = tonic::Result<tonic::Response<Reply>>>,
+  {
+    self.serialize_buf.clear();
+    encode(req)
+      .map(|data| self.serialize_buf.extend_from_slice(&data))
+      .map_err(|e| crate::error::Error::internal(format!("encode failed: {}", e)))?;
+
+    let reply = send(self.serialize_buf.clone()).await?.into_inner();
+    decode(reply.value())
+      .map_err(|e| crate::error::Error::internal(format!("decode failed: {}", e)))
+  }
+
   async fn append_entries_internal(
     &mut self,
     req: AppendEntriesRequest<TypeConfig>,
   ) -> Result<AppendEntriesResponse<TypeConfig>> {
     let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
-
-    self.serialize_buf.clear();
-
-    encode(&req)
-      .map(|data| self.serialize_buf.extend_from_slice(&data))
-      .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-
-    let grpc_request = tonic::Request::new(AppendRequest {
-      value: self.serialize_buf.clone(),
-    });
-
-    let grpc_response = conn.append(grpc_request).await?;
-
-    let append_reply = grpc_response.into_inner();
-
-    let result: AppendEntriesResponse<TypeConfig> = decode(&append_reply.value)?;
-
-    Ok(result)
+    self
+      .send_rpc(&req, |data| {
+        conn.append(tonic::Request::new(AppendRequest { value: data }))
+      })
+      .await
   }
 
-  /// Internal function to send Vote RPC to the target node.
-  /// This function handles serialization of the request and deserialization of the response.
   async fn vote_internal(
     &mut self,
     req: VoteRequest<TypeConfig>,
   ) -> Result<VoteResponse<TypeConfig>> {
     let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
-
-    self.serialize_buf.clear();
-
-    encode(&req)
-      .map(|data| self.serialize_buf.extend_from_slice(&data))
-      .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-
-    let grpc_request = tonic::Request::new(PbVoteRequest {
-      value: self.serialize_buf.clone(),
-    });
-
-    let grpc_response = conn.vote(grpc_request).await?;
-
-    let vote_reply = grpc_response.into_inner();
-
-    let result: VoteResponse<TypeConfig> = decode(&vote_reply.value)?;
-
-    Ok(result)
+    self
+      .send_rpc(&req, |data| {
+        conn.vote(tonic::Request::new(PbVoteRequest { value: data }))
+      })
+      .await
   }
 
-  /// Internal function to send InstallSnapshot RPC to the target node.
-  /// This function handles serialization of the request and deserialization of the response.
   async fn install_snapshot_internal(
     &mut self,
     req: InstallSnapshotRequest<TypeConfig>,
   ) -> Result<SnapshotResponse<TypeConfig>> {
     let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
-
-    self.serialize_buf.clear();
-
-    encode(&req)
-      .map(|data| self.serialize_buf.extend_from_slice(&data))
-      .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-
-    let grpc_request = tonic::Request::new(PbSnapshotRequest {
-      value: self.serialize_buf.clone(),
-    });
-
-    let grpc_response = conn.snapshot(grpc_request).await?;
-
-    let snapshot_reply = grpc_response.into_inner();
-
-    let result: SnapshotResponse<TypeConfig> = decode(&snapshot_reply.value)?;
-
-    Ok(result)
+    self
+      .send_rpc(&req, |data| {
+        conn.snapshot(tonic::Request::new(PbSnapshotRequest { value: data }))
+      })
+      .await
   }
 
   /// Send a snapshot in chunks to the target node.

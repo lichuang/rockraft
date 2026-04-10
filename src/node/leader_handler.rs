@@ -10,6 +10,7 @@ use crate::raft::types::JoinRequest;
 use crate::raft::types::LeaveRequest;
 use crate::raft::types::LogEntry;
 use crate::raft::types::Node;
+use crate::raft::types::NodeId;
 use crate::raft::types::ScanPrefixReply;
 use crate::raft::types::ScanPrefixReq;
 use crate::raft::types::TxnReply;
@@ -104,31 +105,38 @@ impl<'a> LeaderHandler<'a> {
   ///
   /// # Leader Requirement
   /// Must be called on the leader. Use `RaftNode::assume_leader()` first.
+  fn is_voter(&self, node_id: NodeId) -> bool {
+    self
+      .raft()
+      .metrics()
+      .borrow_watched()
+      .membership_config
+      .membership()
+      .voter_ids()
+      .any(|id| id == node_id)
+  }
+
   pub async fn add_node(&self, req: JoinRequest) -> Result<()> {
     let node_id = req.node_id;
     info!("Handling join request for node {}", node_id);
 
-    // Get current membership and check if node already exists
-    let metrics = self.raft().metrics().borrow_watched().clone();
-    let membership = metrics.membership_config.membership();
-
-    let voters: BTreeSet<u64> = membership.voter_ids().collect();
-    if voters.contains(&node_id) {
+    if self.is_voter(node_id) {
       info!("Node {} already in membership, skipping join", node_id);
       return Ok(());
     }
 
-    // Sync existing nodes that are missing from the state machine.
-    // This ensures new nodes learn about all cluster members via log replay.
-    let sm = self.node.state_machine();
+    let membership = self
+      .raft()
+      .metrics()
+      .borrow_watched()
+      .membership_config
+      .membership()
+      .clone();
+
+    // Sync all existing nodes to the log so the joining node learns about
+    // every cluster member via log replay.
     for (id, node) in membership.nodes() {
-      if sm
-        .contains_node(*id)
-        .map_err(|e| Error::internal(format!("contains_node check failed: {}", e)))?
-      {
-        continue;
-      }
-      info!("Syncing missing node {} to state machine", id);
+      info!("Syncing node {} to state machine", id);
       let entry = LogEntry::new(Cmd::AddNode {
         node: node.clone(),
         overriding: true,
@@ -179,13 +187,7 @@ impl<'a> LeaderHandler<'a> {
   pub async fn remove_node(&self, req: LeaveRequest) -> Result<()> {
     let node_id = req.node_id;
 
-    // Get current membership and check if node exists
-    let metrics = self.raft().metrics().borrow_watched().clone();
-    let membership = metrics.membership_config.membership();
-
-    let voters: BTreeSet<u64> = membership.voter_ids().collect();
-    if !voters.contains(&node_id) {
-      // Node not in cluster, consider it already left
+    if !self.is_voter(node_id) {
       return Ok(());
     }
 
