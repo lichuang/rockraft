@@ -87,6 +87,13 @@ impl Clone for RocksStateMachine {
 }
 
 impl RocksStateMachine {
+  fn lock_sys_data(&self) -> Result<std::sync::MutexGuard<'_, SysData>, io::Error> {
+    self
+      .sys_data
+      .lock()
+      .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))
+  }
+
   pub async fn new(db: Arc<DB>, data_dir: PathBuf) -> Result<RocksStateMachine, Error> {
     db.cf_handle(SM_META_FAMILY)
       .ok_or_else(|| Error::other("column family `_log_meta` not found"))?;
@@ -157,10 +164,7 @@ impl RocksStateMachine {
 
   /// Build StoredMembership from current nodes
   fn build_membership_from_nodes(&self) -> Result<StoredMembership, io::Error> {
-    let sys_data = self
-      .sys_data
-      .lock()
-      .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?;
+    let sys_data = self.lock_sys_data()?;
     let node_ids: BTreeSet<NodeId> = sys_data.nodes.keys().cloned().collect();
     let nodes = sys_data.nodes.clone();
 
@@ -212,10 +216,7 @@ impl RocksStateMachine {
   }
 
   fn set_last_applied_log_id(&self, log_id: Option<LogId>) -> Result<(), io::Error> {
-    let mut sys_data = self
-      .sys_data
-      .lock()
-      .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?;
+    let mut sys_data = self.lock_sys_data()?;
 
     match log_id {
       Some(id) => {
@@ -261,10 +262,7 @@ impl RocksStateMachine {
   }
 
   pub fn add_node(&self, node: Node) -> Result<(), io::Error> {
-    let mut sys_data = self
-      .sys_data
-      .lock()
-      .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?;
+    let mut sys_data = self.lock_sys_data()?;
 
     sys_data.nodes.insert(node.node_id, node);
 
@@ -278,10 +276,7 @@ impl RocksStateMachine {
   }
 
   fn remove_node(&self, node_id: NodeId) -> Result<(), io::Error> {
-    let mut sys_data = self
-      .sys_data
-      .lock()
-      .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))?;
+    let mut sys_data = self.lock_sys_data()?;
 
     sys_data.nodes.remove(&node_id);
 
