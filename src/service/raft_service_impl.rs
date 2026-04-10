@@ -52,13 +52,19 @@ impl RaftServiceImpl {
 
   fn result_to_raft_reply(result: Result<ForwardResponse, Error>) -> pb::RaftReply {
     match result {
-      Ok(response) => {
-        let data = encode(&response).expect("Failed to serialize ForwardResponse");
-        pb::RaftReply {
+      Ok(response) => match encode(&response) {
+        Ok(data) => pb::RaftReply {
           data,
           error: String::new().into(),
+        },
+        Err(e) => {
+          tracing::error!("Failed to serialize ForwardResponse: {}", e);
+          pb::RaftReply {
+            data: Vec::new(),
+            error: format!("internal error: serialize failed: {}", e).into(),
+          }
         }
-      }
+      },
       Err(err) => {
         let error_msg = err.to_string();
         pb::RaftReply {
