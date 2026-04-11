@@ -1,3 +1,11 @@
+//! Core types for the Raft implementation.
+//!
+//! This module defines the data types used throughout the Raft protocol:
+//! - Log entries and commands
+//! - Request/response messages
+//! - Node identification and cluster membership
+//! - Serialization utilities
+
 mod applied_state;
 mod cmd;
 mod encoder;

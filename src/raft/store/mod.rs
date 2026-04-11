@@ -1,3 +1,11 @@
+//! RocksDB-based storage backends for Raft.
+//!
+//! Implements OpenRaft's storage traits using RocksDB:
+//! - [`RocksLogStore`]: Persistent Raft log storage
+//! - [`RocksStateMachine`]: Key-value state machine with snapshot support
+//!
+//! Column families separate different data types for efficient access.
+
 pub mod keys;
 mod log_store;
 mod meta;
