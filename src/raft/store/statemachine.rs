@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fs::File;
 use std::io;
 use std::io::Error;
 use std::path::PathBuf;
@@ -99,6 +100,14 @@ impl Clone for RocksStateMachine {
 }
 
 impl RocksStateMachine {
+  pub fn create_snapshot_temp_file(&self, snapshot_id: &str) -> Result<File, io::Error> {
+    File::create(
+      self
+        .snapshot_dir
+        .join(format!("{}_incomplete", snapshot_id)),
+    )
+  }
+
   fn lock_sys_data(&self) -> Result<std::sync::MutexGuard<'_, SysData>, io::Error> {
     self
       .sys_data

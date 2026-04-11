@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::SeekFrom;
 use std::sync::Arc;
 
@@ -185,9 +184,11 @@ impl RaftService for RaftServiceImpl {
       }
 
       // Create a temporary file for receiving the snapshot
-      let std_file =
-        File::create(std::env::temp_dir().join(format!("rockraft_snapshot_{}", snapshot_id)))
-          .map_internal("Failed to create temp file")?;
+      let std_file = self
+        .node
+        .state_machine()
+        .create_snapshot_temp_file(&snapshot_id)
+        .map_internal("Failed to create snapshot temp file")?;
       let tokio_file = tokio::fs::File::from_std(std_file);
 
       streaming_guard.insert(
