@@ -1,3 +1,10 @@
+// ForwardRequest/ForwardResponse are serialized with postcard into gRPC bytes
+// rather than using structured protobuf messages. This is intentional:
+// 1. These types embed OpenRaft generic types (LogEntry, Cmd) that cannot be
+//    mapped to protobuf without extensive boilerplate.
+// 2. All nodes are same-version Rust — cross-language compatibility is not needed.
+// 3. Internal storage also uses postcard (via serde), so a single codec serves both.
+
 use crate::error::{Error, Result};
 use crate::raft::protobuf as pb;
 use crate::raft::types::AppliedState;

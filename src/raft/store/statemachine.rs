@@ -47,6 +47,17 @@ pub struct RocksStateMachine {
   db: Arc<DB>,
   snapshot_dir: PathBuf,
 
+  // In-memory write-through cache of small metadata (nodes, last_applied_log_id)
+  // that is also persisted to RocksDB (SM_META column family).
+  //
+  // Why not read from RocksDB directly?
+  // - apply() processes a stream of log entries; cached `nodes` and `last_applied`
+  //   must be visible to subsequent entries within the same batch before the
+  //   WriteBatch is committed.
+  // - Avoids repeated RocksDB meta-CF lookups on every applied entry.
+  //
+  // Invariant: every mutation (add_node, set_last_applied_log_id) updates both
+  // this cache *and* RocksDB atomically.
   sys_data: Arc<Mutex<SysData>>,
 }
 
