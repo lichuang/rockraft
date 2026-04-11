@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-04-11
+
+### 🐛 Bug Fixes
+
+- *(service)* Remove panic on ForwardResponse serialization failure
+- Store snapshot temp files in snapshot_dir instead of system temp dir
+- Evict abandoned streaming snapshots to prevent memory leak
+- *(node)* Replace std::sync::Mutex with tokio::sync::Mutex in async context
+
+### 🚜 Refactor
+
+- *(error)* Simplify error type hierarchy
+- *(error)* Eliminate duplicated error handling code
+- *(node)* Eliminate pass-through methods between RaftNode and LeaderHandler
+- *(config)* Eliminate ParsedConfig and unify configuration parsing
+- *(node)* Deepen RaftNodeBuilder with progressive construction
+- *(statemachine)* Inline `mutex_lock_err` function
+- Unify naming inconsistencies
+- Eliminate assume_leader/forward duplication in RaftNode
+- *(node)* Split RaftNode God Object into focused modules
+- *(engine)* Hide RocksDBEngine storage detail behind pub(crate) accessor
+- *(engine)* Encapsulate RocksDBEngine and eliminate panic on open failure
+- Deduplicate RPC serialization, membership checks, and fix integration tests
+- *(store)* Extract lock_sys_data() to deduplicate mutex error handling
+- *(utils)* Unify timestamp logic into now_millis()
+- *(tests)* Extract shared test utilities to eliminate duplication
+- Deduplicate RocksDB config and hide LogStore internals
+- Deduplicate RocksDB config and hide store internals
+- Hide store internals and unify node creation path
+- Unify error handling in leader_handler and statemachine
+- Extract apply_upsert_kv helper to deduplicate apply() logic
+- Split snapshot() into focused helper methods
+- Unify Endpoint to single definition in config module
+- *(network)* Merge grpc modules into unified network layer
+- *(visibility)* Tighten public API by converting pub to pub(crate)
+
+### 📚 Documentation
+
+- *(node)* Improve documentation to explain "why" not "what"
+- Add cross-module design decision comments
+- Add module-level documentation
+
+### ⚡ Performance
+
+- *(node)* Skip redundant O(n) node sync on cluster join
+- Use exponential backoff for forward request retries
+
+### ⚙️ Miscellaneous Tasks
+
+- *(grpc)* Remove dead RpcClientConf with leftover metasrv fields
+- Remove dead code across crate
+- *(types)* Remove unused forward_to_leader field from ForwardRequest
+
 ## [0.1.5] - 2026-04-06
 
 ### 🚀 Features
