@@ -6,8 +6,8 @@ use std::fmt::Formatter;
 use std::fmt::Result as FmtResult;
 
 use super::AppliedState;
-use super::endpoint::Endpoint;
 use super::log_entry::LogEntry;
+use crate::config::Endpoint;
 
 pub type SnapshotData = tokio::fs::File;
 

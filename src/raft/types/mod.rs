@@ -1,7 +1,6 @@
 mod applied_state;
 mod cmd;
 mod encoder;
-mod endpoint;
 mod log_entry;
 mod message;
 mod raft_codec;
@@ -16,9 +15,11 @@ pub use cmd::TxnOp;
 pub use cmd::TxnReply;
 pub use cmd::TxnReq;
 pub use cmd::UpsertKV;
+// Endpoint is defined in config to avoid circular dependencies.
+// Re-exported here so raft types can reference it without depending on config.
+pub use crate::config::Endpoint;
 pub use encoder::decode;
 pub use encoder::encode;
-pub use endpoint::Endpoint;
 pub use log_entry::LogEntry;
 pub use message::BatchWriteReply;
 pub use message::BatchWriteReq;

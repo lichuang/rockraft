@@ -243,8 +243,6 @@ mod tests {
   use tempfile::tempdir;
 
   fn create_test_config(data_dir: &str, node_id: u64, addr: &str) -> Config {
-    use crate::config::Endpoint;
-
     let endpoint = Endpoint::parse(addr).expect("Invalid test address");
     Config {
       node_id,
