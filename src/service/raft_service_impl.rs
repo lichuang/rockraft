@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use openraft::raft::{
   AppendEntriesRequest, InstallSnapshotRequest, InstallSnapshotResponse, VoteRequest,
@@ -16,6 +17,9 @@ use crate::node::RaftNode;
 use crate::raft::types::{ForwardRequest, ForwardResponse, Snapshot, TypeConfig, decode, encode};
 use openraft::async_runtime::watch::WatchReceiver;
 use pb::raft_service_server::RaftService;
+
+/// Abandoned streaming snapshots are evicted after this timeout.
+const STALE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Helper trait for converting errors to tonic::Status
 trait IntoStatus<T> {
@@ -33,6 +37,7 @@ impl<T, E: std::fmt::Display> IntoStatus<T> for Result<T, E> {
 struct StreamingSnapshot {
   snapshot_id: String,
   data: tokio::fs::File,
+  created_at: Instant,
 }
 
 pub struct RaftServiceImpl {
@@ -169,6 +174,9 @@ impl RaftService for RaftServiceImpl {
 
     let mut streaming_guard = self.streaming_snapshots.lock().await;
 
+    // Evict stale snapshots (abandoned by leader crash or network failure)
+    streaming_guard.retain(|_, s| s.created_at.elapsed() < STALE_SNAPSHOT_TIMEOUT);
+
     // Check if this is a new snapshot or continuation
     let curr_id = streaming_guard
       .get(&snapshot_id)
@@ -196,6 +204,7 @@ impl RaftService for RaftServiceImpl {
         StreamingSnapshot {
           snapshot_id: snapshot_id.clone(),
           data: tokio_file,
+          created_at: Instant::now(),
         },
       );
     }
