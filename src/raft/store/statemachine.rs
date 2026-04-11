@@ -40,6 +40,7 @@ use crate::raft::types::StoredMembership;
 use crate::raft::types::SysData;
 use crate::raft::types::TxnOp;
 use crate::raft::types::TypeConfig;
+use crate::raft::types::UpsertKV;
 use crate::raft::types::read_logs_err;
 
 #[derive(Debug)]
@@ -242,7 +243,6 @@ impl RocksStateMachine {
     Ok(())
   }
 
-  /// Get all nodes from the state machine
   pub fn get_nodes(&self) -> Result<BTreeMap<NodeId, Node>, io::Error> {
     Ok(self.lock_sys_data()?.nodes.clone())
   }
@@ -277,6 +277,18 @@ impl RocksStateMachine {
       .map_err(read_logs_err)?;
 
     Ok(())
+  }
+
+  fn apply_upsert_kv(&self, kv: &UpsertKV, batch: &mut rocksdb::WriteBatch) {
+    let cf_data = &self.cf_sm_data();
+    match &kv.value {
+      Operation::Update(value) => {
+        batch.put_cf(cf_data, kv.key.as_bytes(), value);
+      }
+      Operation::Delete => {
+        batch.delete_cf(cf_data, kv.key.as_bytes());
+      }
+    }
   }
 }
 
@@ -321,28 +333,12 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
         EntryPayload::Normal(req) => {
           match req.cmd {
             Cmd::UpsertKV(kv) => {
-              let cf_data = &self.cf_sm_data();
-              match kv.value {
-                Operation::Update(value) => {
-                  batch.put_cf(cf_data, kv.key.as_bytes(), value);
-                }
-                Operation::Delete => {
-                  batch.delete_cf(cf_data, kv.key.as_bytes());
-                }
-              }
+              self.apply_upsert_kv(&kv, &mut batch);
               AppliedState::None
             }
             Cmd::BatchUpsertKV { entries } => {
-              let cf_data = &self.cf_sm_data();
-              for kv in entries {
-                match kv.value {
-                  Operation::Update(value) => {
-                    batch.put_cf(cf_data, kv.key.as_bytes(), value);
-                  }
-                  Operation::Delete => {
-                    batch.delete_cf(cf_data, kv.key.as_bytes());
-                  }
-                }
+              for kv in &entries {
+                self.apply_upsert_kv(kv, &mut batch);
               }
               AppliedState::None
             }
@@ -402,14 +398,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
               // Execute operations
               for kv in ops_to_execute {
-                match &kv.value {
-                  Operation::Update(value) => {
-                    batch.put_cf(cf_data, kv.key.as_bytes(), value);
-                  }
-                  Operation::Delete => {
-                    batch.delete_cf(cf_data, kv.key.as_bytes());
-                  }
-                }
+                self.apply_upsert_kv(kv, &mut batch);
               }
 
               info!(
