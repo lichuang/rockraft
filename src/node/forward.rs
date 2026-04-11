@@ -22,7 +22,8 @@ use super::node::RaftNode;
 
 /// Retry configuration for forward operations
 const MAX_RETRIES: u32 = 20;
-const RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const RETRY_INITIAL_INTERVAL: Duration = Duration::from_millis(200);
+const RETRY_MAX_INTERVAL: Duration = Duration::from_secs(3);
 
 impl RaftNode {
   /// Get the current leader node ID, waiting up to a deadline.
@@ -137,8 +138,16 @@ impl RaftNode {
           if let Some(reason) = retry_reason
             && attempt < MAX_RETRIES - 1
           {
-            debug!("{}, retrying {}/{}", reason, attempt + 1, MAX_RETRIES);
-            sleep(RETRY_INTERVAL).await;
+            let delay = RETRY_INITIAL_INTERVAL * 2u32.saturating_pow(attempt);
+            let delay = delay.min(RETRY_MAX_INTERVAL);
+            debug!(
+              "{}, retrying {}/{}, waiting {:?}",
+              reason,
+              attempt + 1,
+              MAX_RETRIES,
+              delay
+            );
+            sleep(delay).await;
             continue;
           }
 
