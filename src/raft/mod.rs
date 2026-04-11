@@ -6,11 +6,11 @@
 //! - [`types`]: Core data types and messages
 //! - [`protobuf`]: Generated gRPC service definitions
 
-#[allow(clippy::all)]
-pub mod protobuf {
+#[allow(clippy::all, dead_code)]
+pub(crate) mod protobuf {
   tonic::include_proto!("raftpb");
 }
 
-pub mod network;
-pub mod store;
+pub(crate) mod network;
+pub(crate) mod store;
 pub mod types;

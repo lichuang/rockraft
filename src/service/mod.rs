@@ -7,4 +7,4 @@
 
 mod raft_service_impl;
 
-pub use raft_service_impl::RaftServiceImpl;
+pub(crate) use raft_service_impl::RaftServiceImpl;

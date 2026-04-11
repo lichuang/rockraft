@@ -7,4 +7,3 @@ mod client_pool;
 mod manager;
 
 pub use client_pool::ClientPool;
-pub use manager::RaftServiceManager;

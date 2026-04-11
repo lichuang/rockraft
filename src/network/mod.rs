@@ -5,8 +5,8 @@
 //! - Connection pooling for inter-node Raft protocol communication
 //! - DNS resolution and TLS support
 
-pub mod connection;
-pub mod pool;
+pub(crate) mod connection;
+pub(crate) mod pool;
 
 // Re-export commonly used types
 pub use connection::JoinConnectionFactory;

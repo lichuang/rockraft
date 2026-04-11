@@ -77,6 +77,7 @@ impl NetworkConnection {
     }
   }
 
+  #[allow(dead_code)]
   pub async fn forward(&mut self, req: ForwardRequest) -> Result<ForwardResponse> {
     let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
 

@@ -7,6 +7,4 @@ mod client_config;
 mod dns_resolver;
 mod factory;
 
-pub use client_config::RpcClientTlsConfig;
-pub use dns_resolver::{DNSResolver, DNSService};
 pub use factory::JoinConnectionFactory;

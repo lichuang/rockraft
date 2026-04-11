@@ -6,7 +6,7 @@
 //!
 //! Column families separate different data types for efficient access.
 
-pub mod keys;
+pub(crate) mod keys;
 mod log_store;
 mod meta;
 mod snapshot;
@@ -27,7 +27,7 @@ use crate::raft::types::TypeConfig;
 ///
 /// Callers that need a shared database for both stores should use this
 /// instead of assembling the column family list themselves.
-pub fn create_storage_engine(data_path: &str, max_open_files: i32) -> Result<RocksDBEngine> {
+pub(crate) fn create_storage_engine(data_path: &str, max_open_files: i32) -> Result<RocksDBEngine> {
   RocksDBEngine::new(data_path, max_open_files, keys::column_family_list())
 }
 
@@ -35,7 +35,7 @@ pub fn create_storage_engine(data_path: &str, max_open_files: i32) -> Result<Roc
 ///
 /// This encapsulates the coordination of constructing the two storage
 /// components, so callers don't need to reach into engine internals.
-pub async fn create_stores(
+pub(crate) async fn create_stores(
   engine: &RocksDBEngine,
   data_dir: PathBuf,
 ) -> Result<(RocksLogStore<TypeConfig>, RocksStateMachine)> {
