@@ -17,7 +17,7 @@ use tracing::debug;
 use crate::config::Config;
 use crate::engine::RocksDBEngine;
 use crate::error::{Error, Result};
-use crate::raft::grpc_client::ClientPool;
+use crate::network::ClientPool;
 use crate::raft::network::NetworkFactory;
 use crate::raft::store;
 use crate::raft::store::RocksStateMachine;

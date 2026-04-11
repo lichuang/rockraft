@@ -8,7 +8,7 @@ use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
-use super::raft_service_manager::RaftServiceManager;
+use super::manager::RaftServiceManager;
 
 // Increased default timeout to handle network latency better
 const DEFAULT_CONNECTION_TIMEOUT_SECS: u64 = 10;

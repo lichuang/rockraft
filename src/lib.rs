@@ -58,7 +58,7 @@
 //! - [`config`] - Configuration structures for nodes and clusters
 //! - [`node`] - Core Raft node implementation and builder
 //! - [`raft`] - Raft types and storage backends (RocksDB state machine and log storage)
-//! - [`grpc`] - gRPC service for inter-node communication
+//! - [`network`] - Network layer for inter-node communication (connection management and pooling)
 //! - [`service`] - High-level service abstractions
 //! - [`engine`] - Query engine and command execution
 //! - [`error`] - Error types and handling
@@ -144,7 +144,7 @@
 pub mod config;
 pub mod engine;
 pub mod error;
-pub mod grpc;
+pub mod network;
 pub mod node;
 pub mod raft;
 pub mod service;

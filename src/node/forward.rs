@@ -11,7 +11,7 @@ use tokio::time::{sleep, timeout};
 use tracing::debug;
 
 use crate::error::{Error, Result};
-use crate::grpc::JoinConnectionFactory;
+use crate::network::JoinConnectionFactory;
 use crate::raft::protobuf::raft_service_client::RaftServiceClient;
 use crate::raft::types::{
   ForwardRequest, ForwardResponse, ForwardToLeader, NodeId, RequestPayload, decode,

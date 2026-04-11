@@ -23,7 +23,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 
 use crate::error::{ApiError, Result};
-use crate::raft::grpc_client::ClientPool;
+use crate::network::ClientPool;
 use crate::raft::protobuf::AppendRequest;
 use crate::raft::protobuf::RaftReply;
 use crate::raft::protobuf::RaftRequest;
