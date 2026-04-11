@@ -9,10 +9,9 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use openraft::Raft;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 use tracing::debug;
 
 use crate::config::Config;
@@ -59,11 +58,7 @@ impl RaftNode {
   pub async fn shutdown(&self) -> Result<()> {
     let _ = self.shutdown_tx.send(());
 
-    let handle = self
-      .service_handle
-      .lock()
-      .map_err(|e| Error::internal(format!("Failed to lock service handle: {}", e)))?
-      .take();
+    let handle = self.service_handle.lock().await.take();
 
     if let Some(h) = handle {
       h.await.ok();

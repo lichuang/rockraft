@@ -79,11 +79,7 @@ impl RaftNode {
 
     match startup_rx.await {
       Ok(Ok(())) => {
-        *raft_node
-          .service_handle
-          .lock()
-          .map_err(|e| Error::internal(format!("Failed to lock service handle: {}", e)))? =
-          Some(handle);
+        *raft_node.service_handle.lock().await = Some(handle);
         info!("Raft gRPC service started successfully");
         Ok(())
       }

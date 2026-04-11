@@ -3,7 +3,7 @@ use std::fmt;
 
 use super::Cmd;
 
-/// The application data request type which the `metasrv` works with.
+/// A Raft log entry carrying a command and optional timestamp.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
   /// The time in millisecond when this log is proposed by the leader.
