@@ -369,11 +369,10 @@ Each node has its own TOML configuration file in the `conf/` directory.
 
 ```toml
 node_id = 1
-http_addr = "127.0.0.1:8001"
+http_address = "127.0.0.1:8001"
 
 [raft]
-addr = "127.0.0.1:7001"
-single = false
+address = "127.0.0.1:7001"
 join = ["127.0.0.1:7002", "127.0.0.1:7003"]
 
 [rocksdb]
@@ -385,11 +384,10 @@ max_open_files = 10000
 
 ```toml
 node_id = 2
-http_addr = "127.0.0.1:8002"
+http_address = "127.0.0.1:8002"
 
 [raft]
-addr = "127.0.0.1:7002"
-single = false
+address = "127.0.0.1:7002"
 join = ["127.0.0.1:7001"]
 
 [rocksdb]
@@ -401,11 +399,10 @@ max_open_files = 10000
 
 ```toml
 node_id = 3
-http_addr = "127.0.0.1:8003"
+http_address = "127.0.0.1:8003"
 
 [raft]
-addr = "127.0.0.1:7003"
-single = false
+address = "127.0.0.1:7003"
 join = ["127.0.0.1:7001"]
 
 [rocksdb]
@@ -526,7 +523,6 @@ Configuration loaded:
   raft_addr: 127.0.0.1:7001
   http_addr: 127.0.0.1:8001
   data_path: /tmp/rockraft_cluster/node1
-  single: false
   join: ["127.0.0.1:7002", "127.0.0.1:7003"]
 
 Creating Raft node...
@@ -558,7 +554,6 @@ Configuration loaded:
   raft_addr: 127.0.0.1:7002
   http_addr: 127.0.0.1:8002
   data_path: /tmp/rockraft_cluster/node2
-  single: false
   join: ["127.0.0.1:7001"]
 
 Creating Raft node...
@@ -584,7 +579,7 @@ Press Ctrl+C to shutdown...
 
 ### Cluster Mode
 
-- All nodes are configured with `single = false` and `join` list
+- All nodes are configured with `join` list
 - Node 1 initializes the cluster with all 3 members
 - Node 2 and 3 join the cluster via the `join` configuration
 - Data is automatically replicated across all nodes

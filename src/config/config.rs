@@ -4,7 +4,7 @@ use serde::Serialize;
 use super::default::default_raft_config;
 use super::default::default_rocksdb_config;
 use super::endpoint::Endpoint;
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Node configuration with all fields parsed and validated.
 ///
@@ -31,9 +31,7 @@ pub struct RaftConfig {
   pub endpoint: Endpoint,
   /// The advertised endpoint for other nodes to connect to
   pub advertise_endpoint: Endpoint,
-  /// Single node raft cluster
-  pub single: bool,
-  /// Addresses of nodes to join
+  /// Addresses of nodes to join (empty for single-node cluster)
   pub join: Vec<String>,
 }
 
@@ -56,7 +54,6 @@ pub(crate) struct RawConfig {
 pub(crate) struct RawRaftConfig {
   pub address: String,
   pub advertise_host: String,
-  pub single: bool,
   pub join: Vec<String>,
 }
 
@@ -66,13 +63,6 @@ impl Config {
   /// This method parses all string fields into their typed representations
   /// and validates the configuration.
   pub(crate) fn validate_and_parse(raw: RawConfig) -> Result<Self> {
-    // Validate basic constraints
-    if raw.raft.single && !raw.raft.join.is_empty() {
-      return Err(Error::config(
-        "'single' mode cannot be used together with 'join' configuration",
-      ));
-    }
-
     // Parse raft endpoint
     let endpoint = Endpoint::parse(&raw.raft.address)?;
 
@@ -88,7 +78,6 @@ impl Config {
       raft: RaftConfig {
         endpoint,
         advertise_endpoint,
-        single: raw.raft.single,
         join: raw.raft.join,
       },
       rocksdb: RocksdbConfig {
@@ -120,7 +109,6 @@ impl Serialize for Config {
       raft: RawRaftConfig {
         address: self.raft.endpoint.to_string(),
         advertise_host: self.raft.advertise_endpoint.addr().to_string(),
-        single: self.raft.single,
         join: self.raft.join.clone(),
       },
       rocksdb: self.rocksdb.clone(),

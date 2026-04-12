@@ -4,7 +4,6 @@ http_addr = "127.0.0.1:8001"
 [raft]
 address = "127.0.0.1:7001"
 advertise_host = "localhost"
-single = true
 join = []
 
 [rocksdb]

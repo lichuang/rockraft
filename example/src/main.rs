@@ -272,7 +272,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
   println!("  raft_addr: {}", config.base.raft.endpoint);
   println!("  http_addr: {}", config.http_addr);
   println!("  data_path: {}", config.base.rocksdb.data_path);
-  println!("  single: {}", config.base.raft.single);
   println!("  join: {:?}", config.base.raft.join);
   println!("  log: {:?}", config.log);
 

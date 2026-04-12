@@ -138,18 +138,16 @@ impl<'a> RaftNodeBuilder<'a> {
 
     // Initialize or join cluster if requested
     if self.auto_init_cluster {
-      if config.raft.single {
+      if config.raft.join.is_empty() {
         info!("Initializing single-node cluster");
         let node = crate::raft::types::Node {
           node_id: config.node_id,
           endpoint: config.raft.endpoint.clone(),
         };
         raft_node.init_cluster(node).await?;
-      } else if !config.raft.join.is_empty() {
+      } else {
         info!("Joining existing cluster via: {:?}", config.raft.join);
         raft_node.join_cluster().await?;
-      } else {
-        info!("Auto-init skipped: no join list and not in single mode");
       }
     } else {
       info!("Auto-init disabled: node will not join cluster automatically");

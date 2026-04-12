@@ -244,7 +244,6 @@ mod tests {
       raft: RaftConfig {
         endpoint: endpoint.clone(),
         advertise_endpoint: endpoint,
-        single: true,
         join: vec![],
       },
       rocksdb: RocksdbConfig {

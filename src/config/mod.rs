@@ -15,7 +15,6 @@
 //!     raft: RaftConfig {
 //!         endpoint: Endpoint::parse("127.0.0.1:5001").unwrap(),
 //!         advertise_endpoint: Endpoint::parse("127.0.0.1:5001").unwrap(),
-//!         single: true,
 //!         join: vec![],
 //!     },
 //!     rocksdb: RocksdbConfig {
