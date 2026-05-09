@@ -276,6 +276,67 @@ class ClusterClient:
                 pass
             time.sleep(0.5)
         raise RuntimeError(f"Node on port {port} failed to sync members after {max_retries} retries")
+    
+    def trigger_snapshot(self, port: int, timeout: int = 30, retries: int = 3) -> Dict[str, Any]:
+        """Trigger a snapshot build and wait for completion."""
+        url = f"http://127.0.0.1:{port}/trigger_snapshot"
+        last_error = None
+        for attempt in range(retries):
+            try:
+                req = urllib.request.Request(url, data=b"", headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    return json.loads(response.read().decode())
+            except urllib.error.HTTPError as e:
+                body = e.read().decode() if e.fp else ""
+                last_error = f"HTTP {e.code}: {body}"
+                if attempt < retries - 1:
+                    time.sleep(1)
+            except Exception as e:
+                last_error = str(e)
+                if attempt < retries - 1:
+                    time.sleep(1)
+        raise RuntimeError(f"Failed to trigger snapshot on port {port} after {retries} retries: {last_error}")
+    
+    def snapshot_status(self, port: int, timeout: int = 5) -> Dict[str, Any]:
+        """Get the current snapshot status."""
+        url = f"http://127.0.0.1:{port}/snapshot_status"
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode())
+    
+    def get_metrics(self, port: int, timeout: int = 5) -> Dict[str, Any]:
+        """Get node metrics including current_term and last_applied."""
+        url = f"http://127.0.0.1:{port}/metrics"
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode())
+    
+    def trigger_snapshot_and_verify(self, port: int) -> Dict[str, Any]:
+        """Trigger snapshot, verify term matches leader and index is valid."""
+        metrics_before = self.get_metrics(port)
+        current_term = metrics_before.get("current_term")
+        
+        status_before = self.snapshot_status(port)
+        prev_index = status_before.get("index")
+        
+        result = self.trigger_snapshot(port)
+        assert result.get("success") is True, f"Trigger snapshot failed: {result}"
+        trigger_term = result.get("term")
+        trigger_index = result.get("index")
+        
+        status = self.snapshot_status(port)
+        assert status.get("snapshot_exists") is True, f"Snapshot not found after trigger: {status}"
+        
+        assert trigger_term == current_term, (
+            f"Snapshot term {trigger_term} != current term {current_term}"
+        )
+        assert trigger_index is not None and trigger_index > 0, (
+            f"Snapshot index should be positive, got {trigger_index}"
+        )
+        if prev_index is not None:
+            assert trigger_index >= prev_index, (
+                f"Snapshot index {trigger_index} < previous {prev_index}"
+            )
+        
+        return {"trigger": result, "status": status}
 
 
 @pytest.fixture(scope="module")
@@ -1730,6 +1791,202 @@ class TestConcurrency:
             print(f"[INFO] {len(errors)} errors during high load test (expected some)")
         
         print(f"[PASS] High load test: {success_count}/{num_operations} operations succeeded ({success_rate:.1%})")
+
+
+class TestSnapshot:
+    """Test snapshot functionality."""
+
+    def test_snapshot_basic_build_and_verify(self, cluster: ClusterClient):
+        """1.1 Basic snapshot build and verify"""
+        test_data = {f"snap_basic_{i}": f"value_{i}" for i in range(10)}
+
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        for port in HTTP_PORTS:
+            for key, expected in test_data.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            for key, expected in test_data.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected
+
+    def test_snapshot_large_dataset(self, cluster: ClusterClient):
+        """1.2 Large dataset snapshot"""
+        test_data = {f"snap_large_{i:04d}": f"value_{i}" for i in range(1000)}
+
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        import random
+        sample_keys = random.sample(list(test_data.keys()), 20)
+        for port in HTTP_PORTS:
+            for key in sample_keys:
+                result = cluster.get_value(port, key)
+                assert result.get("value") == test_data[key]
+
+    def test_snapshot_binary_data(self, cluster: ClusterClient):
+        """1.3 Binary data snapshot"""
+        test_cases = [
+            ("snap_unicode", "你好世界🌍🚀"),
+            ("snap_newline", "line1\nline2\nline3"),
+            ("snap_tab", "col1\tcol2\tcol3"),
+            ("snap_symbols", "!@#$%^&*()_+-=[]{}|;':\",./<>?"),
+        ]
+
+        for key, value in test_cases:
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            for key, expected in test_cases:
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected
+
+    def test_snapshot_consistency_across_nodes(self, cluster: ClusterClient):
+        """1.4 Cross-node snapshot consistency"""
+        test_data = {f"snap_consist_{i}": f"value_{i}" for i in range(20)}
+
+        for key, value in test_data.items():
+            cluster.set_value(HTTP_PORTS[0], key, value)
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+        time.sleep(1)
+
+        all_kv_sets = []
+        for port in HTTP_PORTS:
+            result = cluster.query_prefix(port, "snap_consist_")
+            items = {(item["key"], item["value"]) for item in result.get("items", [])}
+            all_kv_sets.append(items)
+
+        for kv_set in all_kv_sets[1:]:
+            assert kv_set == all_kv_sets[0], "KV sets differ across nodes after snapshot"
+
+    def test_snapshot_after_batch_write(self, cluster: ClusterClient):
+        """1.5 Snapshot after batch write"""
+        operations = [{"op": "set", "key": f"snap_batch_set_{i}", "value": f"val_{i}"} for i in range(10)]
+        operations += [{"op": "set", "key": f"snap_batch_del_{i}", "value": f"todelete_{i}"} for i in range(2)]
+
+        result = cluster.batch_write(HTTP_PORTS[0], operations)
+        assert result.get("success") is True
+
+        for i in range(2):
+            cluster.batch_write(HTTP_PORTS[0], [{"op": "delete", "key": f"snap_batch_del_{i}"}])
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            for i in range(10):
+                result = cluster.get_value(port, f"snap_batch_set_{i}")
+                assert result.get("value") == f"val_{i}"
+            for i in range(2):
+                result = cluster.get_value(port, f"snap_batch_del_{i}")
+                assert result.get("value") is None
+
+    def test_snapshot_after_txn(self, cluster: ClusterClient):
+        """1.6 Snapshot after transaction"""
+        cluster.set_value(HTTP_PORTS[0], "snap_txn_counter", "10")
+
+        result = cluster.txn(
+            HTTP_PORTS[0],
+            conditions=[{"key": "snap_txn_counter", "op": "equal", "value": "10"}],
+            if_then=[{"op": "set", "key": "snap_txn_counter", "value": "20"},
+                     {"op": "set", "key": "snap_txn_result", "value": "ok"}],
+        )
+        assert result.get("success") is True
+        assert result.get("branch") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "snap_txn_counter")
+            assert result.get("value") == "20"
+            result = cluster.get_value(port, "snap_txn_result")
+            assert result.get("value") == "ok"
+
+        result = cluster.txn(
+            HTTP_PORTS[0],
+            conditions=[{"key": "snap_txn_counter", "op": "equal", "value": "99"}],
+            if_then=[{"op": "set", "key": "snap_txn_counter", "value": "should_not_set"}],
+            else_then=[{"op": "set", "key": "snap_txn_fallback", "value": "yes"}],
+        )
+        assert result.get("success") is True
+        assert result.get("branch") is False
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "snap_txn_counter")
+            assert result.get("value") == "20"
+            result = cluster.get_value(port, "snap_txn_fallback")
+            assert result.get("value") == "yes"
+
+    def test_snapshot_multiple_cycles(self, cluster: ClusterClient):
+        """1.7 Multiple snapshot cycles"""
+        v1_data = {f"snap_cycle_v1_{i}": f"v1_{i}" for i in range(5)}
+        for key, value in v1_data.items():
+            cluster.set_value(HTTP_PORTS[0], key, value)
+
+        snap1 = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap1["status"]["index"] is not None
+        assert snap1["status"]["term"] is not None
+        index1 = snap1["trigger"]["index"]
+
+        for key in list(v1_data.keys())[:3]:
+            cluster.set_value(HTTP_PORTS[0], key, "v2_overwritten")
+        cluster.set_value(HTTP_PORTS[0], "snap_cycle_v2_new", "v2_new")
+
+        snap2 = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap2["status"]["index"] is not None
+        assert snap2["status"]["term"] is not None
+        index2 = snap2["trigger"]["index"]
+        assert index2 > index1, f"Snapshot index should advance: {index2} <= {index1}"
+
+        cluster.batch_write(HTTP_PORTS[0], [{"op": "delete", "key": list(v1_data.keys())[4]}])
+        cluster.set_value(HTTP_PORTS[0], "snap_cycle_v3_new", "v3_new")
+
+        snap3 = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap3["status"]["index"] is not None
+        assert snap3["status"]["term"] is not None
+        index3 = snap3["trigger"]["index"]
+        assert index3 > index2, f"Snapshot index should advance: {index3} <= {index2}"
+
+        for port in HTTP_PORTS:
+            for i in range(3):
+                result = cluster.get_value(port, f"snap_cycle_v1_{i}")
+                assert result.get("value") == "v2_overwritten"
+            result = cluster.get_value(port, f"snap_cycle_v1_3")
+            assert result.get("value") == "v1_3"
+            result = cluster.get_value(port, f"snap_cycle_v1_4")
+            assert result.get("value") is None
+            result = cluster.get_value(port, "snap_cycle_v2_new")
+            assert result.get("value") == "v2_new"
+            result = cluster.get_value(port, "snap_cycle_v3_new")
+            assert result.get("value") == "v3_new"
 
 
 def main():

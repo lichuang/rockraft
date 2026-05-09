@@ -299,6 +299,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .route("/members", get(members_handler))
     .route("/health", get(health_handler))
     .route("/metrics", get(metrics_handler))
+    .route("/trigger_snapshot", post(trigger_snapshot_handler))
+    .route("/snapshot_status", get(snapshot_status_handler))
     .layer(CorsLayer::permissive())
     .layer(TraceLayer::new_for_http())
     .with_state(state);
@@ -348,6 +350,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
   );
   info!(
     "  GET  http://{}/prefix?prefix=<prefix> - Scan keys by prefix",
+    http_addr
+  );
+  info!(
+    "  POST http://{}/trigger_snapshot  - Trigger snapshot build",
+    http_addr
+  );
+  info!(
+    "  GET  http://{}/snapshot_status   - Get current snapshot status",
     http_addr
   );
 
@@ -871,6 +881,43 @@ async fn getset_handler(
     Err(e) => Err(ErrorResponse {
       error: format!("Failed to getset: {}", e),
     }),
+  }
+}
+
+/// Handler for POST /trigger_snapshot endpoint
+///
+/// Triggers a snapshot build on this node and waits for completion.
+/// Returns the term and index of the newly built snapshot.
+async fn trigger_snapshot_handler(
+  State(state): State<AppState>,
+) -> Result<impl IntoResponse, ErrorResponse> {
+  match state.raft_node.trigger_snapshot().await {
+    Ok(log_id) => Ok(Json(serde_json::json!({
+      "success": true,
+      "term": log_id.leader_id.term,
+      "index": log_id.index,
+    }))),
+    Err(e) => Err(ErrorResponse {
+      error: format!("Failed to trigger snapshot: {}", e),
+    }),
+  }
+}
+
+/// Handler for GET /snapshot_status endpoint
+///
+/// Returns the term and index of the current snapshot, or indicates no snapshot exists.
+async fn snapshot_status_handler(State(state): State<AppState>) -> impl IntoResponse {
+  match state.raft_node.snapshot_log_id() {
+    Some(log_id) => Json(serde_json::json!({
+      "snapshot_exists": true,
+      "term": log_id.leader_id.term,
+      "index": log_id.index,
+    })),
+    None => Json(serde_json::json!({
+      "snapshot_exists": false,
+      "term": null,
+      "index": null,
+    })),
   }
 }
 
