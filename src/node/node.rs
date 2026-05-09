@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use openraft::Raft;
+use openraft::async_runtime::watch::WatchReceiver;
 use tokio::sync::{Mutex, broadcast};
 use tracing::debug;
 
@@ -21,6 +22,7 @@ use crate::network::ClientPool;
 use crate::raft::network::NetworkFactory;
 use crate::raft::store;
 use crate::raft::store::RocksStateMachine;
+use crate::raft::types::LogId;
 use crate::raft::types::{
   AppliedState, BatchWriteReply, BatchWriteReq, GetKVReply, GetKVReq, GetMembersReply,
   GetMembersReq, JoinRequest, LeaveRequest, LogEntry, RequestPayload, ScanPrefixReply,
@@ -226,6 +228,33 @@ impl RaftNode {
     debug!("get members: {:?}", req);
     let leader_handler = LeaderHandler::new(self);
     leader_handler.get_members(req).await
+  }
+
+  // ---- Client API: Snapshot operations ----
+
+  /// Get the `LogId` of the last snapshot on this node.
+  ///
+  /// Returns `None` if no snapshot has been built yet.
+  /// Useful for integration tests to verify that a snapshot was actually
+  /// triggered — compare before and after `trigger_snapshot()`.
+  pub fn snapshot_log_id(&self) -> Option<LogId> {
+    self.raft.metrics().borrow_watched().snapshot
+  }
+
+  /// Trigger a snapshot build on this node and wait for it to complete.
+  ///
+  /// Returns the `LogId` of the newly built snapshot on success.
+  pub async fn trigger_snapshot(&self) -> Result<LogId> {
+    self
+      .raft
+      .trigger()
+      .snapshot()
+      .await
+      .map_err(|e| Error::internal(format!("Failed to trigger snapshot: {}", e)))?;
+
+    self
+      .snapshot_log_id()
+      .ok_or_else(|| Error::internal("Snapshot log id not found after trigger"))
   }
 }
 
