@@ -301,6 +301,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .route("/metrics", get(metrics_handler))
     .route("/trigger_snapshot", post(trigger_snapshot_handler))
     .route("/snapshot_status", get(snapshot_status_handler))
+    .route("/purge_log", post(purge_log_handler))
     .layer(CorsLayer::permissive())
     .layer(TraceLayer::new_for_http())
     .with_state(state);
@@ -358,6 +359,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
   );
   info!(
     "  GET  http://{}/snapshot_status   - Get current snapshot status",
+    http_addr
+  );
+  info!(
+    "  POST http://{}/purge_log         - Purge logs up to given index",
     http_addr
   );
 
@@ -914,6 +919,30 @@ async fn snapshot_status_handler(State(state): State<AppState>) -> impl IntoResp
       "index": null,
     })),
   }
+}
+
+async fn purge_log_handler(
+  State(state): State<AppState>,
+  Json(payload): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, ErrorResponse> {
+  let upto_index = payload["upto_index"]
+    .as_u64()
+    .ok_or_else(|| ErrorResponse {
+      error: "Missing or invalid 'upto_index' field".to_string(),
+    })?;
+
+  state
+    .raft_node
+    .purge_log(upto_index)
+    .await
+    .map_err(|e| ErrorResponse {
+      error: format!("Failed to purge log: {}", e),
+    })?;
+
+  Ok(Json(SuccessResponse {
+    success: true,
+    message: format!("Logs purged up to index {}", upto_index),
+  }))
 }
 
 /// Load configuration from TOML file

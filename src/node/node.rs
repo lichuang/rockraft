@@ -278,6 +278,19 @@ impl RaftNode {
       .snapshot_log_id()
       .ok_or_else(|| Error::internal("Snapshot log id not found after trigger"))
   }
+
+  /// Purge Raft logs up to (and including) the given log index.
+  ///
+  /// Logs that have been captured by a snapshot can be safely purged.
+  /// Typically called after `trigger_snapshot()` to reclaim disk space.
+  pub async fn purge_log(&self, upto_index: u64) -> Result<()> {
+    self
+      .raft
+      .trigger()
+      .purge_log(upto_index)
+      .await
+      .map_err(|e| Error::internal(format!("Failed to purge log: {}", e)))
+  }
 }
 
 #[cfg(test)]

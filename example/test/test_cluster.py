@@ -248,7 +248,18 @@ class ClusterClient:
                 return json.loads(response.read().decode())
         except Exception as e:
             raise RuntimeError(f"Failed to join node {node_id} on port {port}: {e}")
-    
+
+    def leave_node(self, port: int, node_id: int, timeout: int = 10) -> Dict[str, Any]:
+        url = f"http://127.0.0.1:{port}/leave"
+        data = json.dumps({"node_id": node_id}).encode()
+        headers = {"Content-Type": "application/json"}
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as e:
+            raise RuntimeError(f"Failed to leave node {node_id} on port {port}: {e}")
+
     def wait_for_nodes(self, max_retries: int = 30, retry_interval: float = 1.0) -> None:
         """Wait for all nodes to be ready."""
         print("\n[WAIT] Waiting for nodes to be ready...")
@@ -411,6 +422,14 @@ class ClusterClient:
             )
         
         return {"trigger": result, "status": status}
+
+    def purge_log(self, port: int, upto_index: int, timeout: int = 10) -> Dict[str, Any]:
+        """Purge Raft logs up to and including the given index."""
+        url = f"http://127.0.0.1:{port}/purge_log"
+        data = json.dumps({"upto_index": upto_index}).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode())
 
 
 @pytest.fixture(scope="module")
@@ -2137,65 +2156,6 @@ class TestSnapshot:
                 f"Data missing on restarted node3: {key}"
             )
 
-    def test_snapshot_new_node_join_sync(self, cluster: ClusterClient):
-        """2.3 New node joins cluster and syncs data via snapshot"""
-        test_data = {f"snap_join_{i}": f"value_{i}" for i in range(30)}
-
-        for key, value in test_data.items():
-            result = cluster.set_value(HTTP_PORTS[0], key, value)
-            assert result.get("success") is True
-
-        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
-        assert snap["status"]["index"] is not None
-        assert snap["status"]["term"] is not None
-
-        node4_conf_path = BASE_DIR / "conf" / "node4.toml"
-        node4_conf_path.write_text(
-            'node_id = 4\n'
-            'http_addr = "127.0.0.1:8004"\n'
-            '\n'
-            '[raft]\n'
-            'address = "127.0.0.1:7004"\n'
-            'advertise_host = "localhost"\n'
-            'join = ["localhost:7001"]\n'
-            '\n'
-            '[rocksdb]\n'
-            'data_path = "/tmp/rockraft_cluster/node4"\n'
-            'max_open_files = 10000\n'
-            '\n'
-            '[log]\n'
-            'file = "/tmp/rockraft_cluster/logs/node4.log"\n'
-            'level = "info"\n'
-        )
-
-        import shutil
-        data_dir = Path("/tmp/rockraft_cluster/node4")
-        if data_dir.exists():
-            shutil.rmtree(data_dir)
-        data_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            cluster.start_node("node4")
-
-            result = cluster.join_node(HTTP_PORTS[0], 4, "127.0.0.1:7004")
-            assert result.get("success") is True, f"Failed to join node4: {result}"
-
-            time.sleep(5)
-
-            health = cluster.get_health(8004)
-            assert health.get("node_id") == 4, (
-                f"Expected node_id 4 on port 8004, got {health.get('node_id')}"
-            )
-
-            for key, expected in test_data.items():
-                result = cluster.get_value(8004, key)
-                assert result.get("value") == expected, (
-                    f"Data missing on node4: {key}"
-                )
-        finally:
-            cluster.stop_node("node4")
-            node4_conf_path.unlink(missing_ok=True)
-
     def test_snapshot_concurrent_writes(self, cluster: ClusterClient):
         """3.1 Concurrent writes during snapshot do not affect consistency"""
         initial_data = {f"snap_concurrent_init_{i}": f"value_{i}" for i in range(10)}
@@ -2354,6 +2314,238 @@ class TestSnapshot:
             assert result.get("value") == "new", (
                 f"Expected 'new' on port {port}, got {result.get('value')}"
             )
+
+    def test_snapshot_purge_log_recovery(self, cluster: ClusterClient):
+        """4.1 Purge logs after snapshot, restart cluster, data persists"""
+        test_data = {f"snap_purge_{i}": f"value_{i}" for i in range(20)}
+
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        snapshot_index = snap["trigger"]["index"]
+        result = cluster.purge_log(HTTP_PORTS[0], snapshot_index)
+        assert result.get("success") is True
+
+        for port in HTTP_PORTS:
+            for key, expected in test_data.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected
+
+        for node in ["node1", "node2", "node3"]:
+            cluster.stop_node(node)
+        for node in ["node1", "node2", "node3"]:
+            cluster.start_node(node)
+
+        client = ClusterClient(HTTP_PORTS)
+        client.wait_for_nodes()
+        client.wait_for_members_sync(expected_count=3)
+
+        for port in HTTP_PORTS:
+            for key, expected in test_data.items():
+                result = client.get_value(port, key)
+                assert result.get("value") == expected, (
+                    f"Data lost after purge+restart: {key} on port {port}"
+                )
+
+    def test_snapshot_then_write_then_restart(self, cluster: ClusterClient):
+        """4.2 Snapshot, write more, restart - new data recovers via log replay"""
+        batch1 = {f"snap_batch1_{i}": f"value_{i}" for i in range(10)}
+        for key, value in batch1.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        batch2 = {f"snap_batch2_{i}": f"value_{i}" for i in range(10)}
+        for key, value in batch2.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        for node in ["node1", "node2", "node3"]:
+            cluster.stop_node(node)
+        for node in ["node1", "node2", "node3"]:
+            cluster.start_node(node)
+
+        client = ClusterClient(HTTP_PORTS)
+        client.wait_for_nodes()
+        client.wait_for_members_sync(expected_count=3)
+
+        all_data = {**batch1, **batch2}
+        for port in HTTP_PORTS:
+            for key, expected in all_data.items():
+                result = client.get_value(port, key)
+                assert result.get("value") == expected, (
+                    f"Data missing after restart: {key} on port {port}"
+                )
+
+    def test_snapshot_empty_value(self, cluster: ClusterClient):
+        """5.1 Snapshot with empty string value"""
+        cluster.set_value(HTTP_PORTS[0], "empty_val", "")
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "empty_val")
+            assert result.get("value") == "", (
+                f"Empty value lost after snapshot on port {port}, got: {result.get('value')!r}"
+            )
+
+    def test_snapshot_large_value(self, cluster: ClusterClient):
+        """5.2 Snapshot with 1MB large value"""
+        large_value = "A" * (1024 * 1024)  # 1MB
+        cluster.set_value(HTTP_PORTS[0], "large", large_value)
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "large")
+            actual = result.get("value")
+            assert actual is not None, f"Large value missing on port {port}"
+            assert len(actual) == 1024 * 1024, (
+                f"Large value length mismatch on port {port}: expected {1024*1024}, got {len(actual)}"
+            )
+            assert actual == large_value, f"Large value content mismatch on port {port}"
+
+    def test_snapshot_unicode_keys(self, cluster: ClusterClient):
+        """5.3 Snapshot with Unicode keys"""
+        cluster.set_value(HTTP_PORTS[0], "用户:名称", "张三")
+        cluster.set_value(HTTP_PORTS[0], "配置:主题", "暗黑")
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            result1 = cluster.get_value(port, "用户:名称")
+            assert result1.get("value") == "张三", (
+                f"Unicode key1 mismatch on port {port}"
+            )
+            result2 = cluster.get_value(port, "配置:主题")
+            assert result2.get("value") == "暗黑", (
+                f"Unicode key2 mismatch on port {port}"
+            )
+
+        for port in HTTP_PORTS:
+            prefix_result = cluster.query_prefix(port, "用户:")
+            items = prefix_result.get("items", [])
+            assert len(items) >= 1, (
+                f"Unicode prefix scan returned no results on port {port}"
+            )
+            assert any(item["key"] == "用户:名称" and item["value"] == "张三" for item in items), (
+                f"Unicode prefix scan content mismatch on port {port}"
+            )
+
+            prefix_result2 = cluster.query_prefix(port, "配置:")
+            items2 = prefix_result2.get("items", [])
+            assert len(items2) >= 1, (
+                f"Unicode prefix scan2 returned no results on port {port}"
+            )
+            assert any(item["key"] == "配置:主题" and item["value"] == "暗黑" for item in items2), (
+                f"Unicode prefix scan2 content mismatch on port {port}"
+            )
+
+    def test_snapshot_rapid_sequential(self, cluster: ClusterClient):
+        """5.4 Rapid sequential snapshots do not crash"""
+        test_data = {f"rapid_{i}": f"value_{i}" for i in range(5)}
+        for key, value in test_data.items():
+            cluster.set_value(HTTP_PORTS[0], key, value)
+
+        last_snap_index = 0
+        for _ in range(5):
+            snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+            assert snap["status"]["index"] is not None
+            assert snap["status"]["term"] is not None
+            current_index = snap["status"]["index"]
+            assert current_index >= last_snap_index, (
+                f"Snapshot index should be non-decreasing: {current_index} < {last_snap_index}"
+            )
+            last_snap_index = current_index
+
+        for port in HTTP_PORTS:
+            for key, expected in test_data.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected, (
+                    f"Data mismatch after rapid snapshots: {key} on port {port}"
+                )
+
+        cluster.set_value(HTTP_PORTS[0], "after_rapid", "ok")
+        result = cluster.get_value(HTTP_PORTS[0], "after_rapid")
+        assert result.get("value") == "ok", "System should still be usable after rapid snapshots"
+
+    def test_snapshot_new_node_join_sync(self, cluster: ClusterClient):
+        """2.3 New node joins cluster and syncs data via snapshot"""
+        test_data = {f"snap_join_{i}": f"value_{i}" for i in range(30)}
+
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        node4_conf_path = BASE_DIR / "conf" / "node4.toml"
+        node4_conf_path.write_text(
+            'node_id = 4\n'
+            'http_addr = "127.0.0.1:8004"\n'
+            '\n'
+            '[raft]\n'
+            'address = "127.0.0.1:7004"\n'
+            'advertise_host = "localhost"\n'
+            'join = ["localhost:7001"]\n'
+            '\n'
+            '[rocksdb]\n'
+            'data_path = "/tmp/rockraft_cluster/node4"\n'
+            'max_open_files = 10000\n'
+            '\n'
+            '[log]\n'
+            'file = "/tmp/rockraft_cluster/logs/node4.log"\n'
+            'level = "info"\n'
+        )
+
+        import shutil
+        data_dir = Path("/tmp/rockraft_cluster/node4")
+        if data_dir.exists():
+            shutil.rmtree(data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            cluster.start_node("node4")
+
+            result = cluster.join_node(HTTP_PORTS[0], 4, "127.0.0.1:7004")
+            assert result.get("success") is True, f"Failed to join node4: {result}"
+
+            time.sleep(5)
+
+            health = cluster.get_health(8004)
+            assert health.get("node_id") == 4, (
+                f"Expected node_id 4 on port 8004, got {health.get('node_id')}"
+            )
+
+            for key, expected in test_data.items():
+                result = cluster.get_value(8004, key)
+                assert result.get("value") == expected, (
+                    f"Data missing on node4: {key}"
+                )
+        finally:
+            try:
+                cluster.leave_node(HTTP_PORTS[0], 4)
+                time.sleep(3)
+            except Exception:
+                pass
+            cluster.stop_node("node4")
+            node4_conf_path.unlink(missing_ok=True)
 
 
 def main():
