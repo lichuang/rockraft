@@ -438,12 +438,7 @@ async fn delete_handler(
     error: "Missing 'key' field".to_string(),
   })?;
 
-  // Create an UpsertKV with Delete operation
-  let upsert_kv = Cmd::UpsertKV(UpsertKV::delete(key));
-  let entry = LogEntry::new(upsert_kv);
-
-  // Use raft_node.write() which handles leader forwarding automatically
-  match state.raft_node.write(entry).await {
+  match state.raft_node.delete(key).await {
     Ok(_) => {
       info!("Delete successful: key='{}'", key);
       Ok(Json(SuccessResponse {

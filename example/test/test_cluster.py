@@ -145,6 +145,14 @@ class ClusterClient:
         except Exception as e:
             raise RuntimeError(f"Failed to query prefix on port {port}: {e}")
     
+    def delete_value(self, port: int, key: str, timeout: int = 5) -> Dict[str, Any]:
+        """Delete a key via the /delete endpoint."""
+        url = f"http://127.0.0.1:{port}/delete"
+        data = json.dumps({"key": key}).encode()
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode())
+    
     def batch_write(self, port: int, operations: list, timeout: int = 10) -> Dict[str, Any]:
         """Batch write multiple operations atomically via the /batch_write endpoint.
         
@@ -288,7 +296,7 @@ class ClusterClient:
         """Stop a single node by name (e.g. 'node3') using its PID file."""
         pid_file = BASE_DIR / "pids" / f"{node_name}.pid"
         if not pid_file.exists():
-            raise RuntimeError(f"No PID file for {node_name} at {pid_file}")
+            return
         pid = int(pid_file.read_text().strip())
         try:
             import signal
@@ -314,16 +322,25 @@ class ClusterClient:
         pid_dir = BASE_DIR / "pids"
         pid_dir.mkdir(parents=True, exist_ok=True)
         pid_file = pid_dir / f"{node_name}.pid"
+        log_file = Path(f"/tmp/rockraft_cluster/logs/{node_name}.log")
+        log_file.parent.mkdir(parents=True, exist_ok=True)
         rust_log = f"rockraft={log_level},cluster_example={log_level}"
+        log_fh = open(log_file, "a")
         proc = subprocess.Popen(
             ["env", f"RUST_LOG={rust_log}", str(bin_path), "--conf", str(conf)],
             cwd=str(BASE_DIR),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=log_fh,
         )
         pid_file.write_text(str(proc.pid))
         port = self.NODE_PORTS[node_name]
-        self.wait_for_node_ready(port)
+        try:
+            self.wait_for_node_ready(port)
+        except Exception:
+            proc.terminate()
+            proc.wait(timeout=5)
+            pid_file.unlink(missing_ok=True)
+            raise
     
     def wait_for_node_ready(self, port: int, max_retries: int = 30) -> None:
         """Wait for a single node to become healthy."""
@@ -2157,26 +2174,186 @@ class TestSnapshot:
             shutil.rmtree(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        cluster.start_node("node4")
+        try:
+            cluster.start_node("node4")
 
-        result = cluster.join_node(HTTP_PORTS[0], 4, "127.0.0.1:7004")
-        assert result.get("success") is True, f"Failed to join node4: {result}"
+            result = cluster.join_node(HTTP_PORTS[0], 4, "127.0.0.1:7004")
+            assert result.get("success") is True, f"Failed to join node4: {result}"
 
-        time.sleep(5)
+            time.sleep(5)
 
-        health = cluster.get_health(8004)
-        assert health.get("node_id") == 4, (
-            f"Expected node_id 4 on port 8004, got {health.get('node_id')}"
-        )
-
-        for key, expected in test_data.items():
-            result = cluster.get_value(8004, key)
-            assert result.get("value") == expected, (
-                f"Data missing on node4: {key}"
+            health = cluster.get_health(8004)
+            assert health.get("node_id") == 4, (
+                f"Expected node_id 4 on port 8004, got {health.get('node_id')}"
             )
 
-        cluster.stop_node("node4")
-        node4_conf_path.unlink(missing_ok=True)
+            for key, expected in test_data.items():
+                result = cluster.get_value(8004, key)
+                assert result.get("value") == expected, (
+                    f"Data missing on node4: {key}"
+                )
+        finally:
+            cluster.stop_node("node4")
+            node4_conf_path.unlink(missing_ok=True)
+
+    def test_snapshot_concurrent_writes(self, cluster: ClusterClient):
+        """3.1 Concurrent writes during snapshot do not affect consistency"""
+        initial_data = {f"snap_concurrent_init_{i}": f"value_{i}" for i in range(10)}
+        for key, value in initial_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        import threading
+        concurrent_data = {f"snap_concurrent_new_{i}": f"new_{i}" for i in range(10)}
+        errors = []
+
+        def do_writes():
+            try:
+                for key, value in concurrent_data.items():
+                    cluster.set_value(HTTP_PORTS[0], key, value)
+            except Exception as e:
+                errors.append(e)
+
+        def do_snapshot():
+            try:
+                cluster.trigger_snapshot(HTTP_PORTS[0])
+            except Exception as e:
+                errors.append(e)
+
+        t1 = threading.Thread(target=do_writes)
+        t2 = threading.Thread(target=do_snapshot)
+        t1.start()
+        t2.start()
+        t1.join(timeout=30)
+        t2.join(timeout=30)
+        assert len(errors) == 0, f"Errors during concurrent ops: {errors}"
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        all_data = {**initial_data, **concurrent_data}
+        for port in HTTP_PORTS:
+            for key, expected in all_data.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected, (
+                    f"Data mismatch on port {port}: {key}"
+                )
+
+    def test_snapshot_empty_database(self, cluster: ClusterClient):
+        """3.2 Snapshot on empty database succeeds and system remains usable"""
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        result = cluster.get_value(HTTP_PORTS[0], "snap_empty_key")
+        assert result.get("value") is None
+
+        result = cluster.set_value(HTTP_PORTS[0], "snap_empty_after", "works")
+        assert result.get("success") is True
+        result = cluster.get_value(HTTP_PORTS[0], "snap_empty_after")
+        assert result.get("value") == "works"
+
+    def test_snapshot_after_delete(self, cluster: ClusterClient):
+        """3.3 Deleted keys do not remain in snapshot"""
+        cluster.set_value(HTTP_PORTS[0], "to_delete_1", "val1")
+        cluster.set_value(HTTP_PORTS[0], "to_delete_2", "val2")
+        cluster.set_value(HTTP_PORTS[0], "snap_keep", "kept")
+
+        cluster.delete_value(HTTP_PORTS[0], "to_delete_1")
+        cluster.delete_value(HTTP_PORTS[0], "to_delete_2")
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "to_delete_1")
+            assert result.get("value") is None, f"to_delete_1 still exists on port {port}"
+            result = cluster.get_value(port, "to_delete_2")
+            assert result.get("value") is None, f"to_delete_2 still exists on port {port}"
+            result = cluster.get_value(port, "snap_keep")
+            assert result.get("value") == "kept", f"snap_keep wrong on port {port}"
+
+        result = cluster.query_prefix(HTTP_PORTS[0], "to_delete_")
+        assert result.get("count") == 0, f"Unexpected to_delete keys: {result}"
+
+    def test_snapshot_overwrite(self, cluster: ClusterClient):
+        """3.4 Snapshot after overwriting same key retains final value"""
+        cluster.set_value(HTTP_PORTS[0], "snap_overwrite_key", "v1")
+        cluster.set_value(HTTP_PORTS[0], "snap_overwrite_key", "v2")
+        cluster.set_value(HTTP_PORTS[0], "snap_overwrite_key", "v3")
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "snap_overwrite_key")
+            assert result.get("value") == "v3", (
+                f"Expected v3 on port {port}, got {result.get('value')}"
+            )
+
+    def test_snapshot_vs_log_recovery(self, cluster: ClusterClient):
+        """3.5 Compare log replay recovery vs snapshot recovery after restart"""
+        test_data = {f"snap_vs_log_{i}": f"value_{i}" for i in range(5)}
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        for node in ["node1", "node2", "node3"]:
+            cluster.stop_node(node)
+        for node in ["node1", "node2", "node3"]:
+            cluster.start_node(node)
+
+        client = ClusterClient(HTTP_PORTS)
+        client.wait_for_nodes()
+        client.wait_for_members_sync(expected_count=3)
+
+        for port in HTTP_PORTS:
+            for key, expected in test_data.items():
+                result = client.get_value(port, key)
+                assert result.get("value") == expected, (
+                    f"Log replay failed for {key} on port {port}"
+                )
+
+        snap = client.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for node in ["node1", "node2", "node3"]:
+            cluster.stop_node(node)
+        for node in ["node1", "node2", "node3"]:
+            cluster.start_node(node)
+
+        client2 = ClusterClient(HTTP_PORTS)
+        client2.wait_for_nodes()
+        client2.wait_for_members_sync(expected_count=3)
+
+        for port in HTTP_PORTS:
+            for key, expected in test_data.items():
+                result = client2.get_value(port, key)
+                assert result.get("value") == expected, (
+                    f"Snapshot recovery failed for {key} on port {port}"
+                )
+
+    def test_snapshot_after_getset(self, cluster: ClusterClient):
+        """3.6 Snapshot after getset atomic operation captures final state"""
+        cluster.set_value(HTTP_PORTS[0], "snap_getset_key", "old")
+
+        result = cluster.getset(HTTP_PORTS[0], "snap_getset_key", "new")
+        assert result.get("success") is True
+        assert result.get("old_value") == "old"
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            result = cluster.get_value(port, "snap_getset_key")
+            assert result.get("value") == "new", (
+                f"Expected 'new' on port {port}, got {result.get('value')}"
+            )
 
 
 def main():

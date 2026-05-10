@@ -24,9 +24,9 @@ use crate::raft::store;
 use crate::raft::store::RocksStateMachine;
 use crate::raft::types::LogId;
 use crate::raft::types::{
-  AppliedState, BatchWriteReply, BatchWriteReq, GetKVReply, GetKVReq, GetMembersReply,
+  AppliedState, BatchWriteReply, BatchWriteReq, Cmd, GetKVReply, GetKVReq, GetMembersReply,
   GetMembersReq, JoinRequest, LeaveRequest, LogEntry, RequestPayload, ScanPrefixReply,
-  ScanPrefixReq, TxnReply, TxnReq, TypeConfig,
+  ScanPrefixReq, TxnReply, TxnReq, TypeConfig, UpsertKV,
 };
 
 use openraft::Config as OpenRaftConfig;
@@ -121,6 +121,28 @@ impl RaftNode {
       .execute_or_forward(RequestPayload::Write(entry))
       .await?
       .into_write()
+  }
+
+  /// Delete a key from the KV store
+  ///
+  /// Returns `AppliedState` with `value: None` confirming the deletion.
+  /// This is a convenience method equivalent to writing a
+  /// `Cmd::UpsertKV(UpsertKV::delete(key))` log entry.
+  pub async fn delete(&self, key: impl ToString) -> Result<AppliedState> {
+    debug!("delete key: {}", key.to_string());
+    let entry = LogEntry::new(Cmd::UpsertKV(UpsertKV::delete(key)));
+    self.write(entry).await
+  }
+
+  /// Delete multiple keys atomically in a single batch
+  ///
+  /// All deletions are applied as a single atomic unit - either
+  /// all succeed or all fail.
+  pub async fn batch_delete(&self, keys: Vec<String>) -> Result<BatchWriteReply> {
+    debug!("batch delete: {} keys", keys.len());
+    let entries: Vec<UpsertKV> = keys.into_iter().map(UpsertKV::delete).collect();
+    let req = BatchWriteReq { entries };
+    self.batch_write(req).await
   }
 
   /// Batch write multiple entries atomically
