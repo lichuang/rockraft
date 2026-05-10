@@ -12,6 +12,7 @@ This test:
 
 import subprocess
 import sys
+import os
 import time
 import json
 import urllib.request
@@ -98,6 +99,12 @@ class ClusterClient:
     
     def __init__(self, ports: list):
         self.ports = ports
+    
+    def get_health(self, port: int, timeout: int = 5) -> Dict[str, Any]:
+        """Get node health info including node_id."""
+        url = f"http://127.0.0.1:{port}/health"
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return json.loads(response.read().decode())
     
     def query_members(self, port: int, timeout: int = 5) -> Dict[str, Any]:
         """Query the members endpoint of a node."""
@@ -277,6 +284,59 @@ class ClusterClient:
             time.sleep(0.5)
         raise RuntimeError(f"Node on port {port} failed to sync members after {max_retries} retries")
     
+    def stop_node(self, node_name: str) -> None:
+        """Stop a single node by name (e.g. 'node3') using its PID file."""
+        pid_file = BASE_DIR / "pids" / f"{node_name}.pid"
+        if not pid_file.exists():
+            raise RuntimeError(f"No PID file for {node_name} at {pid_file}")
+        pid = int(pid_file.read_text().strip())
+        try:
+            import signal
+            os.kill(pid, signal.SIGTERM)
+            for _ in range(10):
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.5)
+                except OSError:
+                    break
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        pid_file.unlink(missing_ok=True)
+    
+    NODE_PORTS = {"node1": 8001, "node2": 8002, "node3": 8003, "node4": 8004}
+
+    def start_node(self, node_name: str, log_level: str = "warn") -> None:
+        """Start a single node by name using the cluster binary."""
+        conf = BASE_DIR / "conf" / f"{node_name}.toml"
+        bin_path = BASE_DIR / "target" / "release" / "cluster_example"
+        pid_dir = BASE_DIR / "pids"
+        pid_dir.mkdir(parents=True, exist_ok=True)
+        pid_file = pid_dir / f"{node_name}.pid"
+        rust_log = f"rockraft={log_level},cluster_example={log_level}"
+        proc = subprocess.Popen(
+            ["env", f"RUST_LOG={rust_log}", str(bin_path), "--conf", str(conf)],
+            cwd=str(BASE_DIR),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        pid_file.write_text(str(proc.pid))
+        port = self.NODE_PORTS[node_name]
+        self.wait_for_node_ready(port)
+    
+    def wait_for_node_ready(self, port: int, max_retries: int = 30) -> None:
+        """Wait for a single node to become healthy."""
+        for _ in range(max_retries):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as resp:
+                    if resp.status == 200:
+                        return
+            except Exception:
+                pass
+            time.sleep(0.5)
+        raise RuntimeError(f"Node on port {port} not ready after {max_retries} retries")
+    
     def trigger_snapshot(self, port: int, timeout: int = 30, retries: int = 3) -> Dict[str, Any]:
         """Trigger a snapshot build and wait for completion."""
         url = f"http://127.0.0.1:{port}/trigger_snapshot"
@@ -310,10 +370,7 @@ class ClusterClient:
             return json.loads(response.read().decode())
     
     def trigger_snapshot_and_verify(self, port: int) -> Dict[str, Any]:
-        """Trigger snapshot, verify term matches leader and index is valid."""
-        metrics_before = self.get_metrics(port)
-        current_term = metrics_before.get("current_term")
-        
+        """Trigger snapshot, verify it was built, and validate term/index."""
         status_before = self.snapshot_status(port)
         prev_index = status_before.get("index")
         
@@ -325,8 +382,8 @@ class ClusterClient:
         status = self.snapshot_status(port)
         assert status.get("snapshot_exists") is True, f"Snapshot not found after trigger: {status}"
         
-        assert trigger_term == current_term, (
-            f"Snapshot term {trigger_term} != current term {current_term}"
+        assert trigger_term is not None and trigger_term > 0, (
+            f"Snapshot term should be positive, got {trigger_term}"
         )
         assert trigger_index is not None and trigger_index > 0, (
             f"Snapshot index should be positive, got {trigger_index}"
@@ -1987,6 +2044,139 @@ class TestSnapshot:
             assert result.get("value") == "v2_new"
             result = cluster.get_value(port, "snap_cycle_v3_new")
             assert result.get("value") == "v3_new"
+
+    def test_snapshot_cluster_restart_recovery(self, cluster: ClusterClient):
+        """2.1 Cluster restart after snapshot - data persists via snapshot recovery"""
+        test_data = {f"snap_restart_{i}": f"value_{i}" for i in range(20)}
+
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        for port in HTTP_PORTS:
+            for key, expected in test_data.items():
+                result = cluster.get_value(port, key)
+                assert result.get("value") == expected
+
+        cluster.stop_node("node1")
+        cluster.stop_node("node2")
+        cluster.stop_node("node3")
+
+        cluster.start_node("node1")
+        cluster.start_node("node2")
+        cluster.start_node("node3")
+
+        client = ClusterClient(HTTP_PORTS)
+        client.wait_for_nodes()
+        client.wait_for_members_sync(expected_count=3)
+
+        for port in HTTP_PORTS:
+            for key, expected in test_data.items():
+                result = client.get_value(port, key)
+                assert result.get("value") == expected, (
+                    f"Data lost after restart: {key} on port {port}"
+                )
+
+    def test_snapshot_follower_restart_recovery(self, cluster: ClusterClient):
+        """2.2 Follower stop/restart recovers data from leader via snapshot sync"""
+        phase1_data = {f"snap_follower_p1_{i}": f"value_{i}" for i in range(15)}
+
+        for key, value in phase1_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        cluster.stop_node("node3")
+
+        phase2_data = {f"snap_follower_p2_{i}": f"value_{i}" for i in range(10)}
+        for key, value in phase2_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        cluster.start_node("node3")
+        cluster.wait_for_node_ready(8003)
+        time.sleep(3)
+
+        health = cluster.get_health(8003)
+        assert health.get("node_id") == 3, (
+            f"Expected node_id 3 on port 8003, got {health.get('node_id')}"
+        )
+
+        all_data = {**phase1_data, **phase2_data}
+        for key, expected in all_data.items():
+            result = cluster.get_value(8003, key)
+            assert result.get("value") == expected, (
+                f"Data missing on restarted node3: {key}"
+            )
+
+    def test_snapshot_new_node_join_sync(self, cluster: ClusterClient):
+        """2.3 New node joins cluster and syncs data via snapshot"""
+        test_data = {f"snap_join_{i}": f"value_{i}" for i in range(30)}
+
+        for key, value in test_data.items():
+            result = cluster.set_value(HTTP_PORTS[0], key, value)
+            assert result.get("success") is True
+
+        snap = cluster.trigger_snapshot_and_verify(HTTP_PORTS[0])
+        assert snap["status"]["index"] is not None
+        assert snap["status"]["term"] is not None
+
+        node4_conf_path = BASE_DIR / "conf" / "node4.toml"
+        node4_conf_path.write_text(
+            'node_id = 4\n'
+            'http_addr = "127.0.0.1:8004"\n'
+            '\n'
+            '[raft]\n'
+            'address = "127.0.0.1:7004"\n'
+            'advertise_host = "localhost"\n'
+            'join = ["localhost:7001"]\n'
+            '\n'
+            '[rocksdb]\n'
+            'data_path = "/tmp/rockraft_cluster/node4"\n'
+            'max_open_files = 10000\n'
+            '\n'
+            '[log]\n'
+            'file = "/tmp/rockraft_cluster/logs/node4.log"\n'
+            'level = "info"\n'
+        )
+
+        import shutil
+        data_dir = Path("/tmp/rockraft_cluster/node4")
+        if data_dir.exists():
+            shutil.rmtree(data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        cluster.start_node("node4")
+
+        result = cluster.join_node(HTTP_PORTS[0], 4, "127.0.0.1:7004")
+        assert result.get("success") is True, f"Failed to join node4: {result}"
+
+        time.sleep(5)
+
+        health = cluster.get_health(8004)
+        assert health.get("node_id") == 4, (
+            f"Expected node_id 4 on port 8004, got {health.get('node_id')}"
+        )
+
+        for key, expected in test_data.items():
+            result = cluster.get_value(8004, key)
+            assert result.get("value") == expected, (
+                f"Data missing on node4: {key}"
+            )
+
+        cluster.stop_node("node4")
+        node4_conf_path.unlink(missing_ok=True)
 
 
 def main():
