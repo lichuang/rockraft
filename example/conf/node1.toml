@@ -2,8 +2,8 @@ node_id = 1
 http_addr = "127.0.0.1:8001"
 
 [raft]
-address = "127.0.0.1:7001"
-advertise_host = "localhost"
+address = "0.0.0.0:7001"
+advertise_host = "127.0.0.1"
 join = []
 
 [rocksdb]
