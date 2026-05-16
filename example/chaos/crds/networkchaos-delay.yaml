@@ -1,0 +1,16 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-delay
+  namespace: rockraft
+spec:
+  action: delay
+  mode: all
+  duration: "30s"
+  delay:
+    latency: "200ms"
+    correlation: "0"
+    jitter: "50ms"
+  selector:
+    labelSelectors:
+      app: rockraft

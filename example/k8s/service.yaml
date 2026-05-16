@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: rockraft
+  namespace: rockraft
+  labels:
+    app: rockraft
+spec:
+  selector:
+    app: rockraft
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000

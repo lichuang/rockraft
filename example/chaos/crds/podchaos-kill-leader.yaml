@@ -1,0 +1,15 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: kill-leader
+  namespace: rockraft
+spec:
+  action: pod-kill
+  mode: one
+  duration: ""
+  selector:
+    labelSelectors:
+      app: rockraft
+    pods:
+      rockraft:
+        - rockraft-0

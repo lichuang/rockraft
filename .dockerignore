@@ -1,0 +1,11 @@
+.git
+.github
+target
+example/target
+example/logs
+example/pids
+*.pyc
+__pycache__
+.pytest_cache
+.muse.toml
+.lift.toml

@@ -1,0 +1,21 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: partition-leader
+  namespace: rockraft
+spec:
+  action: partition
+  direction: both
+  mode: all
+  duration: "30s"
+  selector:
+    labelSelectors:
+      app: rockraft
+    pods:
+      rockraft:
+        - rockraft-0
+  target:
+    mode: all
+    selector:
+      labelSelectors:
+        app: rockraft

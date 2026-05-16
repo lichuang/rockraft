@@ -1,0 +1,15 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-loss
+  namespace: rockraft
+spec:
+  action: loss
+  mode: all
+  duration: "30s"
+  loss:
+    loss: "30"
+    correlation: "50"
+  selector:
+    labelSelectors:
+      app: rockraft

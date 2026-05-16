@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: rockraft-headless
+  namespace: rockraft
+  labels:
+    app: rockraft
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: rockraft
+  ports:
+  - name: raft
+    port: 7000
+    targetPort: 7000
+  - name: http
+    port: 8000
+    targetPort: 8000
