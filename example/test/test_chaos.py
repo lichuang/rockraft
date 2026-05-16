@@ -91,7 +91,7 @@ def wait_for(condition_fn, timeout=60, interval=1, message="condition"):
     deadline = time.time() + timeout
     while time.time() < deadline:
         result = condition_fn()
-        if result:
+        if result is not None:
             return result
         time.sleep(interval)
     raise TimeoutError(f"Timed out waiting for {message} ({timeout}s)")
