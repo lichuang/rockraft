@@ -147,11 +147,19 @@ class ClusterClient:
 
     def wait_for_cluster_healthy(self, timeout=120):
         """Wait until all 3 pods are healthy and a leader exists."""
+        def _is_healthy_state(state):
+            if isinstance(state, str):
+                return state in ("Follower", "Leader", "Candidate")
+            if isinstance(state, dict):
+                # OpenRaft RunningState serializes as {"Ok": null} for running state
+                return "Ok" in state
+            return False
+
         def _check():
             healthy = 0
             for i in range(3):
                 h = self.get_health(i)
-                if h and h.get("state") in ("Follower", "Leader", "Candidate"):
+                if h and _is_healthy_state(h.get("state")):
                     healthy += 1
             if healthy == 3:
                 leader = self.get_leader_ordinal()
