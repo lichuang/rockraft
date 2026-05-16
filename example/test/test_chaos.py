@@ -145,6 +145,22 @@ class ClusterClient:
             return None
         return wait_for(_check, timeout=timeout, message="leader election")
 
+    def wait_for_cluster_healthy(self, timeout=120):
+        """Wait until all 3 pods are healthy and a leader exists."""
+        def _check():
+            healthy = 0
+            for i in range(3):
+                h = self.get_health(i)
+                if h and h.get("state") in ("Follower", "Leader", "Candidate"):
+                    healthy += 1
+            if healthy == 3:
+                leader = self.get_leader_ordinal()
+                if leader is not None:
+                    return True
+            return None
+        return wait_for(_check, timeout=timeout, interval=3,
+                        message="all pods healthy with leader")
+
     def wait_for_stable_leader(self, timeout=20, stable_for=5):
         same_since = time.time()
         last_leader = None
@@ -290,6 +306,11 @@ def chaos():
     helper = ChaosHelper()
     yield helper
     helper.cleanup_all()
+
+
+@pytest.fixture(autouse=True)
+def ensure_cluster_healthy(cluster):
+    cluster.wait_for_cluster_healthy(timeout=120)
 
 
 # ---------------------------------------------------------------------------
