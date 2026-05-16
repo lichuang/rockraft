@@ -43,9 +43,13 @@ jobs:
 
       - name: Wait for rockraft pods ready
         run: |
-          kubectl wait --for=condition=ready pod -l app=rockraft \
-            -n rockraft --timeout=120s
-          sleep 10
+          for i in 0 1 2; do
+            echo "Waiting for rockraft-${i}..."
+            kubectl wait --for=condition=ready pod/rockraft-${i} \
+              -n rockraft --timeout=180s
+          done
+          # Extra time for cluster formation (join + membership change)
+          sleep 15
 
       - name: Setup port forwarding
         run: |
@@ -58,7 +62,7 @@ jobs:
         run: |
           for port in 8001 8002 8003; do
             echo "Checking localhost:${port}..."
-            curl -sf "http://localhost:${port}/health" | python3 -m json.tool
+            curl -sf --max-time 10 "http://localhost:${port}/health" | python3 -m json.tool
           done
 
       - name: Install test dependencies
