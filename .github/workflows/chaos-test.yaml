@@ -51,13 +51,20 @@ jobs:
           # Extra time for cluster formation (join + membership change)
           sleep 15
 
+      - name: Verify cluster connectivity via kubectl exec
+        run: |
+          for i in 0 1 2; do
+            echo "--- rockraft-${i} health ---"
+            kubectl exec -n rockraft rockraft-${i} -- curl -sf --max-time 5 http://localhost:8000/health || echo "FAILED"
+          done
+
       - name: Install test dependencies
         run: pip install pyyaml pytest
 
       - name: Run chaos tests
         run: |
           cd example
-          python3 -m pytest test/test_chaos.py -v --tb=short
+          python3 -m pytest test/test_chaos.py -v --tb=long
 
       - name: Collect diagnostics on failure
         if: failure()

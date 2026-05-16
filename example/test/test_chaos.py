@@ -5,7 +5,6 @@ Chaos engineering tests for rockraft cluster on Kubernetes with Chaos Mesh.
 Prerequisites:
   - kind cluster with Chaos Mesh installed
   - rockraft StatefulSet deployed (3 pods)
-  - kubectl port-forward running (8001→rockraft-0:8000, etc.)
   - pip install pyyaml
 
 Run:
@@ -15,9 +14,7 @@ Run:
 import json
 import subprocess
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 import pytest
@@ -25,7 +22,6 @@ import yaml
 
 NAMESPACE = "rockraft"
 POD_NAMES = ["rockraft-0", "rockraft-1", "rockraft-2"]
-LOCAL_PORTS = [8001, 8002, 8003]
 CHAOS_DIR = Path(__file__).parent.parent / "chaos" / "crds"
 
 
@@ -43,30 +39,50 @@ def kubectl(*args, input_data=None, check=True):
     return result
 
 
-def http_get(port, path, timeout=5):
-    url = f"http://127.0.0.1:{port}{path}"
+def http_get(ordinal, path, timeout=5):
+    """Execute curl inside the pod via kubectl exec."""
+    pod = POD_NAMES[ordinal]
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except Exception:
-        return None
+        result = subprocess.run(
+            [
+                "kubectl", "exec", "-n", NAMESPACE, pod, "--",
+                "curl", "-sf", "--max-time", str(timeout),
+                f"http://localhost:8000{path}",
+            ],
+            capture_output=True, text=True, timeout=timeout + 10,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        print(f"http_get({pod}, {path}) failed: rc={result.returncode} stderr={result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        print(f"http_get({pod}, {path}) timed out after {timeout+10}s")
+    except Exception as e:
+        print(f"http_get({pod}, {path}) exception: {e}")
+    return None
 
 
-def http_post(port, path, data, timeout=10):
-    url = f"http://127.0.0.1:{port}{path}"
-    body = json.dumps(data).encode()
-    req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}
-    )
+def http_post(ordinal, path, data, timeout=10):
+    """Execute curl inside the pod via kubectl exec."""
+    pod = POD_NAMES[ordinal]
+    body = json.dumps(data)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()
+        result = subprocess.run(
+            [
+                "kubectl", "exec", "-n", NAMESPACE, pod, "--",
+                "curl", "-sf", "--max-time", str(timeout),
+                "-X", "POST",
+                "-H", "Content-Type: application/json",
+                "-d", body,
+                f"http://localhost:8000{path}",
+            ],
+            capture_output=True, text=True, timeout=timeout + 10,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
         try:
-            return json.loads(body)
+            return json.loads(result.stderr)
         except Exception:
-            return {"error": body}
+            return {"error": result.stderr}
     except Exception as e:
         return {"error": str(e)}
 
@@ -87,7 +103,7 @@ def wait_for(condition_fn, timeout=60, interval=1, message="condition"):
 
 class ClusterClient:
     def get_health(self, ordinal):
-        return http_get(LOCAL_PORTS[ordinal], "/health")
+        return http_get(ordinal, "/health")
 
     def get_leader_ordinal(self):
         for i in range(3):
@@ -97,10 +113,10 @@ class ClusterClient:
         return None
 
     def set_value(self, ordinal, key, value):
-        return http_post(LOCAL_PORTS[ordinal], "/set", {"key": key, "value": value})
+        return http_post(ordinal, "/set", {"key": key, "value": value})
 
     def get_value(self, ordinal, key):
-        return http_get(LOCAL_PORTS[ordinal], f"/get?key={urllib.parse.quote(key)}")
+        return http_get(ordinal, f"/get?key={urllib.parse.quote(key)}")
 
     def write_to_leader(self, key, value):
         leader = self.get_leader_ordinal()
@@ -119,11 +135,15 @@ class ClusterClient:
             )
 
     def wait_for_leader(self, timeout=30):
-        return wait_for(
-            self.get_leader_ordinal,
-            timeout=timeout,
-            message="leader election",
-        )
+        def _check():
+            for i in range(3):
+                h = self.get_health(i)
+                leader = h.get("is_leader") if h else None
+                print(f"  node {i} (pod {POD_NAMES[i]}): is_leader={leader}, raw={h}")
+                if leader:
+                    return i
+            return None
+        return wait_for(_check, timeout=timeout, message="leader election")
 
     def wait_for_stable_leader(self, timeout=20, stable_for=5):
         same_since = time.time()
@@ -258,27 +278,7 @@ class ChaosHelper:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="session")
-def port_forward():
-    procs = []
-    for i, port in enumerate(LOCAL_PORTS):
-        p = subprocess.Popen(
-            ["kubectl", "port-forward", "-n", NAMESPACE, POD_NAMES[i], f"{port}:8000"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        procs.append(p)
-    time.sleep(3)
-    yield
-    for p in procs:
-        p.terminate()
-        try:
-            p.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            p.kill()
-
-
-@pytest.fixture(scope="session")
-def cluster(port_forward):
+def cluster():
     client = ClusterClient()
     client.wait_for_leader(timeout=120)
     time.sleep(3)
