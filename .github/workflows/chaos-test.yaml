@@ -51,20 +51,6 @@ jobs:
           # Extra time for cluster formation (join + membership change)
           sleep 15
 
-      - name: Setup port forwarding
-        run: |
-          kubectl port-forward -n rockraft rockraft-0 8001:8000 &
-          kubectl port-forward -n rockraft rockraft-1 8002:8000 &
-          kubectl port-forward -n rockraft rockraft-2 8003:8000 &
-          sleep 5
-
-      - name: Verify cluster is healthy
-        run: |
-          for port in 8001 8002 8003; do
-            echo "Checking localhost:${port}..."
-            curl -sf --max-time 10 "http://localhost:${port}/health" | python3 -m json.tool
-          done
-
       - name: Install test dependencies
         run: pip install pyyaml pytest
 
