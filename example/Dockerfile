@@ -1,7 +1,7 @@
 FROM rust:1.85-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    protobuf-compiler cmake g++ && \
+    protobuf-compiler cmake g++ libclang-dev && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
