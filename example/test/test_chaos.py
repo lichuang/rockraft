@@ -97,6 +97,14 @@ def wait_for(condition_fn, timeout=60, interval=1, message="condition"):
     raise TimeoutError(f"Timed out waiting for {message} ({timeout}s)")
 
 
+def _is_healthy_state(state):
+    if isinstance(state, str):
+        return state in ("Follower", "Leader", "Candidate")
+    if isinstance(state, dict):
+        return "Ok" in state
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Cluster client
 # ---------------------------------------------------------------------------
@@ -147,14 +155,6 @@ class ClusterClient:
 
     def wait_for_cluster_healthy(self, timeout=120):
         """Wait until all 3 pods are healthy and a leader exists."""
-        def _is_healthy_state(state):
-            if isinstance(state, str):
-                return state in ("Follower", "Leader", "Candidate")
-            if isinstance(state, dict):
-                # OpenRaft RunningState serializes as {"Ok": null} for running state
-                return "Ok" in state
-            return False
-
         def _check():
             healthy = 0
             for i in range(3):
@@ -369,7 +369,7 @@ class TestLeaderFailover:
 
         for _ in range(30):
             health = cluster.get_health(leader_before)
-            if health and health.get("state") in ("Follower", "Leader", "Candidate"):
+            if health and _is_healthy_state(health.get("state")):
                 break
             time.sleep(2)
         else:
@@ -453,6 +453,7 @@ class TestNetworkPartition:
         chaos.delete("NetworkChaos", "partition-test")
         time.sleep(5)
 
+        cluster.wait_for_cluster_healthy(timeout=60)
         recovered_leader = cluster.wait_for_leader(timeout=30)
         key3 = f"chaos-recovered-{int(time.time())}"
         resp = cluster.set_value(recovered_leader, key3, "after-recovery")
