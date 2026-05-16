@@ -224,7 +224,7 @@ impl RaftNode {
 
     let join_req = JoinRequest {
       node_id: config.node_id,
-      endpoint: config.raft.endpoint.clone(),
+      endpoint: config.raft.advertise_endpoint.clone(),
     };
 
     let req = ForwardRequest {

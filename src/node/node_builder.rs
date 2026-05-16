@@ -142,7 +142,7 @@ impl<'a> RaftNodeBuilder<'a> {
         info!("Initializing single-node cluster");
         let node = crate::raft::types::Node {
           node_id: config.node_id,
-          endpoint: config.raft.endpoint.clone(),
+          endpoint: config.raft.advertise_endpoint.clone(),
         };
         raft_node.init_cluster(node).await?;
       } else {
