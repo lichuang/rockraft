@@ -169,6 +169,20 @@ class ClusterClient:
         return wait_for(_check, timeout=timeout, interval=3,
                         message="all pods healthy with leader")
 
+    def wait_for_min_healthy(self, min_count, timeout=60):
+        """Wait until at least min_count pods are in a healthy state."""
+        def _check():
+            healthy = 0
+            for i in range(3):
+                h = self.get_health(i)
+                if h and _is_healthy_state(h.get("state")):
+                    healthy += 1
+            if healthy >= min_count:
+                return True
+            return None
+        return wait_for(_check, timeout=timeout, interval=2,
+                        message=f"at least {min_count} healthy pods")
+
     def wait_for_stable_leader(self, timeout=20, stable_for=5):
         same_since = time.time()
         last_leader = None
@@ -338,7 +352,13 @@ class TestLeaderFailover:
         chaos.apply_yaml(yaml_str)
         time.sleep(3)
 
-        leader_after = cluster.wait_for_leader(timeout=30)
+        # Wait for the surviving nodes to be healthy before checking for
+        # a new leader.  Killing the leader can trigger election storms
+        # that transiently slow the HTTP server and cause K8s to restart
+        # pods if we probe too early.
+        cluster.wait_for_min_healthy(2, timeout=60)
+
+        leader_after = cluster.wait_for_leader(timeout=60)
         assert leader_after != leader_before, (
             f"Leader should have changed after killing {pod_name}"
         )
@@ -362,7 +382,11 @@ class TestLeaderFailover:
         chaos.apply_yaml(yaml_str)
         time.sleep(3)
 
-        cluster.wait_for_leader(timeout=30)
+        # Wait for the surviving nodes to stabilise before looking for a
+        # new leader (same rationale as test_leader_kill_elects_new_leader).
+        cluster.wait_for_min_healthy(2, timeout=60)
+
+        cluster.wait_for_leader(timeout=60)
         resp, new_leader = cluster.write_to_leader(key, "after")
         assert resp.get("success"), f"Write failed: {resp}"
         time.sleep(3)
