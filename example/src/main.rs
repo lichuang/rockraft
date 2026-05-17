@@ -269,11 +269,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
   println!("Configuration loaded:");
   println!("  node_id: {}", config.base.node_id);
-  println!("  raft_addr: {}", config.base.raft.endpoint);
   println!("  http_addr: {}", config.http_addr);
-  println!("  data_path: {}", config.base.rocksdb.data_path);
-  println!("  join: {:?}", config.base.raft.join);
-  println!("  log: {:?}", config.log);
+  println!("  [raft]");
+  println!("    address: {}", config.base.raft.endpoint);
+  println!("    advertise_host: {}", config.base.raft.advertise_endpoint);
+  println!("    join: {:?}", config.base.raft.join);
+  println!(
+    "    heartbeat_interval: {:?}",
+    config.base.raft.heartbeat_interval
+  );
+  println!(
+    "    election_timeout_min: {:?}",
+    config.base.raft.election_timeout_min
+  );
+  println!(
+    "    election_timeout_max: {:?}",
+    config.base.raft.election_timeout_max
+  );
+  println!("  [rocksdb]");
+  println!("    data_path: {}", config.base.rocksdb.data_path);
+  println!("    max_open_files: {}", config.base.rocksdb.max_open_files);
+  println!("  [log]");
+  println!("    level: {:?}", config.log);
 
   // Create Raft node
   info!("Creating Raft node...");

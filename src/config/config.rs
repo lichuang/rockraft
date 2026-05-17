@@ -5,6 +5,7 @@ use super::default::default_raft_config;
 use super::default::default_rocksdb_config;
 use super::endpoint::Endpoint;
 use crate::error::Result;
+use openraft::Config as OpenRaftConfig;
 
 /// Node configuration with all fields parsed and validated.
 ///
@@ -33,6 +34,29 @@ pub struct RaftConfig {
   pub advertise_endpoint: Endpoint,
   /// Addresses of nodes to join (empty for single-node cluster)
   pub join: Vec<String>,
+  /// Heartbeat interval in milliseconds (overrides OpenRaft default)
+  pub heartbeat_interval: Option<u64>,
+  /// Minimum election timeout in milliseconds (overrides OpenRaft default)
+  pub election_timeout_min: Option<u64>,
+  /// Maximum election timeout in milliseconds (overrides OpenRaft default)
+  pub election_timeout_max: Option<u64>,
+}
+
+impl RaftConfig {
+  /// Build an OpenRaft Config from these settings, applying any overrides.
+  pub(crate) fn to_openraft_config(&self) -> OpenRaftConfig {
+    let mut cfg = OpenRaftConfig::default();
+    if let Some(v) = self.heartbeat_interval {
+      cfg.heartbeat_interval = v;
+    }
+    if let Some(v) = self.election_timeout_min {
+      cfg.election_timeout_min = v;
+    }
+    if let Some(v) = self.election_timeout_max {
+      cfg.election_timeout_max = v;
+    }
+    cfg
+  }
 }
 
 /// Raw configuration for deserialization
@@ -55,6 +79,12 @@ pub(crate) struct RawRaftConfig {
   pub address: String,
   pub advertise_host: String,
   pub join: Vec<String>,
+  #[serde(default)]
+  pub heartbeat_interval: Option<u64>,
+  #[serde(default)]
+  pub election_timeout_min: Option<u64>,
+  #[serde(default)]
+  pub election_timeout_max: Option<u64>,
 }
 
 impl Config {
@@ -79,6 +109,9 @@ impl Config {
         endpoint,
         advertise_endpoint,
         join: raw.raft.join,
+        heartbeat_interval: raw.raft.heartbeat_interval,
+        election_timeout_min: raw.raft.election_timeout_min,
+        election_timeout_max: raw.raft.election_timeout_max,
       },
       rocksdb: RocksdbConfig {
         data_path: raw.rocksdb.data_path,
@@ -110,6 +143,9 @@ impl Serialize for Config {
         address: self.raft.endpoint.to_string(),
         advertise_host: self.raft.advertise_endpoint.addr().to_string(),
         join: self.raft.join.clone(),
+        heartbeat_interval: self.raft.heartbeat_interval,
+        election_timeout_min: self.raft.election_timeout_min,
+        election_timeout_max: self.raft.election_timeout_max,
       },
       rocksdb: self.rocksdb.clone(),
     };

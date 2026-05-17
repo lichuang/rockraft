@@ -6,6 +6,9 @@ pub(crate) fn default_raft_config() -> RawRaftConfig {
     address: "127.0.0.1:6682".to_string(),
     advertise_host: "localhost".to_string(),
     join: vec![],
+    heartbeat_interval: None,
+    election_timeout_min: None,
+    election_timeout_max: None,
   }
 }
 

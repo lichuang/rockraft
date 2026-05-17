@@ -5,6 +5,9 @@ http_addr = "127.0.0.1:8003"
 address = "0.0.0.0:7003"
 advertise_host = "127.0.0.1"
 join = ["127.0.0.1:7001", "127.0.0.1:7002", "127.0.0.1:7003"]
+heartbeat_interval = 300
+election_timeout_min = 1000
+election_timeout_max = 2000
 
 [rocksdb]
 data_path = "/tmp/rockraft_cluster/node3"

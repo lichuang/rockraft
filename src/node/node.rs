@@ -29,8 +29,6 @@ use crate::raft::types::{
   ScanPrefixReq, TxnReply, TxnReq, TypeConfig, UpsertKV,
 };
 
-use openraft::Config as OpenRaftConfig;
-
 use super::LeaderHandler;
 
 pub struct RaftNode {
@@ -80,7 +78,7 @@ impl RaftNode {
 
     let client_pool = Arc::new(ClientPool::new(10));
     let factory = NetworkFactory::new(client_pool);
-    let raft_config = OpenRaftConfig::default();
+    let raft_config = config.raft.to_openraft_config();
 
     let raft = Arc::new(
       Raft::new(

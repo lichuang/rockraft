@@ -59,6 +59,9 @@ http_addr = "0.0.0.0:${HTTP_PORT}"
 address = "0.0.0.0:${RAFT_PORT}"
 advertise_host = "${MY_HOSTNAME}"
 join = []
+heartbeat_interval = 300
+election_timeout_min = 1000
+election_timeout_max = 2000
 
 [rocksdb]
 data_path = "/data"
@@ -93,6 +96,9 @@ http_addr = "0.0.0.0:${HTTP_PORT}"
 address = "0.0.0.0:${RAFT_PORT}"
 advertise_host = "${MY_HOSTNAME}"
 join = [${JOIN_LIST}]
+heartbeat_interval = 300
+election_timeout_min = 1000
+election_timeout_max = 2000
 
 [rocksdb]
 data_path = "/data"
