@@ -495,7 +495,7 @@ class TestNetworkDelay:
         assert resp.get("success")
 
         yaml_str = chaos.make_network_delay(
-            "delay-test", latency="200ms", jitter="50ms", duration="60s",
+            "delay-test", latency="80ms", jitter="50ms", duration="60s",
         )
         chaos.apply_yaml(yaml_str)
         time.sleep(3)
