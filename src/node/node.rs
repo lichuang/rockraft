@@ -307,6 +307,9 @@ mod tests {
         endpoint: endpoint.clone(),
         advertise_endpoint: endpoint,
         join: vec![],
+        heartbeat_interval: None,
+        election_timeout_min: None,
+        election_timeout_max: None,
       },
       rocksdb: RocksdbConfig {
         data_path: data_dir.to_string(),

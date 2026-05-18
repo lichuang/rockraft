@@ -16,6 +16,9 @@
 //!         endpoint: Endpoint::parse("127.0.0.1:5001").unwrap(),
 //!         advertise_endpoint: Endpoint::parse("127.0.0.1:5001").unwrap(),
 //!         join: vec![],
+//!         heartbeat_interval: None,
+//!         election_timeout_min: None,
+//!         election_timeout_max: None,
 //!     },
 //!     rocksdb: RocksdbConfig {
 //!         data_path: "/tmp/raft".to_string(),
