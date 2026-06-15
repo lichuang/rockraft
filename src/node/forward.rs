@@ -85,21 +85,50 @@ impl RaftNode {
 
   /// Execute a request locally as leader, or forward to the current leader.
   ///
-  /// This method unifies the assume_leader/forward pattern used by all
-  /// client-facing operations.
+  /// Retries up to MAX_RETRIES when no leader is available (e.g. during
+  /// leader election after a cluster restart), matching the retry behaviour
+  /// of `handle_forward_request`.
   pub(crate) async fn execute_or_forward(
     &self,
     payload: RequestPayload,
   ) -> Result<ForwardResponse> {
-    match self.assume_leader().await {
-      Ok(leader) => Self::dispatch_leader_handler(leader, payload).await,
-      Err(forward_err) => {
-        let request = ForwardRequest { body: payload };
-        self
-          .forward_with_leader_id(forward_err.leader_id, request)
-          .await
+    for attempt in 0..MAX_RETRIES {
+      match self.assume_leader().await {
+        Ok(leader) => {
+          return Self::dispatch_leader_handler(leader, payload).await;
+        }
+        Err(forward_err) => {
+          let request = ForwardRequest {
+            body: payload.clone(),
+          };
+          match self
+            .forward_with_leader_id(forward_err.leader_id, request)
+            .await
+          {
+            Ok(response) => return Ok(response),
+            Err(e) => {
+              if Self::is_retriable_error(&e) && attempt < MAX_RETRIES - 1 {
+                let delay = RETRY_INITIAL_INTERVAL * 2u32.saturating_pow(attempt);
+                let delay = delay.min(RETRY_MAX_INTERVAL);
+                debug!(
+                  "execute_or_forward: no leader, retry {}/{} after {:?}",
+                  attempt + 1,
+                  MAX_RETRIES,
+                  delay
+                );
+                sleep(delay).await;
+                continue;
+              }
+              return Err(e);
+            }
+          }
+        }
       }
     }
+
+    Err(Error::internal(
+      "No leader available to forward request after max retries",
+    ))
   }
 
   /// Handle a forwarded request (gRPC entry point).
