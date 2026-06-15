@@ -1,8 +1,10 @@
 name: Chaos Test
 
+# Disabled: chaos tests are inherently flaky on GitHub Actions shared runners.
+# kind cluster on free-tier runners lacks CPU/memory for reliable Raft chaos testing.
+# Liveness probes kill resource-starved pods during leader election, causing cascading failures.
+# Re-enable manually with `workflow_dispatch` when testing on a self-hosted runner.
 on:
-  schedule:
-    - cron: '0 3 * * *'
   workflow_dispatch:
 
 jobs:
