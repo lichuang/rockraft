@@ -332,6 +332,15 @@ def chaos():
 
 @pytest.fixture(autouse=True)
 def ensure_cluster_healthy(cluster):
+    """Ensure cluster is healthy before AND after each test.
+
+    The post-test wait is critical: tests that kill pods (e.g. pod-kill
+    chaos) leave the pod in a restarting state.  Without waiting for
+    recovery, the *next* test's pre-check would hit a TimeoutError because
+    the killed pod has not yet been recreated by the StateSet controller.
+    """
+    cluster.wait_for_cluster_healthy(timeout=120)
+    yield
     cluster.wait_for_cluster_healthy(timeout=120)
 
 
