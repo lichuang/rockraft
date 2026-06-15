@@ -153,6 +153,21 @@ class ClusterClient:
             return None
         return wait_for(_check, timeout=timeout, message="leader election")
 
+    def wait_for_leader_excluding(self, exclude_ordinal, timeout=60):
+        def _check():
+            for i in range(3):
+                if i == exclude_ordinal:
+                    continue
+                h = self.get_health(i)
+                leader = h.get("is_leader") if h else None
+                if leader:
+                    return i
+            return None
+        return wait_for(
+            _check, timeout=timeout, interval=2,
+            message=f"new leader (excluding pod {POD_NAMES[exclude_ordinal]})",
+        )
+
     def wait_for_cluster_healthy(self, timeout=120):
         """Wait until all 3 pods are healthy and a leader exists."""
         def _check():
@@ -367,9 +382,9 @@ class TestLeaderFailover:
         # pods if we probe too early.
         cluster.wait_for_min_healthy(2, timeout=60)
 
-        leader_after = cluster.wait_for_leader(timeout=60)
-        assert leader_after != leader_before, (
-            f"Leader should have changed after killing {pod_name}"
+        leader_after = cluster.wait_for_leader_excluding(leader_before, timeout=90)
+        assert leader_after is not None, (
+            f"No new leader elected among surviving nodes after killing {pod_name}"
         )
 
         resp = cluster.set_value(leader_after, key, "after-recovery")
