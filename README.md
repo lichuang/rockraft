@@ -40,3 +40,4 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 ## See Also
 
 - [example/](example/) - Complete cluster working example
+- [CoreDB](https://github.com/lichuang/coredb) - A Redis-compatible distributed KV database built on top of Rockraft, demonstrating the library in production: strong consistency, automatic failover, and Redis protocol support (String/Hash/List/Set/ZSet, TTL, and more)
