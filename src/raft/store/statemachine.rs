@@ -299,6 +299,37 @@ impl RocksStateMachine {
       }
     }
   }
+
+  /// Read a value that may still be buffered in the current apply batch.
+  ///
+  /// Within `apply()`, all writes are accumulated into a single WriteBatch that
+  /// is only committed after the whole batch is processed. Reads via RocksDB
+  /// `get_cf` therefore cannot see writes from earlier entries in the same
+  /// batch. This overlay resolves reads against the pending batch first
+  /// (`None` entry = delete pending), falling back to the committed DB state.
+  ///
+  /// Without this, transaction condition checks could take a different branch
+  /// depending on how the apply stream is chunked into batches — leader and
+  /// followers may chunk differently (restart recovery, log catch-up) and
+  /// would diverge.
+  fn get_kv_with_overlay(
+    &self,
+    key: &str,
+    pending: &BTreeMap<String, Option<Vec<u8>>>,
+  ) -> Result<Option<Vec<u8>>, io::Error> {
+    if let Some(pending_value) = pending.get(key) {
+      return Ok(pending_value.clone());
+    }
+    self.get_kv(key)
+  }
+
+  /// Record a KV operation into the pending-writes overlay.
+  fn overlay_apply(pending: &mut BTreeMap<String, Option<Vec<u8>>>, kv: &UpsertKV) {
+    match &kv.value {
+      Operation::Update(value) => pending.insert(kv.key.clone(), Some(value.clone())),
+      Operation::Delete => pending.insert(kv.key.clone(), None),
+    };
+  }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
@@ -334,6 +365,10 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     let mut last_applied_log_id = None;
     let mut responses = Vec::new();
 
+    // Pending writes buffered in `batch`, keyed by KV key.
+    // `None` value = a delete is pending (cannot be expressed by absence).
+    let mut pending_writes: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
+
     while let Some((entry, responder)) = entries.try_next().await? {
       last_applied_log_id = Some(entry.log_id);
 
@@ -343,11 +378,13 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
           match req.cmd {
             Cmd::UpsertKV(kv) => {
               self.apply_upsert_kv(&kv, &mut batch);
+              Self::overlay_apply(&mut pending_writes, &kv);
               AppliedState::None
             }
             Cmd::BatchUpsertKV { entries } => {
               for kv in &entries {
                 self.apply_upsert_kv(kv, &mut batch);
+                Self::overlay_apply(&mut pending_writes, kv);
               }
               AppliedState::None
             }
@@ -366,16 +403,14 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
               AppliedState::None
             }
             Cmd::Txn { req, .. } => {
-              // Execute transaction: check conditions and apply operations
-              let cf_data = &self.cf_sm_data();
+              // Conditions and prev_values must resolve against pending writes
+              // so results do not depend on how the apply stream is chunked
+              // into batches.
               let mut all_conditions_met = true;
 
               // Check all conditions (AND logic)
               for condition in &req.condition {
-                let actual_value = self
-                  .db
-                  .get_cf(cf_data, condition.key.as_bytes())
-                  .map_err(read_logs_err)?;
+                let actual_value = self.get_kv_with_overlay(&condition.key, &pending_writes)?;
                 let condition_met = evaluate_condition(&condition.expected, actual_value.as_ref());
                 if !condition_met {
                   all_conditions_met = false;
@@ -394,10 +429,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
               let prev_values = if req.return_previous {
                 let mut values = Vec::with_capacity(ops_to_execute.len());
                 for kv in ops_to_execute {
-                  let old_value = self
-                    .db
-                    .get_cf(cf_data, kv.key.as_bytes())
-                    .map_err(read_logs_err)?;
+                  let old_value = self.get_kv_with_overlay(&kv.key, &pending_writes)?;
                   values.push(old_value);
                 }
                 values
@@ -408,6 +440,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
               // Execute operations
               for kv in ops_to_execute {
                 self.apply_upsert_kv(kv, &mut batch);
+                Self::overlay_apply(&mut pending_writes, kv);
               }
 
               info!(
@@ -502,8 +535,33 @@ mod tests {
   use std::collections::HashMap;
 
   use crate::engine::RocksDBEngine;
+  use crate::raft::types::LogEntry;
+  use crate::raft::types::TxnCondition;
+  use crate::raft::types::TxnReq;
   use crate::raft::types::{Endpoint, Node};
   use crate::utils::test::{create_log_id, create_test_state_machine};
+  use futures::stream;
+  use openraft::Entry;
+  use openraft::EntryPayload;
+  use openraft::storage::EntryResponder;
+
+  use crate::raft::types::TypeConfig;
+
+  /// Build an apply-stream item carrying the given command.
+  fn create_apply_entry(index: u64, cmd: Cmd) -> EntryResponder<TypeConfig> {
+    let entry = Entry {
+      log_id: create_log_id(1, 1, index),
+      payload: EntryPayload::Normal(LogEntry::new(cmd)),
+    };
+    (entry, None)
+  }
+
+  /// Apply entries as one batch.
+  async fn apply_entries(sm: &mut RocksStateMachine, items: Vec<EntryResponder<TypeConfig>>) {
+    sm.apply(stream::iter(items.into_iter().map(Ok)))
+      .await
+      .unwrap();
+  }
 
   #[tokio::test]
   async fn test_set_and_get_last_applied() -> Result<(), io::Error> {
@@ -657,6 +715,100 @@ mod tests {
     assert_eq!(sys_data.nodes.len(), 1);
     assert!(!sys_data.nodes.contains_key(&1));
     assert!(sys_data.nodes.contains_key(&2));
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_apply_txn_condition_reads_pending_writes_in_same_batch() -> Result<(), io::Error> {
+    let mut sm = create_test_state_machine().await;
+
+    // Two Txn entries applied in one batch: the second txn's condition must
+    // see the value written by the first txn, even though the WriteBatch is
+    // not committed until the whole apply stream completes.
+    // Each txn records its branch decision into a distinct marker key.
+    let txn1 = Cmd::Txn {
+      req: TxnReq::new(vec![TxnCondition::not_exists("txn_chain")])
+        .if_then(UpsertKV::insert("txn_chain", b"first"))
+        .if_then(UpsertKV::insert("txn1_branch", b"if")),
+      result: None,
+    };
+    let txn2 = Cmd::Txn {
+      req: TxnReq::new(vec![TxnCondition::eq("txn_chain", b"first")])
+        .if_then(UpsertKV::insert("txn_chain", b"second"))
+        .if_then(UpsertKV::insert("txn2_branch", b"if")),
+      result: None,
+    };
+
+    apply_entries(
+      &mut sm,
+      vec![create_apply_entry(1, txn1), create_apply_entry(2, txn2)],
+    )
+    .await;
+
+    // txn2's condition saw txn1's pending write -> both took the if_then branch
+    assert_eq!(sm.get_kv("txn1_branch")?, Some(b"if".to_vec()));
+    assert_eq!(sm.get_kv("txn2_branch")?, Some(b"if".to_vec()));
+    // Final state reflects both applies in order
+    assert_eq!(sm.get_kv("txn_chain")?, Some(b"second".to_vec()));
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_apply_txn_condition_sees_delete_in_same_batch() -> Result<(), io::Error> {
+    let mut sm = create_test_state_machine().await;
+
+    // Pre-populate committed state
+    let seed = Cmd::UpsertKV(UpsertKV::insert("del_key", b"v"));
+    apply_entries(&mut sm, vec![create_apply_entry(1, seed)]).await;
+
+    // Batch: [UpsertKV del_key=delete, Txn not_exists(del_key) -> insert]
+    // The txn condition must see the pending delete, not the committed value.
+    let delete = Cmd::UpsertKV(UpsertKV::delete("del_key"));
+    let txn = Cmd::Txn {
+      req: TxnReq::new(vec![TxnCondition::not_exists("del_key")])
+        .if_then(UpsertKV::insert("del_key", b"reborn")),
+      result: None,
+    };
+
+    apply_entries(
+      &mut sm,
+      vec![create_apply_entry(2, delete), create_apply_entry(3, txn)],
+    )
+    .await;
+
+    assert_eq!(sm.get_kv("del_key")?, Some(b"reborn".to_vec()));
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_apply_txn_without_overlay_would_diverge() -> Result<(), io::Error> {
+    let mut sm = create_test_state_machine().await;
+
+    // Committed state has counter=1. In one batch: [UpsertKV counter=2, Txn eq(counter,"2")].
+    // The condition must observe the pending write and take the if_then branch.
+    let seed = Cmd::UpsertKV(UpsertKV::insert("counter", b"1"));
+    apply_entries(&mut sm, vec![create_apply_entry(1, seed)]).await;
+
+    let upsert = Cmd::UpsertKV(UpsertKV::insert("counter", b"2"));
+    let txn = Cmd::Txn {
+      req: TxnReq::new(vec![TxnCondition::eq("counter", b"2")])
+        .if_then(UpsertKV::insert("result_key", b"if"))
+        .else_then(UpsertKV::insert("result_key", b"else")),
+      result: None,
+    };
+
+    apply_entries(
+      &mut sm,
+      vec![create_apply_entry(2, upsert), create_apply_entry(3, txn)],
+    )
+    .await;
+
+    // With the overlay the condition sees "2" -> if branch.
+    // Without it, the condition would read the committed "1" -> else branch.
+    assert_eq!(sm.get_kv("result_key")?, Some(b"if".to_vec()));
 
     Ok(())
   }

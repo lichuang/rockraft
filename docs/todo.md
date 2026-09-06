@@ -12,11 +12,12 @@
 ## 一、正确性 / 一致性问题（最高优先级）
 
 ### 1. `apply()` 中 Txn 条件检查读到旧值（同批次内）— 有跨节点状态分歧风险
-- [ ] **未完成**
+- [x] **已完成**
 - **位置**: `src/raft/store/statemachine.rs` 的 `apply()`
 - **问题**: `apply()` 把所有写入累积进 `WriteBatch`，循环结束后才 `db.write(batch)`。但 Txn 的条件检查和 `prev_values` 采集用 `self.db.get_cf()` 直接读 DB，**看不到同批次前面 entry 的写入**。
 - **危害**: 不只是语义错误——条件求值结果取决于批次边界，而 leader 和 follower 的 apply 批次划分可能不同（重启恢复、追日志时尤其如此），同一批 entry 在不同节点可能走不同分支 → **状态分歧**。
 - **修法**: apply 循环内维护一个本地 pending-writes 覆盖层（HashMap），条件检查/prev_values 先查覆盖层再查 DB。
+- **完成说明**: 已按建议实现——`apply()` 内维护 `pending_writes: BTreeMap<String, Option<Vec<u8>>>` 覆盖层（`None` = 挂起删除），所有 `apply_upsert_kv` 调用点（`UpsertKV`/`BatchUpsertKV`/`Txn` ops）同步镜像进覆盖层，Txn 条件求值与 `prev_values` 改经 `get_kv_with_overlay()` 先查覆盖层再回退 DB。新增 3 个单测覆盖同批次 Txn 链、挂起删除可见、分歧场景。
 
 ### 2. `install_snapshot` 异步恢复不等待完成
 - [ ] **未完成**

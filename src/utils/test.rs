@@ -58,11 +58,6 @@ impl TestStorageFixture {
     Self { temp_dir, path }
   }
 
-  /// Returns the path to the temporary directory.
-  pub fn path(&self) -> &PathBuf {
-    &self.path
-  }
-
   /// Returns the path as a string.
   pub fn path_str(&self) -> String {
     self.path.to_string_lossy().to_string()
