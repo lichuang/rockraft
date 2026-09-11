@@ -40,6 +40,8 @@ use crate::raft::types::SnapshotMeta;
 use crate::raft::types::StoredMembership;
 use crate::raft::types::SysData;
 use crate::raft::types::TxnOp;
+use crate::raft::types::TxnReply;
+use crate::raft::types::TxnReq;
 use crate::raft::types::TypeConfig;
 use crate::raft::types::UpsertKV;
 use crate::raft::types::read_logs_err;
@@ -48,7 +50,6 @@ use crate::raft::types::read_logs_err;
 pub struct RocksStateMachine {
   db: Arc<DB>,
   snapshot_dir: PathBuf,
-
   // In-memory write-through cache of small metadata (nodes, last_applied_log_id)
   // that is also persisted to RocksDB (SM_META column family).
   //
@@ -62,6 +63,10 @@ pub struct RocksStateMachine {
   // this cache *and* RocksDB atomically.
   sys_data: Arc<Mutex<SysData>>,
 }
+
+/// Writes buffered in the current apply batch but not yet committed.
+/// `None` value means a delete is pending for that key.
+type PendingWrites = BTreeMap<String, Option<Vec<u8>>>;
 
 /// Evaluate a transaction condition against the actual value
 fn evaluate_condition(expected: &TxnOp, actual: Option<&Vec<u8>>) -> bool {
@@ -288,16 +293,127 @@ impl RocksStateMachine {
     Ok(())
   }
 
-  fn apply_upsert_kv(&self, kv: &UpsertKV, batch: &mut rocksdb::WriteBatch) {
+  fn stage_upsert_kv(
+    &self,
+    kv: &UpsertKV,
+    batch: &mut rocksdb::WriteBatch,
+    pending: &mut PendingWrites,
+  ) {
     let cf_data = &self.cf_sm_data();
     match &kv.value {
       Operation::Update(value) => {
         batch.put_cf(cf_data, kv.key.as_bytes(), value);
+        pending.insert(kv.key.clone(), Some(value.clone()));
       }
       Operation::Delete => {
         batch.delete_cf(cf_data, kv.key.as_bytes());
+        pending.insert(kv.key.clone(), None);
       }
     }
+  }
+
+  /// Dispatch a command to its dedicated handler.
+  fn apply_cmd(
+    &self,
+    cmd: Cmd,
+    batch: &mut rocksdb::WriteBatch,
+    pending: &mut PendingWrites,
+  ) -> Result<AppliedState, io::Error> {
+    match cmd {
+      Cmd::UpsertKV(kv) => self.apply_upsert_kv(&kv, batch, pending),
+      Cmd::BatchUpsertKV { entries } => self.apply_batch_upsert_kv(&entries, batch, pending),
+      Cmd::AddNode { node, .. } => self.apply_add_node(&node),
+      Cmd::RemoveNode { node_id } => self.apply_remove_node(node_id),
+      Cmd::Txn { req, .. } => self.apply_txn(&req, batch, pending),
+    }
+  }
+
+  fn apply_upsert_kv(
+    &self,
+    kv: &UpsertKV,
+    batch: &mut rocksdb::WriteBatch,
+    pending: &mut PendingWrites,
+  ) -> Result<AppliedState, io::Error> {
+    self.stage_upsert_kv(kv, batch, pending);
+    Ok(AppliedState::None)
+  }
+
+  fn apply_batch_upsert_kv(
+    &self,
+    entries: &[UpsertKV],
+    batch: &mut rocksdb::WriteBatch,
+    pending: &mut PendingWrites,
+  ) -> Result<AppliedState, io::Error> {
+    for kv in entries {
+      self.stage_upsert_kv(kv, batch, pending);
+    }
+    Ok(AppliedState::None)
+  }
+
+  fn apply_add_node(&self, node: &Node) -> Result<AppliedState, io::Error> {
+    let node_id = node.node_id;
+    info!(
+      "Applying AddNode command for node {} in state machine",
+      node_id
+    );
+    self.add_node(node.clone())?;
+    info!("AddNode command applied successfully for node {}", node_id);
+    Ok(AppliedState::None)
+  }
+
+  fn apply_remove_node(&self, node_id: NodeId) -> Result<AppliedState, io::Error> {
+    self.remove_node(node_id)?;
+    Ok(AppliedState::None)
+  }
+
+  fn apply_txn(
+    &self,
+    req: &TxnReq,
+    batch: &mut rocksdb::WriteBatch,
+    pending: &mut PendingWrites,
+  ) -> Result<AppliedState, io::Error> {
+    // Conditions and prev_values must resolve against pending writes so results
+    // do not depend on how the apply stream is chunked into batches.
+    let mut all_conditions_met = true;
+    for condition in &req.condition {
+      let actual_value = self.get_kv_with_overlay(&condition.key, pending)?;
+      if !evaluate_condition(&condition.expected, actual_value.as_ref()) {
+        all_conditions_met = false;
+        break;
+      }
+    }
+
+    let ops_to_execute = if all_conditions_met {
+      &req.if_then
+    } else {
+      &req.else_then
+    };
+
+    let prev_values = if req.return_previous {
+      let mut values = Vec::with_capacity(ops_to_execute.len());
+      for kv in ops_to_execute {
+        values.push(self.get_kv_with_overlay(&kv.key, pending)?);
+      }
+      values
+    } else {
+      Vec::new()
+    };
+
+    for kv in ops_to_execute {
+      self.stage_upsert_kv(kv, batch, pending);
+    }
+
+    info!(
+      "Applied transaction: conditions_met={}, if_then_ops={}, else_then_ops={}",
+      all_conditions_met,
+      req.if_then.len(),
+      req.else_then.len()
+    );
+
+    Ok(AppliedState::Txn(TxnReply::Success {
+      branch: all_conditions_met,
+      prev_values,
+    }))
   }
 
   /// Read a value that may still be buffered in the current apply batch.
@@ -315,20 +431,12 @@ impl RocksStateMachine {
   fn get_kv_with_overlay(
     &self,
     key: &str,
-    pending: &BTreeMap<String, Option<Vec<u8>>>,
+    pending: &PendingWrites,
   ) -> Result<Option<Vec<u8>>, io::Error> {
     if let Some(pending_value) = pending.get(key) {
       return Ok(pending_value.clone());
     }
     self.get_kv(key)
-  }
-
-  /// Record a KV operation into the pending-writes overlay.
-  fn overlay_apply(pending: &mut BTreeMap<String, Option<Vec<u8>>>, kv: &UpsertKV) {
-    match &kv.value {
-      Operation::Update(value) => pending.insert(kv.key.clone(), Some(value.clone())),
-      Operation::Delete => pending.insert(kv.key.clone(), None),
-    };
   }
 }
 
@@ -364,100 +472,14 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     let mut batch = rocksdb::WriteBatch::default();
     let mut last_applied_log_id = None;
     let mut responses = Vec::new();
-
-    // Pending writes buffered in `batch`, keyed by KV key.
-    // `None` value = a delete is pending (cannot be expressed by absence).
-    let mut pending_writes: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
+    let mut pending_writes = PendingWrites::new();
 
     while let Some((entry, responder)) = entries.try_next().await? {
       last_applied_log_id = Some(entry.log_id);
 
       let response = match entry.payload {
         EntryPayload::Blank => AppliedState::None,
-        EntryPayload::Normal(req) => {
-          match req.cmd {
-            Cmd::UpsertKV(kv) => {
-              self.apply_upsert_kv(&kv, &mut batch);
-              Self::overlay_apply(&mut pending_writes, &kv);
-              AppliedState::None
-            }
-            Cmd::BatchUpsertKV { entries } => {
-              for kv in &entries {
-                self.apply_upsert_kv(kv, &mut batch);
-                Self::overlay_apply(&mut pending_writes, kv);
-              }
-              AppliedState::None
-            }
-            Cmd::AddNode { node, .. } => {
-              let node_id = node.node_id;
-              info!(
-                "Applying AddNode command for node {} in state machine",
-                node_id
-              );
-              self.add_node(node)?;
-              info!("AddNode command applied successfully for node {}", node_id);
-              AppliedState::None
-            }
-            Cmd::RemoveNode { node_id } => {
-              self.remove_node(node_id)?;
-              AppliedState::None
-            }
-            Cmd::Txn { req, .. } => {
-              // Conditions and prev_values must resolve against pending writes
-              // so results do not depend on how the apply stream is chunked
-              // into batches.
-              let mut all_conditions_met = true;
-
-              // Check all conditions (AND logic)
-              for condition in &req.condition {
-                let actual_value = self.get_kv_with_overlay(&condition.key, &pending_writes)?;
-                let condition_met = evaluate_condition(&condition.expected, actual_value.as_ref());
-                if !condition_met {
-                  all_conditions_met = false;
-                  break;
-                }
-              }
-
-              // Determine which operations to execute
-              let ops_to_execute = if all_conditions_met {
-                &req.if_then
-              } else {
-                &req.else_then
-              };
-
-              // Collect previous values if requested
-              let prev_values = if req.return_previous {
-                let mut values = Vec::with_capacity(ops_to_execute.len());
-                for kv in ops_to_execute {
-                  let old_value = self.get_kv_with_overlay(&kv.key, &pending_writes)?;
-                  values.push(old_value);
-                }
-                values
-              } else {
-                Vec::new()
-              };
-
-              // Execute operations
-              for kv in ops_to_execute {
-                self.apply_upsert_kv(kv, &mut batch);
-                Self::overlay_apply(&mut pending_writes, kv);
-              }
-
-              info!(
-                "Applied transaction: conditions_met={}, if_then_ops={}, else_then_ops={}",
-                all_conditions_met,
-                req.if_then.len(),
-                req.else_then.len()
-              );
-
-              // Return transaction result with branch info and optional previous values
-              AppliedState::Txn(crate::raft::types::TxnReply::Success {
-                branch: all_conditions_met,
-                prev_values,
-              })
-            }
-          }
-        }
+        EntryPayload::Normal(req) => self.apply_cmd(req.cmd, &mut batch, &mut pending_writes)?,
         EntryPayload::Membership(membership) => {
           // Membership changes are handled by AddNode/RemoveNode commands
           // which update the nodes map directly
