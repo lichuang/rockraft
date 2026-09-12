@@ -4,31 +4,25 @@ use std::io::{self};
 use std::sync::Arc;
 
 use rocksdb::DB;
-use tracing::error;
+use tokio::task::spawn_blocking;
 use tracing::info;
 
 use crate::raft::store::keys::SM_DATA_FAMILY;
 use crate::raft::types::Snapshot;
 
-/// Recover from a snapshot asynchronously
+/// Recover the state machine from a snapshot, blocking until it completes.
 ///
-/// This function initiates snapshot recovery by spawning a background task.
-/// The recovery process runs asynchronously and does not block the caller.
-/// Errors during recovery are logged but not propagated to the caller.
+/// OpenRaft's contract for `RaftStateMachine::install_snapshot` requires the
+/// state machine to hold the snapshot contents before the call returns —
+/// recovery runs to completion here so that log entries applied afterwards
+/// build on fully restored data.
 ///
 /// Arguments:
 ///   db: Reference to the RocksDB instance where data will be recovered
 ///   snapshot: The snapshot containing data to recover
 ///
 /// Returns:
-///   Result<(), io::Error>: Always returns Ok(()) as recovery runs in background
-///
-/// Behavior:
-///   - Spawns a background tokio task for actual recovery
-///   - Logs success or failure of the recovery operation
-///   - Recovery happens asynchronously; caller does not wait for completion
-///
-/// Note: TODO: add recover complete callback for notification when recovery finishes
+///   Result<(), io::Error>: Ok(()) once all entries are written to the DB
 pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io::Error> {
   let snapshot_id = snapshot.meta.snapshot_id.clone();
 
@@ -38,21 +32,19 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
   );
 
   let db_clone = db.clone();
-  tokio::spawn(async move {
-    let ret = do_recover_snapshot(&db_clone, snapshot).await;
+  // The zstd decode + RocksDB bulk write is blocking work; run it off the
+  // async runtime but await its completion before returning.
+  spawn_blocking(move || {
+    let snapshot_file = futures::executor::block_on(snapshot.snapshot.into_std());
+    do_recover_snapshot_sync(&db_clone, snapshot_file)
+  })
+  .await
+  .map_err(|e| io::Error::other(format!("Snapshot recovery task failed: {}", e)))??;
 
-    if let Err(e) = ret {
-      error!(
-        "Failed to recover snapshot from snapshot_id={}: {:?}",
-        snapshot_id, e
-      );
-    } else {
-      info!(
-        "Snapshot recovery completed successfully for snapshot_id={}",
-        snapshot_id
-      );
-    }
-  });
+  info!(
+    "Snapshot recovery completed successfully for snapshot_id={}",
+    snapshot_id
+  );
 
   Ok(())
 }
@@ -72,20 +64,17 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
 ///   Result<(), io::Error>: Ok(()) on success, error on failure
 ///
 /// Recovery Process:
-///   1. Convert tokio::File to std::fs::File for zstd decoder
-///   2. Decompress snapshot data using zstd
-///   3. Read entries in format: [key_len][key][value_len][value]
-///   4. Accumulate entries in WriteBatch (max 1000 per batch)
-///   5. Write batch to database when batch is full
-///   6. Write any remaining entries in final batch
+///   1. Decompress snapshot data using zstd
+///   2. Read entries in format: [key_len][key][value_len][value]
+///   3. Accumulate entries in WriteBatch (max 1000 per batch)
+///   4. Write batch to database when batch is full
+///   5. Write any remaining entries in final batch
 ///
 /// Performance:
 ///   - Batch writing reduces database I/O operations
 ///   - Compression reduces disk I/O for snapshot files
 ///   - Streaming approach minimizes memory usage
-async fn do_recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io::Error> {
-  let snapshot_file = snapshot.snapshot.into_std().await;
-
+fn do_recover_snapshot_sync(db: &Arc<DB>, snapshot_file: std::fs::File) -> Result<(), io::Error> {
   let cf_handle = db.cf_handle(SM_DATA_FAMILY).ok_or_else(|| {
     io::Error::new(
       ErrorKind::NotFound,
@@ -227,6 +216,12 @@ mod tests {
     count
   }
 
+  /// Test-only wrapper: converts the tokio File and runs the synchronous recovery.
+  async fn do_recover_snapshot_for_test(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io::Error> {
+    let snapshot_file = snapshot.snapshot.into_std().await;
+    do_recover_snapshot_sync(db, snapshot_file)
+  }
+
   /// Test Point: Basic snapshot recovery functionality
   ///
   /// This test verifies the fundamental snapshot recovery operation:
@@ -260,7 +255,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
 
     assert!(result.is_ok());
 
@@ -316,7 +311,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
 
     assert!(result.is_ok());
 
@@ -362,7 +357,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
 
     assert!(result.is_ok());
 
@@ -386,19 +381,16 @@ mod tests {
     assert_eq!(String::from_utf8(value_last).unwrap(), "value-1499");
   }
 
-  /// Test Point: Asynchronous snapshot recovery function
+  /// Test Point: Synchronous snapshot recovery function
   ///
-  /// This test verifies the async recover_snapshot function:
+  /// This test verifies that recover_snapshot blocks until recovery completes:
   /// - Creates a snapshot with 5 key-value pairs
-  /// - Calls recover_snapshot which spawns a background task
-  /// - Waits for the background task to complete
-  /// - Verifies the data is recovered asynchronously
+  /// - Calls recover_snapshot and awaits it
+  /// - Verifies the data is immediately visible once the call returns
   ///
   /// Expected Behavior:
-  /// - recover_snapshot should return immediately (not wait for completion)
-  /// - Background task should complete successfully
-  /// - All 5 entries should be present in the database after task completes
-  /// - Async operation should not interfere with data integrity
+  /// - recover_snapshot should return only after recovery is complete
+  /// - All 5 entries should be present in the database as soon as it returns
   #[tokio::test]
   async fn test_recover_snapshot_function() {
     let db = create_test_db();
@@ -419,18 +411,15 @@ mod tests {
       snapshot: file,
     };
 
-    // recover_snapshot spawns a task, so we need to wait a bit
+    // recover_snapshot awaits recovery completion; data is available immediately
     let result = recover_snapshot(&db, snapshot).await;
     assert!(result.is_ok());
-
-    // Give spawned task time to complete
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Verify the correct number of entries were recovered (5)
     let entry_count = count_db_entries(&db);
     assert_eq!(
       entry_count, 5,
-      "Expected 5 entries in database after async recovery"
+      "Expected 5 entries in database after recovery"
     );
 
     // Verify data was recovered
@@ -491,7 +480,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
 
     assert!(result.is_ok());
 
@@ -549,7 +538,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
 
     assert!(result.is_ok());
 
@@ -595,7 +584,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
     assert!(result.is_err(), "Expected error for truncated snapshot");
   }
 
@@ -635,7 +624,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
     assert!(result.is_err(), "Expected error for corrupted key length");
   }
 
@@ -670,7 +659,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
     assert!(result.is_err(), "Expected error for partial snapshot");
 
     let existing_value = db.get_cf(&cf_handle, b"existing-key").unwrap().unwrap();
@@ -715,7 +704,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
     assert!(result.is_err(), "Expected error for truncated value");
   }
 
@@ -761,7 +750,7 @@ mod tests {
       snapshot: file,
     };
 
-    let result = do_recover_snapshot(&db, snapshot).await;
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
     assert!(
       result.is_err(),
       "Expected error for interrupted large data transfer"

@@ -16,7 +16,6 @@ mod tests {
   use std::path::PathBuf;
   use std::sync::Arc;
   use tempfile::tempdir;
-  use tokio::time::{Duration, sleep};
 
   use crate::raft::store::keys::SM_DATA_FAMILY;
 
@@ -103,8 +102,6 @@ mod tests {
       .expect("Failed to recover snapshot");
 
     // Step 5: Verify all data was recovered correctly
-    sleep(Duration::from_millis(100)).await; // Wait for async recovery to complete
-
     let mut recovered_count = 0u64;
     let iter = target_db.iterator_cf(&cf_handle_target, rocksdb::IteratorMode::Start);
     for _ in iter {
@@ -212,8 +209,6 @@ mod tests {
       .expect("Failed to recover empty snapshot");
 
     // Step 5: Verify database is still empty
-    sleep(Duration::from_millis(100)).await; // Wait for async recovery
-
     let mut count = 0u64;
     let iter = target_db.iterator_cf(&cf_handle_target, rocksdb::IteratorMode::Start);
     for _ in iter {
@@ -291,8 +286,6 @@ mod tests {
       .expect("Failed to recover large snapshot");
 
     // Step 4: Verify all entries were recovered
-    sleep(Duration::from_millis(200)).await; // Wait longer for large dataset
-
     let mut recovered_count = 0u64;
     let iter = target_db.iterator_cf(&cf_handle_target, rocksdb::IteratorMode::Start);
     for _ in iter {
@@ -390,8 +383,6 @@ mod tests {
       .expect("Failed to recover snapshot with binary data");
 
     // Step 4: Verify binary data integrity
-    sleep(Duration::from_millis(100)).await;
-
     for (key, expected_value) in &binary_data {
       let actual_value = target_db
         .get_cf(&cf_handle_target, key.as_slice())
