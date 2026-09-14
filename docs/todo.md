@@ -35,11 +35,12 @@
 - **修法**: 统一 membership 来源——要么 apply 时同步 `EntryPayload::Membership` 到 nodes，要么转发寻址直接用 `raft.metrics()`。
 
 ### 4. gRPC `RaftReply.error` 编解码协议不一致
-- [ ] **未完成**
+- [x] **已完成**
 - **位置**: `src/service/raft_service_impl.rs` 的 `result_to_raft_reply`；`src/raft/network/connection.rs` 的 `forward`；`src/node/cluster.rs` 的 `join_via`
 - **问题**: 服务端把 error 写成**纯文本 String**（`error_msg.into()`）；但 `NetworkConnection::forward` 用 `decode::<ApiError>(&reply.error)`（postcard 二进制）反序列化；`join_via` 又用第三种方式（检查 `is_empty` + 字符串）。三处对同一字段的编解码协议不一致。
 - **危害**: 远端转发出错时客户端 decode 失败，真实错误（含可重试性判断）丢失。
 - **修法**: 统一为一个协议（建议服务端统一 postcard 序列化 `Error`/`ApiError`，客户端统一 decode）。
+- **完成说明**: 已实现（随 #9 一并修复）——服务端 `result_to_raft_reply` 统一 postcard 编码 `ApiError`（新增 `Internal` 变体承载不可重试错误），客户端 `forward_request_to_leader`/`join_via`/`NetworkConnection::forward` 三处统一 postcard decode，编解码协议一致，重定向与可重试性可跨网络透传。
 
 ### 5. `last_applied` 与数据写入非原子
 - [ ] **未完成**
@@ -62,17 +63,38 @@
 - **危害**: 重启后 `applied_state()` 报告的位置/成员与恢复出的实际数据不一致，可能影响启动时的日志重放起点与成员判断（与 #5 同族）。
 - **修法**: 恢复完成后把 snapshot meta 中的 `last_log_id` / `last_membership` 写回 `_sm_meta` 与 `sys_data`。
 
+### 8. gRPC 4MB 消息上限击穿 Raft 复制（CoreDB 压测 P0）
+- [x] **已完成**
+- **位置**: `src/node/cluster.rs` 的 `start_raft_service()`；`src/network/pool/manager.rs`；`src/node/forward.rs` 的 `send_forward_request()`
+- **问题**: tonic 默认 decode 上限 4MB，rockraft 未在任何 server/client 处设置 `max_decoding/encoding_message_size`。openraft 默认 `max_payload_entries = 300`，单次 AppendEntries 累计 payload 可轻松超过 4MB（如 300 × 160KB ≈ 48MB）。follower 端 decode 失败 → `RPCError::Network` → 用同一 payload 无限重试 → 复制永久卡死、quorum 丢失、写全面超时。单个 >4MB 的 value 也能单独触发。
+- **佐证**: CoreDB 压测记录（coredb.md P0）—— 3 节点集群大 value/批量写后复制永久不恢复，`message length too large` 错误 30 分钟重复 14944 次。
+- **修法**: server（`RaftServiceServer`）与 client（连接池 `RaftServiceManager` + 转发路径）三处统一设置 `max_decoding/encoding_message_size`；`RaftConfig` 增加 `grpc_max_message_size` 配置项。调低 `max_payload_entries` 只能缓解批量场景，单条超大 entry 仍会击穿，故不作为主修复。
+- **完成说明**: 已实现——三处统一应用 message size 上限；`RaftConfig.grpc_max_message_size: Option<u64>` 可配置（TOML/代码均可），默认 256MB。服务端经 `start_raft_service`、连接池经 `ClientPool::new_with_max_message_size`（`RaftNode::create` 从 config 读取）、转发路径经 `send_forward_request` 应用。新增 3 个 config 单测。
+
+### 9. 转发热路径的重试缺口：`client_write` 遇 ForwardToLeader 直接失败（CoreDB 压测 P0b）
+- [x] **已完成**
+- **位置**: `src/node/forward.rs` 的 `execute_or_forward()` / `handle_forward_request()`；`src/node/leader_handler.rs` 的 `do_write()`
+- **问题**: `assume_leader()` 依据缓存 metrics 自认是 leader，但 `client_write()` 时节点已 step down，openraft 返回 `ClientWriteError::ForwardToLeader{leader_id: Some(3)}`；`map_raft_err_log!` 把它压平为 `Error::internal`（不可重试），且本地 dispatch 分支无重试，错误直接抛给客户端（"client write: has to forward request to: Some(3)"）。这是 assume_leader 与 client_write 之间固有的 TOCTOU，无法靠 leader 检测消除。
+- **佐证**: CoreDB 压测验证暴露（coredb.md P0b）。
+- **修法**: 错误映射层保留 ForwardToLeader 重定向（不压平为 internal），转发层识别重定向后直接转发到已知 leader；远端错误经统一编解码保留重定向信息。
+- **完成说明**: 已实现（方案 B 完整修复）——
+  1. `error.rs` 新增 `ErrorKind::ForwardToLeader{leader_id}`（可重试、携带重定向目标）；`do_write`/`change_membership` 的错误经 `map_client_write_err` 保留重定向；
+  2. `execute_or_forward` 与 `handle_forward_request` 合并为同一重试循环：本地执行遇重定向直接转发到已知 leader，无已知 leader 时退避重试，转发链多跳可续传；
+  3. 顺带修复 #4/#27：`RaftReply.error` 统一为 postcard 编码的 `ApiError`，`leader_id` 跨网络透传；
+  4. `batch_write`/`txn`/`add_node`/`remove_node` 外层包装改用 `preserve_redirect`（CoreDB MSET/GETSET 压测复现：`map_err_log!` 把 `do_write` 已正确返回的 redirect 重新压平为 internal，SET 正常而 MSET 失败即源于此）。
+  新增 6 个单测覆盖重定向保留、编解码 roundtrip 与包装层透传。
+
 ---
 
 ## 二、未实现 / 死代码
 
-### 8. TTL/过期功能全链路未实现
+### 10. TTL/过期功能全链路未实现
 - [ ] **未完成**
 - **位置**: `src/raft/types/cmd/upsert_kv.rs`、`meta.rs`、`time.rs`；`src/raft/store/statemachine.rs` 的 `apply_upsert_kv()`
 - **问题**: `UpsertKV.value_meta`（`MetaSpec` 的 `expire_at`/`ttl`）在 apply 时被完全忽略，只写 value。`with_ttl()`/`with_expire_sec()` 是死代码，`MetaSpec`/`Interval`/`flexible_timestamp_to_duration` 无任何消费者。
 - **决策**: 要么完整实现（apply 时写带 TTL 的 key、读取/scan 时过滤过期，`LogEntry.time_ms` 字段已有铺垫），要么删除整条链路。
 
-### 9. `RaftNodeBuilder` 三个配置项是摆设
+### 11. `RaftNodeBuilder` 三个配置项是摆设
 - [ ] **未完成**
 - **位置**: `src/node/node_builder.rs`；`src/node/node.rs` 的 `create()`
 - **问题**:
@@ -81,20 +103,20 @@
   - `max_client_pool_size` — 只做校验，未传入 create；`create()` 里硬编码 `ClientPool::new(10)`、转发超时 10s
 - **修法**: 要么把 builder 选项真正接到 `create()`，要么删除。
 
-### 10. `Cmd::Txn` 的 `result` 字段是死代码
+### 12. `Cmd::Txn` 的 `result` 字段是死代码
 - [ ] **未完成**
 - **位置**: `src/raft/types/cmd/cmd.rs`；`src/raft/store/statemachine.rs` 的 `apply()`
 - **问题**: 构造时永远 `result: None`，apply 时忽略 `result` 直接返回 `AppliedState::Txn`。
 - **修法**: 删除该字段。
 
-### 11. `vacuum_snapshot_files` 是 stub → 磁盘无限增长
+### 13. `vacuum_snapshot_files` 是 stub → 磁盘无限增长
 - [ ] **未完成**
 - **位置**: `src/raft/store/snapshot/build.rs`
 - **问题**: 注释明确 TODO，不清理旧快照。每次 build snapshot 新增一个目录，旧的永不删除。
 - **危害**: 长期运行磁盘无限增长。
 - **修法**: 实现清理逻辑——遍历 snapshot_dir，保留 `last_snapshot_id` 指向的目录，删除其余（注意先校验新快照完整性再删旧）。
 
-### 12. engine 调优参数不可配置
+### 14. engine 调优参数不可配置
 - [ ] **未完成**
 - **位置**: `src/engine/rocksdb.rs`、`src/config/config.rs`
 - **问题**: `engine::RocksDBConfig`（block_cache_size/write_buffer 等）与 `config::RocksdbConfig`（data_path/max_open_files）是**两个同名不同类型**，前者未暴露到 `Config`，用户无法从配置控制 RocksDB 调优参数。
@@ -104,33 +126,33 @@
 
 ## 三、性能
 
-### 13. 转发热路径不走连接池
+### 15. 转发热路径不走连接池
 - [ ] **未完成**
 - **位置**: `src/node/forward.rs` 的 `send_forward_request()`
 - **问题**: 用 `JoinConnectionFactory::create_rpc_channel` 每次新建 channel（TCP 握手开销），而 `ClientPool` 只服务于 append/vote/snapshot RPC。
 - **危害**: 转发是高频路径，每次请求付出建连成本。
 - **修法**: 转发路径接入 `ClientPool`。
 
-### 14. `ClientPool` 初始化有竞态
+### 16. `ClientPool` 初始化有竞态
 - [ ] **未完成**
 - **位置**: `src/network/pool/client_pool.rs` 的 `raft_service_client()`
 - **问题**: `if !contains_key(addr) { insert }` 非原子，并发首次访问同一 addr 时可能重复创建 pool（旧 pool 泄漏）。
 - **修法**: 使用 `DashMap::entry(addr).or_insert_with(...)` API。
 
-### 15. 无 leader 时客户端等待过长
+### 17. 无 leader 时客户端等待过长
 - [ ] **未完成**
 - **位置**: `src/node/forward.rs` 的 `get_leader()`（2s 超时）、`execute_or_forward()`（20 次重试 + 指数退避）
 - **问题**: 最坏情况 2s×20 + 指数退避，阻塞可达 40s+，客户端超时体验差。
 - **修法**: 缩短单次等待、降低总预算、尽早返回可重试错误让上层决策。
 
-### 16. 读路径全部转发到 leader
+### 18. 读路径全部转发到 leader
 - [ ] **未完成**
 - **位置**: `src/node/node.rs` 的 `read()` / `scan_prefix()`
 - **问题**: 读也走 `execute_or_forward` 转发到 leader，leader 成为读瓶颈，且每次转发有一次 postcard 编解码 + 网络往返。
 - **说明**: 当前语义是读 leader 已 apply 数据（非线性一致读）。若接受 follower 本地读，可大幅降低 leader 压力；若要线性一致读则需引入 ReadIndex/lease 机制。
 - **决策**: 明确读一致性语义后选择方案。
 
-### 17. `truncate_after`/`purge` 用 `delete_range_cf`（惰性删除）
+### 19. `truncate_after`/`purge` 用 `delete_range_cf`（惰性删除）
 - [ ] **未完成**
 - **位置**: `src/raft/store/log_store.rs`
 - **问题**: RocksDB 的 range delete 是 lazy 的，需 compaction 才真正释放空间，大量删除可能影响后续读性能。
@@ -140,19 +162,19 @@
 
 ## 四、健壮性 / 资源管理
 
-### 18. `RaftNode::shutdown` 不关闭 raft 实例
+### 20. `RaftNode::shutdown` 不关闭 raft 实例
 - [ ] **未完成**
 - **位置**: `src/node/node.rs` 的 `shutdown()`
 - **问题**: 只停了 gRPC service，OpenRaft 的 `raft.shutdown()` 从未调用，raft runtime 未正确关闭。
 - **修法**: shutdown 流程中调用 `self.raft.shutdown().await` 并等待完成。
 
-### 19. `get_members` 绕过了 leader 检查
+### 21. `get_members` 绕过了 leader 检查
 - [ ] **未完成**
 - **位置**: `src/node/node.rs` 的 `get_members()`
 - **问题**: 直接 `LeaderHandler::new(self).get_members()`，不走 `execute_or_forward`，与 `LeaderHandler` 文档"leader-only"矛盾。follower 返回本地（可能滞后）视图；`RequestPayload::GetMembers` 的转发路径没被本地 API 使用。
 - **决策**: 要么走完整转发流程，要么修正文档明示"返回本地视图"。
 
-### 20. snapshot 流式接收缺乏防御性校验
+### 22. snapshot 流式接收缺乏防御性校验
 - [ ] **未完成**
 - **位置**: `src/service/raft_service_impl.rs`
 - **问题**:
@@ -161,19 +183,19 @@
   - `guard.remove(&snapshot_id).unwrap()` 依赖前置条件，若已被 evict 会 panic
 - **修法**: 校验 offset 与当前文件长度一致；冲突时拒绝并要求重传；`remove` 改为防御性处理。
 
-### 21. `Endpoint::parse` 不支持 IPv6
+### 23. `Endpoint::parse` 不支持 IPv6
 - [ ] **未完成**
 - **位置**: `src/config/endpoint.rs` 的 `parse()`
 - **问题**: `splitn(2, ':')` 无法解析 `[::1]:8080` 形式的 IPv6 地址。
 - **修法**: 使用 `SocketAddr::from_str` 或处理方括号语法。
 
-### 22. snapshot_id 用 `now_millis()` 可能碰撞
+### 24. snapshot_id 用 `now_millis()` 可能碰撞
 - [ ] **未完成**
 - **位置**: `src/raft/store/snapshot/build.rs`
 - **问题**: 同一毫秒内连续 trigger snapshot 会生成相同 ID，覆盖已有快照（集成测试有 rapid sequential 场景）。
 - **修法**: ID 中加入原子自增序列或随机后缀。
 
-### 23. mobc `Manager::check` 空实现
+### 25. mobc `Manager::check` 空实现
 - [ ] **未完成**
 - **位置**: `src/network/pool/manager.rs`
 - **问题**: `check()` 直接返回 Ok，不校验 channel 存活，可能把已断连的连接分发给调用方（失败重试会掩盖问题但增加延迟）。
@@ -183,22 +205,23 @@
 
 ## 五、小问题
 
-### 24. example/README.md 与实现不符
+### 26. example/README.md 与实现不符
 - [ ] **未完成**
 - **位置**: `example/README.md` 的 "Read Path" 章节
 - **问题**: 文档说"读直接读本地 RocksDB，无需 Raft 共识"，实际 `read()` 走 `execute_or_forward` 转发到 leader。
 
-### 25. `From<ApiError> for Error` 丢失 leader 重定向信息
-- [ ] **未完成**
+### 27. `From<ApiError> for Error` 丢失 leader 重定向信息
+- [x] **已完成**
 - **位置**: `src/error.rs`
 - **问题**: 转换为 `Error::retryable_with_reason(LeaderTransition)` 时丢弃了 `ForwardToLeader.leader_id`，远程转发错误丢失重定向信息。
+- **完成说明**: 已实现（随 #9 一并修复）——`From<ApiError> for Error` 重写：`ForwardToLeader{leader_id}` 映射为新的 `ErrorKind::ForwardToLeader`，重定向目标完整保留；`Error::forward_leader_id()` 供转发层直接寻址。
 
-### 26. 服务端 gRPC 无 TLS/auth 能力
+### 28. 服务端 gRPC 无 TLS/auth 能力
 - [ ] **未完成**
 - **位置**: `src/node/cluster.rs` 的 `start_raft_service()`
 - **问题**: 客户端 TLS 配置（`RpcClientTlsConfig`）存在但没接线，服务端无 TLS，且无任何认证机制。
 
-### 27. 无 Prometheus metrics 导出
+### 29. 无 Prometheus metrics 导出
 - [ ] **未完成**
 - **位置**: 整个 crate
 - **问题**: 无可观测性指标导出，排查线上问题只能靠日志。
@@ -209,12 +232,13 @@
 
 1. **#1**（已完成）
 2. **#2**（已完成）
-3. **#6**（快照恢复残留旧 key → 分歧风险）、**#7**（恢复后 meta 未同步）
-4. **#4**（error 编解码协议统一）
-5. **#11**（磁盘无限增长）、**#8/#9/#10**（死代码清理或实现决策）
-6. **#13/#14**（转发性能）
-7. **#18**（shutdown 正确性）
-8. 其余按需
+3. **#8**（已完成）
+4. **#9**（已完成）、**#4**（已完成）、**#27**（已完成）
+5. **#6**（快照恢复残留旧 key → 分歧风险）、**#7**（恢复后 meta 未同步）
+6. **#13**（磁盘无限增长）、**#10/#11/#12**（死代码清理或实现决策）
+7. **#15/#16**（转发性能）
+8. **#20**（shutdown 正确性）
+9. 其余按需
 
 ---
 

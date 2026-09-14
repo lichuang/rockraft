@@ -10,8 +10,9 @@ use openraft::async_runtime::watch::WatchReceiver;
 use tokio::time::{sleep, timeout};
 use tracing::debug;
 
-use crate::error::{Error, Result};
+use crate::error::{ApiError, Error, Result, RetryReason};
 use crate::network::JoinConnectionFactory;
+use crate::raft::protobuf::RaftReply;
 use crate::raft::protobuf::raft_service_client::RaftServiceClient;
 use crate::raft::types::{
   ForwardRequest, ForwardResponse, ForwardToLeader, NodeId, RequestPayload, decode,
@@ -85,43 +86,73 @@ impl RaftNode {
 
   /// Execute a request locally as leader, or forward to the current leader.
   ///
-  /// Retries up to MAX_RETRIES when no leader is available (e.g. during
-  /// leader election after a cluster restart), matching the retry behaviour
-  /// of `handle_forward_request`.
+  /// Handles three transient situations with retries (exponential backoff):
+  /// - no leader yet (election in progress)
+  /// - this node stepped down between `assume_leader()` and the actual
+  ///   write, which then returns a forward-to-leader redirect
+  /// - the forwarding target is unreachable or itself stepped down
   pub(crate) async fn execute_or_forward(
     &self,
     payload: RequestPayload,
   ) -> Result<ForwardResponse> {
     for attempt in 0..MAX_RETRIES {
-      match self.assume_leader().await {
-        Ok(leader) => {
-          return Self::dispatch_leader_handler(leader, payload).await;
-        }
-        Err(forward_err) => {
-          let request = ForwardRequest {
-            body: payload.clone(),
-          };
-          match self
-            .forward_with_leader_id(forward_err.leader_id, request)
-            .await
-          {
-            Ok(response) => return Ok(response),
-            Err(e) => {
-              if Self::is_retriable_error(&e) && attempt < MAX_RETRIES - 1 {
-                let delay = RETRY_INITIAL_INTERVAL * 2u32.saturating_pow(attempt);
-                let delay = delay.min(RETRY_MAX_INTERVAL);
-                debug!(
-                  "execute_or_forward: no leader, retry {}/{} after {:?}",
-                  attempt + 1,
-                  MAX_RETRIES,
-                  delay
-                );
-                sleep(delay).await;
-                continue;
-              }
-              return Err(e);
-            }
+      let result = match self.assume_leader().await {
+        Ok(leader) => Self::dispatch_leader_handler(leader, payload.clone()).await,
+        Err(forward_err) => match forward_err.leader_id {
+          Some(leader_id) => {
+            self
+              .forward_request_to_leader(
+                leader_id,
+                ForwardRequest {
+                  body: payload.clone(),
+                },
+              )
+              .await
           }
+          None => Err(Error::retryable_with_reason(RetryReason::NoLeader)),
+        },
+      };
+
+      let err = match result {
+        Ok(response) => return Ok(response),
+        Err(err) => err,
+      };
+
+      // A write can race with a leadership change: this node was leader in
+      // its cached metrics when assume_leader() ran but had stepped down
+      // by the time client_write() executed. Redirect directly to the
+      // known leader instead of failing the request.
+      let result = match err.forward_leader_id() {
+        Some(leader_id) => {
+          self
+            .forward_request_to_leader(
+              leader_id,
+              ForwardRequest {
+                body: payload.clone(),
+              },
+            )
+            .await
+        }
+        None => Err(err),
+      };
+
+      match result {
+        Ok(response) => return Ok(response),
+        Err(err) => {
+          if err.is_retryable() && attempt < MAX_RETRIES - 1 {
+            let delay = RETRY_INITIAL_INTERVAL * 2u32.saturating_pow(attempt);
+            let delay = delay.min(RETRY_MAX_INTERVAL);
+            debug!(
+              "execute_or_forward: retry {}/{} after {:?}: {}",
+              attempt + 1,
+              MAX_RETRIES,
+              delay,
+              err
+            );
+            sleep(delay).await;
+            continue;
+          }
+          return Err(err);
         }
       }
     }
@@ -134,62 +165,11 @@ impl RaftNode {
   /// Handle a forwarded request (gRPC entry point).
   ///
   /// This is the entry point for requests coming from other nodes via gRPC.
-  /// It handles the request using LeaderHandler if this node is leader,
-  /// or forwards to the actual leader if not.
+  /// It runs the same execute-or-forward logic as local requests, so
+  /// multi-hop redirects resolve on this node.
   pub async fn handle_forward_request(&self, request: ForwardRequest) -> Result<ForwardResponse> {
     debug!("recv forward req: {:?}", request);
-
-    for attempt in 0..MAX_RETRIES {
-      match self.assume_leader().await {
-        Ok(leader) => {
-          return Self::dispatch_leader_handler(leader, request.body).await;
-        }
-        Err(forward_err) => {
-          let retry_reason = match forward_err.leader_id {
-            Some(leader_id) => {
-              match self
-                .forward_request_to_leader(leader_id, request.clone())
-                .await
-              {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                  if Self::is_retriable_error(&e) {
-                    Some(format!("Failed to forward request ({e})"))
-                  } else {
-                    return Err(e);
-                  }
-                }
-              }
-            }
-            None => Some("No leader available to forward request".to_string()),
-          };
-
-          if let Some(reason) = retry_reason
-            && attempt < MAX_RETRIES - 1
-          {
-            let delay = RETRY_INITIAL_INTERVAL * 2u32.saturating_pow(attempt);
-            let delay = delay.min(RETRY_MAX_INTERVAL);
-            debug!(
-              "{}, retrying {}/{}, waiting {:?}",
-              reason,
-              attempt + 1,
-              MAX_RETRIES,
-              delay
-            );
-            sleep(delay).await;
-            continue;
-          }
-
-          return Err(Error::internal(
-            "No leader available to forward request after max retries",
-          ));
-        }
-      }
-    }
-
-    Err(Error::internal(
-      "No leader available to forward request after max retries",
-    ))
+    self.execute_or_forward(request.body).await
   }
 
   // -- Private helpers --
@@ -199,7 +179,7 @@ impl RaftNode {
     &self,
     addr: &String,
     request: ForwardRequest,
-  ) -> Result<crate::raft::protobuf::RaftReply> {
+  ) -> Result<RaftReply> {
     let timeout = Some(Duration::from_millis(10_000));
     let channel = JoinConnectionFactory::create_rpc_channel(addr, timeout, None)
       .await
@@ -208,7 +188,12 @@ impl RaftNode {
         e
       })?;
 
-    let mut raft_client = RaftServiceClient::new(channel);
+    // Same limit as the raft RPC clients: forwarded payloads can also
+    // exceed the tonic default 4MB limit.
+    let max_message_size = self.config.raft.grpc_max_message_size();
+    let mut raft_client = RaftServiceClient::new(channel)
+      .max_decoding_message_size(max_message_size)
+      .max_encoding_message_size(max_message_size);
 
     let response = raft_client
       .forward(request)
@@ -242,26 +227,13 @@ impl RaftNode {
         .map_err(|e| Error::internal(format!("Failed to deserialize response: {}", e)))?;
       Ok(forward_response)
     } else {
-      Err(Error::internal(format!(
-        "Leader returned error: {:?}",
-        String::from_utf8_lossy(&reply.error)
-      )))
+      // Errors are postcard-encoded `ApiError` (see
+      // `RaftServiceImpl::result_to_raft_reply`), so redirects keep their
+      // leader id and stay retryable across the wire.
+      let api_error: ApiError = decode(&reply.error)
+        .map_err(|e| Error::internal(format!("Failed to deserialize error response: {}", e)))?;
+      Err(Error::from(api_error))
     }
-  }
-
-  /// Forward a request to a leader, resolving the leader_id first.
-  async fn forward_with_leader_id(
-    &self,
-    leader_id: Option<NodeId>,
-    request: ForwardRequest,
-  ) -> Result<ForwardResponse> {
-    let leader_id = leader_id.ok_or_else(|| {
-      Error::retryable(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "No leader available",
-      ))
-    })?;
-    self.forward_request_to_leader(leader_id, request).await
   }
 
   /// Dispatch a request body to the appropriate LeaderHandler method.
@@ -303,10 +275,5 @@ impl RaftNode {
         Ok(ForwardResponse::GetMembers(result))
       }
     }
-  }
-
-  /// Check if the error is retriable (network/connection related)
-  fn is_retriable_error(error: &Error) -> bool {
-    error.is_retryable()
   }
 }

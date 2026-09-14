@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::node::RaftNode;
+use crate::raft::types::Node;
 use openraft::Config as OpenRaftConfig;
 use std::sync::Arc;
 use tracing::info;
@@ -143,7 +144,7 @@ impl<'a> RaftNodeBuilder<'a> {
           info!("Node already in cluster, skipping initialization");
         } else {
           info!("Initializing single-node cluster");
-          let node = crate::raft::types::Node {
+          let node = Node {
             node_id: config.node_id,
             endpoint: config.raft.advertise_endpoint.clone(),
           };

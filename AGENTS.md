@@ -79,6 +79,20 @@ pub fn process_response(response: CreateChatCompletionResponse) {
 }
 ```
 
+**Inline path references MUST NOT exceed two levels** (e.g. `crate::config::DEFAULT_GRPC_MAX_MESSAGE_SIZE` is the deepest allowed form). Anything deeper must be imported with `use` first:
+
+```rust
+// ❌ Wrong
+let node = crate::raft::types::Node { ... };
+.unwrap_or(crate::config::default::DEFAULT_GRPC_MAX_MESSAGE_SIZE)
+
+// ✅ Correct
+use crate::raft::types::Node;
+
+let node = Node { ... };
+.unwrap_or(crate::config::DEFAULT_GRPC_MAX_MESSAGE_SIZE)
+```
+
 ### Formatting
 - **Indentation**: 2 spaces (configured in `rustfmt.toml`)
 - **Import ordering**: Automatic reordering enabled (`reorder_imports = true`)

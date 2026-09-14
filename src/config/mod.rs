@@ -19,6 +19,7 @@
 //!         heartbeat_interval: None,
 //!         election_timeout_min: None,
 //!         election_timeout_max: None,
+//!         grpc_max_message_size: None,
 //!     },
 //!     rocksdb: RocksdbConfig {
 //!         data_path: "/tmp/raft".to_string(),
@@ -35,4 +36,5 @@ mod endpoint;
 pub use config::Config;
 pub use config::RaftConfig;
 pub use config::RocksdbConfig;
+pub(crate) use default::DEFAULT_GRPC_MAX_MESSAGE_SIZE;
 pub use endpoint::Endpoint;

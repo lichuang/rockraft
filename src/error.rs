@@ -27,12 +27,26 @@ impl Error {
   /// - `true`: Temporary issue (leader election, network glitch), retry the operation
   /// - `false`: Permanent issue (config error, internal bug), don't retry
   pub fn is_retryable(&self) -> bool {
-    matches!(self.kind, ErrorKind::Retryable { .. })
+    matches!(
+      self.kind,
+      ErrorKind::Retryable { .. } | ErrorKind::ForwardToLeader { .. }
+    )
   }
 
   /// Get the error kind
   pub fn kind(&self) -> &ErrorKind {
     &self.kind
+  }
+
+  /// If this error carries a redirect to a known leader, return its node id.
+  ///
+  /// Returns `None` for all other errors, and also for a redirect whose
+  /// leader is not yet known (callers should retry and re-resolve).
+  pub(crate) fn forward_leader_id(&self) -> Option<u64> {
+    match self.kind {
+      ErrorKind::ForwardToLeader { leader_id } => leader_id,
+      _ => None,
+    }
   }
 
   // Internal constructors
@@ -84,6 +98,17 @@ impl Error {
       source: Some(Box::new(source)),
     }
   }
+
+  /// Create a forward-to-leader redirect error
+  ///
+  /// `leader_id` is the current leader if known; `None` means the request
+  /// should be retried until a leader is resolved.
+  pub(crate) fn forward_to_leader(leader_id: Option<u64>) -> Self {
+    Self {
+      kind: ErrorKind::ForwardToLeader { leader_id },
+      source: None,
+    }
+  }
 }
 
 impl Display for Error {
@@ -111,6 +136,13 @@ pub enum ErrorKind {
   /// connection refused while node is starting up
   Retryable { reason: RetryReason },
 
+  /// This node is not the leader; the request must be forwarded.
+  ///
+  /// Raised when a node accepted a write believing it was the leader but
+  /// had already stepped down. Carries the current leader when known so
+  /// callers can redirect directly instead of waiting for metrics.
+  ForwardToLeader { leader_id: Option<u64> },
+
   /// Configuration error - check your settings
   ///
   /// Examples: invalid endpoint format, missing required config,
@@ -128,6 +160,9 @@ impl Display for ErrorKind {
   fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
     match self {
       ErrorKind::Retryable { reason } => write!(f, "retryable error: {}", reason),
+      ErrorKind::ForwardToLeader { leader_id } => {
+        write!(f, "forward to leader: {:?}", leader_id)
+      }
       ErrorKind::InvalidConfig(msg) => write!(f, "configuration error: {}", msg),
       ErrorKind::Internal(msg) => write!(f, "internal error: {}", msg),
     }
@@ -166,38 +201,49 @@ pub type Result<T> = StdResult<T, Error>;
 // =============================================================================
 
 /// Internal API errors from Raft operations
+///
+/// This is the single wire format for errors returned in gRPC
+/// `RaftReply.error`: the server postcard-encodes it, and every client
+/// site decodes it back, so redirect and retryability information
+/// survives the round trip.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ApiError {
+  /// The request could not be forwarded right now (transient).
   #[error("cannot forward request: {0}")]
   CannotForward(String),
 
-  #[error("forward to leader")]
+  /// The receiving node is not the leader; forward to `leader_id`.
+  #[error("forward to leader: {leader_id:?}")]
   ForwardToLeader { leader_id: Option<u64> },
+
+  /// Non-retryable failure on the receiving node.
+  #[error("internal error: {0}")]
+  Internal(String),
 }
 
 impl ApiError {
-  /// Check if this API error is retryable
-  pub(crate) fn is_retryable(&self) -> bool {
-    matches!(
-      self,
-      ApiError::CannotForward(_) | ApiError::ForwardToLeader { .. }
-    )
+  /// Classify a local `Error` into its wire representation.
+  ///
+  /// Redirects keep their leader id; transient errors become
+  /// `CannotForward`; everything else becomes a non-retryable `Internal`.
+  pub(crate) fn from_error(e: &Error) -> Self {
+    match e.kind() {
+      ErrorKind::ForwardToLeader { leader_id } => ApiError::ForwardToLeader {
+        leader_id: *leader_id,
+      },
+      ErrorKind::Retryable { .. } => ApiError::CannotForward(e.to_string()),
+      ErrorKind::InvalidConfig(_) | ErrorKind::Internal(_) => ApiError::Internal(e.to_string()),
+    }
   }
 }
 
 impl From<ApiError> for Error {
   fn from(e: ApiError) -> Self {
-    if e.is_retryable() {
-      let reason = match &e {
-        ApiError::ForwardToLeader { .. } => RetryReason::LeaderTransition,
-        _ => RetryReason::Transient,
-      };
-      Self {
-        kind: ErrorKind::Retryable { reason },
-        source: None,
-      }
-    } else {
-      Self::internal(e.to_string())
+    match e {
+      // Keep the redirect target so callers can forward directly.
+      ApiError::ForwardToLeader { leader_id } => Self::forward_to_leader(leader_id),
+      ApiError::CannotForward(_) => Self::retryable_with_reason(RetryReason::Transient),
+      ApiError::Internal(msg) => Self::internal(msg),
     }
   }
 }
@@ -248,3 +294,55 @@ pub type RockRaftError = Error;
 
 /// Deprecated: Use `Result<T>` instead
 pub type RockRaftResult<T> = Result<T>;
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::raft::types::{decode, encode};
+
+  #[test]
+  fn test_forward_to_leader_kind() {
+    let err = Error::forward_to_leader(Some(3));
+    assert!(err.is_retryable());
+    assert_eq!(err.forward_leader_id(), Some(3));
+
+    let err = Error::forward_to_leader(None);
+    assert!(err.is_retryable());
+    assert_eq!(err.forward_leader_id(), None);
+  }
+
+  #[test]
+  fn test_non_redirect_errors_have_no_leader_id() {
+    assert_eq!(Error::internal("boom").forward_leader_id(), None);
+    assert_eq!(Error::config("bad").forward_leader_id(), None);
+    assert!(!Error::internal("boom").is_retryable());
+  }
+
+  #[test]
+  fn test_api_error_from_error_classification() {
+    let api = ApiError::from_error(&Error::forward_to_leader(Some(5)));
+    assert_eq!(api, ApiError::ForwardToLeader { leader_id: Some(5) });
+    assert!(Error::from(api).is_retryable());
+
+    let api = ApiError::from_error(&Error::retryable_with_reason(RetryReason::NoLeader));
+    assert!(matches!(api, ApiError::CannotForward(_)));
+    assert!(Error::from(api).is_retryable());
+
+    let api = ApiError::from_error(&Error::internal("storage corrupt"));
+    assert!(matches!(api, ApiError::Internal(_)));
+    assert!(!Error::from(api).is_retryable());
+  }
+
+  #[test]
+  fn test_api_error_wire_roundtrip_preserves_redirect() {
+    let api = ApiError::ForwardToLeader { leader_id: Some(7) };
+    let bytes = encode(&api).unwrap();
+    let decoded: ApiError = decode(&bytes).unwrap();
+    assert_eq!(decoded, api);
+
+    // The full server->wire->client path keeps the redirect target.
+    let err = Error::from(decoded);
+    assert_eq!(err.forward_leader_id(), Some(7));
+    assert!(err.is_retryable());
+  }
+}

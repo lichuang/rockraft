@@ -17,9 +17,9 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
-use crate::error::{Error, Result};
+use crate::error::{ApiError, Error, Result};
 use crate::raft::protobuf::raft_service_server::RaftServiceServer;
-use crate::raft::types::{ForwardRequest, JoinRequest, Node, RequestPayload};
+use crate::raft::types::{ForwardRequest, JoinRequest, Node, RequestPayload, decode};
 use crate::service::RaftServiceImpl;
 
 use super::node::RaftNode;
@@ -31,6 +31,7 @@ impl RaftNode {
   /// the service to successfully bind to the endpoint before returning.
   pub(crate) async fn start_raft_service(raft_node: Arc<Self>) -> Result<()> {
     let raft_endpoint = raft_node.config.raft.endpoint.clone();
+    let max_message_size = raft_node.config.raft.grpc_max_message_size();
 
     let mut shutdown_rx = raft_node.shutdown_tx.subscribe();
     let raft_node_for_service = raft_node.clone();
@@ -58,8 +59,15 @@ impl RaftNode {
 
       info!("Raft gRPC service listening on {}", raft_endpoint);
 
+      // Raise the tonic default 4MB message limit: AppendEntries can
+      // legitimately carry far larger payloads (up to
+      // `max_payload_entries` entries per RPC).
+      let raft_service_server = RaftServiceServer::new(raft_service)
+        .max_decoding_message_size(max_message_size)
+        .max_encoding_message_size(max_message_size);
+
       let server_future = Server::builder()
-        .add_service(RaftServiceServer::new(raft_service))
+        .add_service(raft_service_server)
         .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
       tokio::select! {
@@ -236,10 +244,12 @@ impl RaftNode {
     if reply.error.is_empty() {
       Ok(())
     } else {
-      Err(Error::internal(format!(
-        "Join failed: {:?}",
-        String::from_utf8_lossy(&reply.error)
-      )))
+      // Errors are postcard-encoded `ApiError`; decoding preserves
+      // retryability so do_join_cluster can retry transient failures.
+      let api_error: ApiError = decode(&reply.error).map_err(|e| {
+        Error::internal(format!("Failed to deserialize join error response: {}", e))
+      })?;
+      Err(Error::from(api_error))
     }
   }
 }

@@ -11,7 +11,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
-use crate::error::Error;
+use crate::error::{ApiError, Error};
 use crate::raft::protobuf as pb;
 
 use crate::node::RaftNode;
@@ -61,21 +61,33 @@ impl RaftServiceImpl {
       Ok(response) => match encode(&response) {
         Ok(data) => pb::RaftReply {
           data,
-          error: String::new().into(),
+          error: Vec::new(),
         },
         Err(e) => {
           tracing::error!("Failed to serialize ForwardResponse: {}", e);
-          pb::RaftReply {
-            data: Vec::new(),
-            error: format!("internal error: serialize failed: {}", e).into(),
-          }
+          Self::error_reply(&Error::internal(format!("serialize failed: {}", e)))
         }
       },
-      Err(err) => {
-        let error_msg = err.to_string();
+      Err(err) => Self::error_reply(&err),
+    }
+  }
+
+  /// Encode an error into the reply using the wire format: a
+  /// postcard-serialized `ApiError`. Every client site decodes it the
+  /// same way, so redirects keep their leader id and stay retryable
+  /// across the wire.
+  fn error_reply(err: &Error) -> pb::RaftReply {
+    let api_err = ApiError::from_error(err);
+    match encode(&api_err) {
+      Ok(data) => pb::RaftReply {
+        data: Vec::new(),
+        error: data,
+      },
+      Err(e) => {
+        tracing::error!("Failed to serialize ApiError: {}", e);
         pb::RaftReply {
           data: Vec::new(),
-          error: error_msg.into(),
+          error: format!("internal error: {}", err).into(),
         }
       }
     }

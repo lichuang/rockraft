@@ -1,4 +1,6 @@
-use crate::error::{Error, Result};
+use crate::error::Error;
+use crate::error::ErrorKind;
+use crate::error::Result;
 use crate::node::RaftNode;
 use crate::raft::types::AppliedState;
 use crate::raft::types::BatchWriteReq;
@@ -19,6 +21,7 @@ use crate::raft::types::TypeConfig;
 use openraft::ChangeMembers;
 use openraft::Raft;
 use openraft::async_runtime::watch::WatchReceiver;
+use openraft::error::ClientWriteError;
 use openraft::error::RaftError;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -58,6 +61,48 @@ macro_rules! map_raft_err_log {
       }
     })
   };
+}
+
+/// Log and contextualize an internal `Error`, but pass leader redirects
+/// through unchanged.
+///
+/// Write wrappers (batch_write/txn/add_node/remove_node) must not flatten
+/// `ForwardToLeader` into a non-retryable internal error: the caller needs
+/// the redirect and its leader id to forward the request to the real leader.
+fn preserve_redirect(e: Error, context: &str) -> Error {
+  if matches!(e.kind(), ErrorKind::ForwardToLeader { .. }) {
+    debug!("{}: {:?}", context, e);
+    return e;
+  }
+  error!("{}: {:?}", context, e);
+  Error::internal(format!("{}: {}", context, e))
+}
+
+/// Convert a client-write RaftError into our Error, preserving redirects.
+///
+/// A node can step down between `assume_leader()` and the actual write;
+/// openraft then returns `ForwardToLeader`. That must NOT be flattened
+/// into a non-retryable internal error — the caller needs the redirect
+/// (and its leader id) to forward the request to the real leader.
+fn map_client_write_err(
+  e: RaftError<TypeConfig, ClientWriteError<TypeConfig>>,
+  context: &str,
+) -> Error {
+  if let RaftError::APIError(ClientWriteError::ForwardToLeader(forward)) = &e {
+    debug!(
+      "{}: stepped down, forward to leader {:?}",
+      context, forward.leader_id
+    );
+    return Error::forward_to_leader(forward.leader_id);
+  }
+
+  error!("{}: {:?}", context, e);
+  match e {
+    RaftError::APIError(api_err) => Error::internal(format!("{}: {}", context, api_err)),
+    RaftError::Fatal(fatal_err) => {
+      Error::internal(format!("{}: fatal raft error: {}", context, fatal_err))
+    }
+  }
 }
 
 /// LeaderHandler provides methods that can only be called on a leader node
@@ -139,10 +184,10 @@ impl<'a> LeaderHandler<'a> {
         node: node.clone(),
         overriding: true,
       });
-      map_err_log!(
-        self.write(entry).await,
-        format!("Failed to sync node {}", id)
-      )?;
+      self
+        .write(entry)
+        .await
+        .map_err(|e| preserve_redirect(e, &format!("Failed to sync node {}", id)))?;
     }
 
     let node = Node {
@@ -157,7 +202,10 @@ impl<'a> LeaderHandler<'a> {
       overriding: false,
     });
 
-    map_err_log!(self.write(entry).await, "Failed to join node")?;
+    self
+      .write(entry)
+      .await
+      .map_err(|e| preserve_redirect(e, "Failed to join node"))?;
     info!("AddNode command written successfully for node {}", node_id);
 
     // Change membership to add the new node as voter (retain removed voters as learners)
@@ -166,10 +214,11 @@ impl<'a> LeaderHandler<'a> {
     add_voters.insert(node_id, node);
 
     let msg = ChangeMembers::AddVoters(add_voters);
-    map_raft_err_log!(
-      self.raft().change_membership(msg, false).await,
-      "Failed to join node"
-    )?;
+    self
+      .raft()
+      .change_membership(msg, false)
+      .await
+      .map_err(|e| map_client_write_err(e, "Failed to join node"))?;
     info!("Node {} joined successfully", node_id);
 
     Ok(())
@@ -192,16 +241,20 @@ impl<'a> LeaderHandler<'a> {
     // Write a log entry to remove the node
     let entry = LogEntry::new(Cmd::RemoveNode { node_id });
 
-    map_err_log!(self.write(entry).await, "Failed to leave node")?;
+    self
+      .write(entry)
+      .await
+      .map_err(|e| preserve_redirect(e, "Failed to leave node"))?;
 
     // Change membership to remove the node
     let mut remove_voters: BTreeSet<u64> = BTreeSet::new();
     remove_voters.insert(node_id);
 
-    map_raft_err_log!(
-      self.raft().change_membership(remove_voters, true).await,
-      "Failed to leave node"
-    )?;
+    self
+      .raft()
+      .change_membership(remove_voters, true)
+      .await
+      .map_err(|e| map_client_write_err(e, "Failed to leave node"))?;
 
     Ok(())
   }
@@ -222,10 +275,10 @@ impl<'a> LeaderHandler<'a> {
       entries: req.entries,
     });
 
-    map_err_log!(
-      self.do_write(entry).await,
-      "Failed to write batch log entry"
-    )
+    self
+      .do_write(entry)
+      .await
+      .map_err(|e| preserve_redirect(e, "Failed to write batch log entry"))
   }
 
   /// Read a value from the state machine (leader-only)
@@ -272,7 +325,11 @@ impl<'a> LeaderHandler<'a> {
     // Build a transaction command
     let entry = LogEntry::new(Cmd::Txn { req, result: None });
 
-    match map_err_log!(self.do_write(entry).await, "Failed to execute transaction")? {
+    match self
+      .do_write(entry)
+      .await
+      .map_err(|e| preserve_redirect(e, "Failed to execute transaction"))?
+    {
       AppliedState::Txn(reply) => Ok(reply),
       _ => {
         // Should not happen - Txn command always returns AppliedState::Txn
@@ -294,7 +351,7 @@ impl<'a> LeaderHandler<'a> {
 
     let node_id = self.raft().node_id();
 
-    match map_raft_err_log!(self.raft().client_write(entry).await, "client write") {
+    match self.raft().client_write(entry).await {
       Ok(response) => {
         debug!(
           node_id = %node_id,
@@ -309,8 +366,30 @@ impl<'a> LeaderHandler<'a> {
           error = %e,
           "Failed to write log entry"
         );
-        Err(e)
+        Err(map_client_write_err(e, "client write"))
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::preserve_redirect;
+  use crate::error::Error;
+
+  #[test]
+  fn test_preserve_redirect_passes_forward_to_leader_through() {
+    // Write wrappers (batch_write/txn/add_node/remove_node) must not flatten
+    // a leader redirect into a non-retryable internal error.
+    let err = preserve_redirect(Error::forward_to_leader(Some(3)), "test op");
+    assert_eq!(err.forward_leader_id(), Some(3));
+    assert!(err.is_retryable());
+  }
+
+  #[test]
+  fn test_preserve_redirect_wraps_other_errors() {
+    let err = preserve_redirect(Error::internal("boom"), "test op");
+    assert!(!err.is_retryable());
+    assert!(err.to_string().contains("test op"));
   }
 }

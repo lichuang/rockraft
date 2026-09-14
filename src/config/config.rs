@@ -40,9 +40,22 @@ pub struct RaftConfig {
   pub election_timeout_min: Option<u64>,
   /// Maximum election timeout in milliseconds (overrides OpenRaft default)
   pub election_timeout_max: Option<u64>,
+  /// Maximum gRPC message size in bytes for raft RPCs (encode and decode).
+  ///
+  /// Defaults to 256MB. Must be large enough for the biggest AppendEntries
+  /// payload (`max_payload_entries` × max entry size) or replication breaks.
+  pub grpc_max_message_size: Option<u64>,
 }
 
 impl RaftConfig {
+  /// Resolve the effective gRPC max message size in bytes.
+  pub(crate) fn grpc_max_message_size(&self) -> usize {
+    self
+      .grpc_max_message_size
+      .map(|v| v as usize)
+      .unwrap_or(crate::config::DEFAULT_GRPC_MAX_MESSAGE_SIZE)
+  }
+
   /// Build an OpenRaft Config from these settings, applying any overrides.
   pub(crate) fn to_openraft_config(&self) -> OpenRaftConfig {
     let mut cfg = OpenRaftConfig::default();
@@ -85,6 +98,8 @@ pub(crate) struct RawRaftConfig {
   pub election_timeout_min: Option<u64>,
   #[serde(default)]
   pub election_timeout_max: Option<u64>,
+  #[serde(default)]
+  pub grpc_max_message_size: Option<u64>,
 }
 
 impl Config {
@@ -112,6 +127,7 @@ impl Config {
         heartbeat_interval: raw.raft.heartbeat_interval,
         election_timeout_min: raw.raft.election_timeout_min,
         election_timeout_max: raw.raft.election_timeout_max,
+        grpc_max_message_size: raw.raft.grpc_max_message_size,
       },
       rocksdb: RocksdbConfig {
         data_path: raw.rocksdb.data_path,
@@ -146,9 +162,62 @@ impl Serialize for Config {
         heartbeat_interval: self.raft.heartbeat_interval,
         election_timeout_min: self.raft.election_timeout_min,
         election_timeout_max: self.raft.election_timeout_max,
+        grpc_max_message_size: self.raft.grpc_max_message_size,
       },
       rocksdb: self.rocksdb.clone(),
     };
     raw.serialize(serializer)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::super::default::DEFAULT_GRPC_MAX_MESSAGE_SIZE;
+  use super::*;
+
+  fn make_raft_config(grpc_max_message_size: Option<u64>) -> RaftConfig {
+    let endpoint = Endpoint::parse("127.0.0.1:6682").unwrap();
+    RaftConfig {
+      endpoint: endpoint.clone(),
+      advertise_endpoint: endpoint,
+      join: vec![],
+      heartbeat_interval: None,
+      election_timeout_min: None,
+      election_timeout_max: None,
+      grpc_max_message_size,
+    }
+  }
+
+  #[test]
+  fn test_grpc_max_message_size_defaults() {
+    let cfg = make_raft_config(None);
+    assert_eq!(cfg.grpc_max_message_size(), DEFAULT_GRPC_MAX_MESSAGE_SIZE);
+  }
+
+  #[test]
+  fn test_grpc_max_message_size_override() {
+    let cfg = make_raft_config(Some(64 * 1024 * 1024));
+    assert_eq!(cfg.grpc_max_message_size(), 64 * 1024 * 1024);
+  }
+
+  #[test]
+  fn test_raw_config_grpc_max_message_size_roundtrip() {
+    let raw = RawConfig {
+      node_id: 1,
+      raft: RawRaftConfig {
+        address: "127.0.0.1:6682".to_string(),
+        advertise_host: "".to_string(),
+        join: vec![],
+        heartbeat_interval: None,
+        election_timeout_min: None,
+        election_timeout_max: None,
+        grpc_max_message_size: Some(8 * 1024 * 1024),
+      },
+      rocksdb: Default::default(),
+    };
+
+    let config = Config::validate_and_parse(raw).unwrap();
+    assert_eq!(config.raft.grpc_max_message_size, Some(8 * 1024 * 1024));
+    assert_eq!(config.raft.grpc_max_message_size(), 8 * 1024 * 1024);
   }
 }

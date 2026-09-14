@@ -24,10 +24,13 @@ use tokio::io::AsyncSeekExt;
 
 use crate::error::{ApiError, Result};
 use crate::network::ClientPool;
+use crate::raft::protobuf::AppendReply;
 use crate::raft::protobuf::AppendRequest;
 use crate::raft::protobuf::RaftReply;
 use crate::raft::protobuf::RaftRequest;
+use crate::raft::protobuf::SnapshotReply;
 use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
+use crate::raft::protobuf::VoteReply;
 use crate::raft::protobuf::VoteRequest as PbVoteRequest;
 use crate::raft::types::ForwardRequest;
 use crate::raft::types::ForwardResponse;
@@ -40,19 +43,19 @@ trait ReplyValue {
   fn value(&self) -> &[u8];
 }
 
-impl ReplyValue for crate::raft::protobuf::AppendReply {
+impl ReplyValue for AppendReply {
   fn value(&self) -> &[u8] {
     &self.value
   }
 }
 
-impl ReplyValue for crate::raft::protobuf::VoteReply {
+impl ReplyValue for VoteReply {
   fn value(&self) -> &[u8] {
     &self.value
   }
 }
 
-impl ReplyValue for crate::raft::protobuf::SnapshotReply {
+impl ReplyValue for SnapshotReply {
   fn value(&self) -> &[u8] {
     &self.value
   }

@@ -76,7 +76,10 @@ impl RaftNode {
     let data_dir = PathBuf::from(&config.rocksdb.data_path);
     let (log_store, state_machine) = store::create_stores(&engine, data_dir).await?;
 
-    let client_pool = Arc::new(ClientPool::new(10));
+    let client_pool = Arc::new(ClientPool::new_with_max_message_size(
+      10,
+      config.raft.grpc_max_message_size(),
+    ));
     let factory = NetworkFactory::new(client_pool);
     let raft_config = config.raft.to_openraft_config();
 
@@ -310,6 +313,7 @@ mod tests {
         heartbeat_interval: None,
         election_timeout_min: None,
         election_timeout_max: None,
+        grpc_max_message_size: None,
       },
       rocksdb: RocksdbConfig {
         data_path: data_dir.to_string(),
