@@ -1,16 +1,58 @@
-# Changelog
+## [0.1.8] - 2026-09-14
 
-All notable changes to this project will be documented in this file.
+### 🚀 Features
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+- Add snapshot_log_id() and trigger_snapshot() APIs to RaftNode for snapshot introspection and manual triggering
+- Add snapshot trigger/status HTTP endpoints and 7 snapshot integration tests (basic, large dataset, binary data, consistency, batch write, txn, multi-cycle)
+- Add 3 snapshot recovery integration tests (cluster restart, follower restart, new node join) with node_id verification via /health endpoint
+- Add delete/batch_delete APIs to RaftNode and 6 snapshot edge-case integration tests (concurrent writes, empty DB, post-delete, overwrite, log-vs-snapshot recovery, getset)
+- Add 22 snapshot integration tests (normal, recovery, abnormal, log-purge, boundary) with supporting RaftNode APIs and HTTP endpoints for snapshot/delete/purge-log
+- Add Kubernetes chaos testing framework with Chaos Mesh integration for rockraft cluster (Dockerfile, StatefulSet manifests, Chaos Mesh CRDs, pytest chaos test suite, and GitHub Actions daily CI workflow)
 
+### 🐛 Bug Fixes
+
+- Add missing libclang-dev dependency in Dockerfile for RocksDB bindgen compilation during chaos test Docker build
+- Add missing libprotobuf-dev dependency in Dockerfile for protoc well-known types resolution
+- Wait for each StatefulSet pod individually and add cluster formation delay in chaos test workflow
+- Remove duplicate port-forward setup from workflow to avoid conflict with test fixture
+- Replace flaky kubectl port-forward with kubectl exec for chaos test pod communication
+- Treat ordinal 0 as truthy in wait_for by checking `is not None` instead of truthiness
+- Use advertise_endpoint for node registration and align example configs to separate listen/advertise addresses
+- Use advertise_endpoint for node registration and align example configs to separate listen/advertise addresses
+- Add inter-test cluster health wait to prevent quorum loss in chaos tests
+- Update chaos test health check to support OpenRaft RunningState dict format
+- Extract health state helper and add cluster stabilization after network partition in chaos tests
+- Increase K8s probe tolerance and add wait_for_min_healthy in chaos tests to prevent false pod restarts during leader election storms
+- Increase K8s probe tolerance, add wait_for_min_healthy helper, and reduce network delay in chaos tests to prevent leader-election storms
+- Add raft heartbeat/election-timeout config fields, set relaxed values for chaos tests, and print all config on startup
+- Fix compile bug
+- Skip init_cluster() on restart when node already in cluster and wait for pod recovery between chaos tests
+- Skip init_cluster() on restart when node already in cluster, wait for pod recovery between chaos tests, and retry client requests during leader election
+- Skip init_cluster() on restart, retry client requests during leader election, and only look for new leader among surviving nodes in failover test
+- Disable chaos test workflow
+- Resolve Txn conditions and prev_values against a pending-writes overlay so apply results no longer depend on how the apply stream is chunked into batches
+- Make install_snapshot wait for snapshot recovery to complete (spawn_blocking + await) so subsequent log application never races ahead of restored data, and remove the sleep-based workarounds from snapshot tests
+- Make the gRPC message size limit configurable with a 256MB default to stop 4MB decode failures from breaking raft replication, and preserve ForwardToLeader redirects across all write paths and forwarded hops via a unified ApiError wire codec
+
+### 🚜 Refactor
+
+- Extract per-command handlers from RaftStateMachine::apply and fold the pending-writes overlay into stage_upsert_kv
+
+### 📚 Documentation
+
+- Add todo.md
+- Add todo.md
+- Add todo.md
+- Update readme, add coredb
 ## [0.1.7] - 2026-04-12
 
 ### 🚜 Refactor
 
 - *(config)* [**breaking**] Remove redundant `single` field from RaftConfig
 
+### ⚙️ Miscellaneous Tasks
+
+- Bump version to v0.1.7
 ## [0.1.6] - 2026-04-11
 
 ### 🐛 Bug Fixes
@@ -63,7 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(grpc)* Remove dead RpcClientConf with leftover metasrv fields
 - Remove dead code across crate
 - *(types)* Remove unused forward_to_leader field from ForwardRequest
-
 ## [0.1.5] - 2026-04-06
 
 ### 🚀 Features
@@ -84,67 +125,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ⚙️ Miscellaneous Tasks
 
+- Bump version to v0.1.5
+- Bump version to v0.1.5
 - Update lib.rs
+- Update v0.1.5 changelog.md
+## [0.1.4] - 2026-03-21
 
-## [0.1.4] - 2025-03-21
+### 🚀 Features
 
-### Added
-- Batch atomic write support to RaftNode (`batch_write` API)
+- Add scan_prefix method to RocksStateMachine
+- Add scan_prefix API for prefix-based key scanning
+- Add scan_prefix API for prefix-based key scanning
+- Add batch atomic write support to RaftNode
 
-### Changed
+### 🐛 Bug Fixes
+
+- Update agents.md and fix format
+
+### 🚜 Refactor
+
+- Shrink GrpcConnectionError by replacing AnyError with String
+- Change ScanPrefixReq.prefix from String to Vec<u8>
 - Move examples/cluster to examples directory
 - Comply with Type Import Rules in AGENTS.md
 
-### Fixed
-- Update AGENTS.md and fix format
+### 📚 Documentation
 
-## [0.1.3] - 2025-03-20
+- Update AGENTS.md
 
-### Added
-- Scan prefix API for prefix-based key scanning
+### 🎨 Styling
 
-### Changed
-- Change `ScanPrefixReq.prefix` from `String` to `Vec<u8>`
-- Shrink `GrpcConnectionError` by replacing `AnyError` with `String`
-- Update tonic to v0.14.5
-
-### Fixed
 - Fix clippy warnings and apply code optimizations
 
-## [0.1.2] - 2025-03-18
+### ⚙️ Miscellaneous Tasks
 
-### Added
-- `scan_prefix` method to `RocksStateMachine`
-
-### Changed
-- Refactor encode/decode, use postcard instead of bincode
-- Use openraft 0.10.0-alpha.14
-
-### Fixed
-- Fix compile warning
-
-## [0.1.1] - 2025-03-15
-
-### Added
-- Restart test cases for cluster example
-- Test cases of cluster example
-
-### Fixed
-- Fix membership bug
-- Fix cluster example start bug
-- Fix connection retry logic bug
-- Fix add member bug
-
-## [0.1.0] - 2025-03-01
-
-### Added
-- Initial release
-- Raft consensus implementation based on OpenRaft
-- RocksDB storage backend
-- gRPC-based inter-node communication
-- Cluster management (join/leave nodes)
-- Leader election and failover
-- Snapshot support for storage recovery
-- Connection pooling for gRPC
-- HTTP API example with axum
-- DNS resolver for node discovery
+- Add CI/CD workflows and CHANGELOG
