@@ -28,7 +28,8 @@
 - **完成说明**: 已实现——`recover_snapshot` 改为 `spawn_blocking` + `await` join（`do_recover_snapshot_sync`），返回时快照已完整恢复，恢复错误也能传播给 raft core；测试中 4 处 `sleep` hack 已移除。
 
 ### 3. membership 双源问题
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: 采用方案 A——`apply()` 对 `EntryPayload::Membership` 调用 `apply_membership()` → `set_last_membership()`：membership entry 持久化到 SM_META（新 `LAST_MEMBERSHIP_KEY`）+ `sys_data.last_membership` 缓存，nodes 表从 membership 的 `nodes()`（含 learner）重建。`get_last_membership()` 优先返回存储的 entry（learner 不再被错误提升为 voter），仅在从未 apply 过 membership entry 的遗留 bootstrap 路径回退从 nodes 现拼。重启时 `recover_sys_data` 一并恢复 last_membership。单一事实来源 = raft log 的 membership entry。新增回归测试（voters+learner 持久化、reopen 恢复、nodes 重建）。
 - **位置**: `src/raft/store/statemachine.rs` 的 `apply()`；`src/node/cluster.rs` 的 `is_in_cluster()`
 - **问题**: `apply()` 对 `EntryPayload::Membership` 只打日志不处理，SM 的 nodes 只靠 `Cmd::AddNode/RemoveNode` 维护。OpenRaft `change_membership` 产生的 membership entry 与 SM 的 nodes 是两套状态，learner、`retain` 语义等场景下可能不一致。
 - **危害**: `get_last_membership()`（用于转发寻址、`is_in_cluster`）建立在 nodes 上，与 raft core 的真实 membership 可能漂移。

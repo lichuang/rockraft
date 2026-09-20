@@ -23,6 +23,7 @@ use tracing::info;
 use rocksdb::DB;
 
 use super::keys::LAST_APPLIED_LOG_KEY;
+use super::keys::LAST_MEMBERSHIP_KEY;
 use super::keys::NODES_KEY;
 use super::keys::SM_DATA_FAMILY;
 use super::keys::SM_META_FAMILY;
@@ -166,9 +167,18 @@ impl RocksStateMachine {
       .transpose()?
       .unwrap_or_default();
 
+    // Recover last applied membership entry (absent on nodes pre-dating
+    // membership persistence, or bootstrapped only via Cmd::AddNode)
+    let last_membership = db
+      .get_cf(&cf_meta, LAST_MEMBERSHIP_KEY)
+      .map_err(read_logs_err)?
+      .map(|bytes| decode(&bytes).map_err(read_logs_err))
+      .transpose()?;
+
     Ok(SysData {
       last_applied,
       nodes,
+      last_membership,
     })
   }
 
@@ -176,8 +186,19 @@ impl RocksStateMachine {
     Ok(self.lock_sys_data()?.last_applied)
   }
 
-  /// Get last membership (constructed from nodes)
+  /// Get the last applied membership.
+  ///
+  /// Prefers the membership entry applied from `EntryPayload::Membership`
+  /// (the authoritative source, maintained jointly with the raft core).
+  /// Falls back to synthesizing a membership from the nodes map for nodes
+  /// that were bootstrapped via `Cmd::AddNode` before any membership entry
+  /// has been applied.
   pub fn get_last_membership(&self) -> Result<StoredMembership, io::Error> {
+    let sys_data = self.lock_sys_data()?;
+    if let Some(stored) = &sys_data.last_membership {
+      return Ok(stored.clone());
+    }
+    drop(sys_data);
     self.build_membership_from_nodes()
   }
 
@@ -197,6 +218,39 @@ impl RocksStateMachine {
       .map_err(|e| io::Error::other(format!("Failed to create membership: {}", e)))?;
 
     Ok(StoredMembership::new(None, membership))
+  }
+
+  /// Persist and cache the membership from an applied `EntryPayload::Membership`
+  /// entry, and rebuild the nodes table from it.
+  ///
+  /// The nodes table is derived from the membership's node map (voters and
+  /// learners alike) so that both views stay consistent with the membership
+  /// history applied through the raft log.
+  fn set_last_membership(&self, membership: StoredMembership) -> Result<(), io::Error> {
+    let mut sys_data = self.lock_sys_data()?;
+
+    let nodes: BTreeMap<NodeId, Node> = membership
+      .membership()
+      .nodes()
+      .map(|(id, node)| (*id, node.clone()))
+      .collect();
+
+    let data = encode(&membership).map_err(read_logs_err)?;
+    self
+      .db
+      .put_cf(&self.cf_sm_meta(), LAST_MEMBERSHIP_KEY, data)
+      .map_err(read_logs_err)?;
+
+    let nodes_data = encode(&nodes).map_err(read_logs_err)?;
+    self
+      .db
+      .put_cf(&self.cf_sm_meta(), NODES_KEY, nodes_data)
+      .map_err(read_logs_err)?;
+
+    sys_data.last_membership = Some(membership);
+    sys_data.nodes = nodes;
+
+    Ok(())
   }
 
   /// Get a value from the KV store by key
@@ -366,6 +420,14 @@ impl RocksStateMachine {
     Ok(AppliedState::None)
   }
 
+  /// Apply a membership entry from the raft log, making it the single
+  /// source of truth for both the stored membership and the nodes table.
+  fn apply_membership(&self, membership: Membership<TypeConfig>) -> Result<(), io::Error> {
+    let stored = StoredMembership::new(None, membership);
+    info!("applying membership: {:?}", stored);
+    self.set_last_membership(stored)
+  }
+
   fn apply_txn(
     &self,
     req: &TxnReq,
@@ -481,9 +543,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
         EntryPayload::Blank => AppliedState::None,
         EntryPayload::Normal(req) => self.apply_cmd(req.cmd, &mut batch, &mut pending_writes)?,
         EntryPayload::Membership(membership) => {
-          // Membership changes are handled by AddNode/RemoveNode commands
-          // which update the nodes map directly
-          info!("applying membership: {:?}", membership);
+          self.apply_membership(membership)?;
           AppliedState::None
         }
       };
@@ -831,6 +891,89 @@ mod tests {
     // With the overlay the condition sees "2" -> if branch.
     // Without it, the condition would read the committed "1" -> else branch.
     assert_eq!(sm.get_kv("result_key")?, Some(b"if".to_vec()));
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_apply_membership_updates_nodes_and_survives_reopen() -> Result<(), io::Error> {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir
+        .clone()
+        .into_os_string()
+        .into_string()
+        .unwrap(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+
+    let mut sm = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    // Apply a membership entry with voters {1, 2} and a learner 3.
+    let mut voters = BTreeSet::new();
+    voters.insert(1);
+    voters.insert(2);
+    let mut nodes = BTreeMap::new();
+    nodes.insert(
+      1,
+      Node {
+        node_id: 1,
+        endpoint: Endpoint::new("127.0.0.1", 7001),
+      },
+    );
+    nodes.insert(
+      2,
+      Node {
+        node_id: 2,
+        endpoint: Endpoint::new("127.0.0.1", 7002),
+      },
+    );
+    nodes.insert(
+      3,
+      Node {
+        node_id: 3,
+        endpoint: Endpoint::new("127.0.0.1", 7003),
+      },
+    );
+    let membership = Membership::new(vec![voters], nodes).unwrap();
+
+    let entries = vec![(
+      Entry {
+        log_id: create_log_id(1, 1, 1),
+        payload: EntryPayload::Membership(membership),
+      },
+      None,
+    )];
+    sm.apply(stream::iter(entries.into_iter().map(Ok)))
+      .await
+      .unwrap();
+
+    // get_last_membership now comes from the stored entry: learners are kept
+    // as learners, not promoted to voters.
+    let stored = sm.get_last_membership()?;
+    let voter_ids: BTreeSet<_> = stored.membership().voter_ids().collect();
+    assert_eq!(voter_ids, BTreeSet::from([1, 2]));
+
+    // nodes table was rebuilt from the membership (learners included)
+    let nodes_now = sm.get_nodes()?;
+    assert_eq!(nodes_now.len(), 3);
+    assert!(nodes_now.contains_key(&3));
+    assert!(sm.contains_node(3)?);
+
+    // Reopen: membership is recovered from SM_META, not re-synthesized
+    drop(sm);
+    let sm2 = RocksStateMachine::new(engine.db().clone(), temp_data_dir).await?;
+
+    let recovered = sm2.get_last_membership()?;
+    let recovered_voters: BTreeSet<_> = recovered.membership().voter_ids().collect();
+    assert_eq!(recovered_voters, BTreeSet::from([1, 2]));
+
+    let recovered_nodes = sm2.get_nodes()?;
+    assert_eq!(recovered_nodes.len(), 3);
 
     Ok(())
   }
