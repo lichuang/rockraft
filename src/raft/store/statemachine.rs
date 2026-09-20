@@ -500,6 +500,57 @@ impl RocksStateMachine {
     }
     self.get_kv(key)
   }
+
+  /// Write the snapshot's apply progress and membership into _sm_meta and
+  /// the in-memory sys_data cache.
+  ///
+  /// The membership overwrites any previously stored entry unconditionally:
+  /// the snapshot represents a state strictly newer than or equal to the
+  /// local one (openraft only installs snapshots that advance the position).
+  fn sync_snapshot_meta(&self, meta: &SnapshotMeta) -> Result<(), io::Error> {
+    let cf_meta = self.cf_sm_meta();
+
+    if let Some(last_log_id) = &meta.last_log_id {
+      let last_applied_data = encode(last_log_id).map_err(read_logs_err)?;
+      self
+        .db
+        .put_cf(&cf_meta, LAST_APPLIED_LOG_KEY, last_applied_data)
+        .map_err(read_logs_err)?;
+    } else {
+      self
+        .db
+        .delete_cf(&cf_meta, LAST_APPLIED_LOG_KEY)
+        .map_err(read_logs_err)?;
+    }
+
+    let membership_data = encode(&meta.last_membership).map_err(read_logs_err)?;
+    self
+      .db
+      .put_cf(&cf_meta, LAST_MEMBERSHIP_KEY, membership_data)
+      .map_err(read_logs_err)?;
+
+    // Rebuild the nodes table from the snapshot membership so both views
+    // agree (same invariant as applying a Membership log entry).
+    let nodes: BTreeMap<NodeId, Node> = meta
+      .last_membership
+      .membership()
+      .nodes()
+      .map(|(id, node)| (*id, node.clone()))
+      .collect();
+    let nodes_data = encode(&nodes).map_err(read_logs_err)?;
+    self
+      .db
+      .put_cf(&cf_meta, NODES_KEY, nodes_data)
+      .map_err(read_logs_err)?;
+
+    // In-memory cache updates only after a successful write
+    let mut sys_data = self.lock_sys_data()?;
+    sys_data.last_applied = meta.last_log_id;
+    sys_data.last_membership = Some(meta.last_membership.clone());
+    sys_data.nodes = nodes;
+
+    Ok(())
+  }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
@@ -553,9 +604,20 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
       }
     }
 
-    // Atomic write of all data
+    // Persist the apply progress into the SAME WriteBatch as the data, so a
+    // crash can never leave data applied without the matching progress record
+    // (which would re-apply committed entries on restart and replay Txn
+    // responses with wrong prev_values).
+    if let Some(last_applied_log_id) = last_applied_log_id {
+      let data = encode(&last_applied_log_id).map_err(read_logs_err)?;
+      batch.put_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY, data);
+    }
+
+    // Atomic write of all data + apply progress
     self.db.write(batch).map_err(read_logs_err)?;
 
+    // In-memory cache updates only after a successful write; skip entirely
+    // for an empty batch (last_applied_log_id is None) — DB state unchanged.
     if let Some(last_applied_log_id) = last_applied_log_id {
       self.set_last_applied_log_id(Some(last_applied_log_id))?;
     }
@@ -592,7 +654,14 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
         snapshot,
       },
     )
-    .await
+    .await?;
+
+    // After the KV data is restored, sync the apply progress and membership
+    // recorded in the snapshot meta into _sm_meta/sys_data. applied_state()
+    // and get_last_membership() read from there on restart — without this
+    // sync they would report a pre-snapshot position and membership while
+    // the KV state is already at the snapshot position.
+    self.sync_snapshot_meta(meta)
   }
 
   async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot>, io::Error> {
@@ -617,6 +686,8 @@ mod tests {
   use std::collections::HashMap;
 
   use crate::engine::RocksDBEngine;
+  use crate::raft::store::keys::LOG_DATA_FAMILY;
+  use crate::raft::store::keys::LOG_META_FAMILY;
   use crate::raft::types::LogEntry;
   use crate::raft::types::TxnCondition;
   use crate::raft::types::TxnReq;
@@ -625,6 +696,7 @@ mod tests {
   use futures::stream;
   use openraft::Entry;
   use openraft::EntryPayload;
+  use openraft::Membership;
   use openraft::storage::EntryResponder;
 
   use crate::raft::types::TypeConfig;
@@ -974,6 +1046,102 @@ mod tests {
 
     let recovered_nodes = sm2.get_nodes()?;
     assert_eq!(recovered_nodes.len(), 3);
+
+    Ok(())
+  }
+
+  /// Test Point: install_snapshot syncs last_applied and membership into
+  /// _sm_meta so applied_state()/get_last_membership() agree with the
+  /// restored KV data after reopen.
+  #[tokio::test]
+  async fn test_install_snapshot_syncs_meta() -> Result<(), io::Error> {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir
+        .clone()
+        .into_os_string()
+        .into_string()
+        .unwrap(),
+      1024,
+      vec![
+        LOG_META_FAMILY.to_string(),
+        LOG_DATA_FAMILY.to_string(),
+        SM_META_FAMILY.to_string(),
+        SM_DATA_FAMILY.to_string(),
+      ],
+    )
+    .unwrap();
+
+    let mut sm = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    // Pre-state: an old applied position and a one-node membership
+    let old_log_id = create_log_id(1, 1, 5);
+    sm.set_last_applied_log_id(Some(old_log_id))?;
+    let old_node = Node {
+      node_id: 1,
+      endpoint: Endpoint::new("127.0.0.1", 7001),
+    };
+    sm.add_node(old_node)?;
+
+    // A snapshot with a NEWER position and an EXTENDED membership
+    // (node 2 joins, node 1's address changes) — snapshot meta carries both.
+    let snap_log_id = create_log_id(2, 2, 100);
+    let mut voters = BTreeSet::new();
+    voters.insert(1);
+    voters.insert(2);
+    let mut snap_nodes = BTreeMap::new();
+    snap_nodes.insert(
+      1,
+      Node {
+        node_id: 1,
+        endpoint: Endpoint::new("127.0.0.1", 7001),
+      },
+    );
+    snap_nodes.insert(
+      2,
+      Node {
+        node_id: 2,
+        endpoint: Endpoint::new("127.0.0.1", 7002),
+      },
+    );
+    let membership = Membership::new(vec![voters], snap_nodes).unwrap();
+    let meta = SnapshotMeta {
+      last_log_id: Some(snap_log_id),
+      last_membership: StoredMembership::new(None, membership),
+      snapshot_id: "sync-meta-snapshot".to_string(),
+    };
+
+    // A snapshot data file (empty KV payload is fine — meta sync is the subject)
+    let snap_dir = temp_data_dir.join("snapshot").join(&meta.snapshot_id);
+    tokio::fs::create_dir_all(&snap_dir).await.unwrap();
+    let snap_data_path = snap_dir.join("snapshot");
+    let file = std::fs::File::create(&snap_data_path).unwrap();
+    let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+    encoder.finish().unwrap();
+
+    // install_snapshot: recover KV + sync meta
+    let snap_file = tokio::fs::File::open(&snap_data_path).await.unwrap();
+    sm.install_snapshot(&meta, snap_file).await.unwrap();
+
+    // In-memory view agrees with the snapshot meta
+    assert_eq!(sm.get_last_applied_log_id()?, Some(snap_log_id));
+    let after = sm.get_last_membership()?;
+    let after_voters: BTreeSet<_> = after.membership().voter_ids().collect();
+    assert_eq!(after_voters, BTreeSet::from([1, 2]));
+    let after_nodes = sm.get_nodes()?;
+    assert!(after_nodes.contains_key(&2));
+
+    // Reopen: recovered state agrees with the installed snapshot
+    drop(sm);
+    let sm2 = RocksStateMachine::new(engine.db().clone(), temp_data_dir).await?;
+
+    assert_eq!(sm2.get_last_applied_log_id()?, Some(snap_log_id));
+    let recovered = sm2.get_last_membership()?;
+    let recovered_voters: BTreeSet<_> = recovered.membership().voter_ids().collect();
+    assert_eq!(recovered_voters, BTreeSet::from([1, 2]));
+    assert_eq!(sm2.get_nodes()?.len(), 2);
 
     Ok(())
   }

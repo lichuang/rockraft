@@ -44,7 +44,8 @@
 - **完成说明**: 已实现（随 #9 一并修复）——服务端 `result_to_raft_reply` 统一 postcard 编码 `ApiError`（新增 `Internal` 变体承载不可重试错误），客户端 `forward_request_to_leader`/`join_via`/`NetworkConnection::forward` 三处统一 postcard decode，编解码协议一致，重定向与可重试性可跨网络透传。
 
 ### 5. `last_applied` 与数据写入非原子
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: `apply()` 循环后把 `LAST_APPLIED_LOG_KEY` 的 `put_cf` 直接加入同一个 `WriteBatch`（与 KV 数据/membership meta 一起原子提交），`db.write()` 成功后才更新 `sys_data` 内存缓存；空批次（None）跳过缓存更新（不误删 DB 中已有进度）。
 - **位置**: `src/raft/store/statemachine.rs` 的 `apply()` / `set_last_applied_log_id()`
 - **问题**: 数据走 `WriteBatch` 一次提交，`set_last_applied_log_id` 是另一次独立写。崩溃窗口内重启后会重放已应用日志。
 - **危害**: 对 KV 幂等无影响，但 Txn 的 `prev_values` 响应会重复/错误。
@@ -59,7 +60,8 @@
 - **修法**: 恢复前先清空 `_sm_data`（如全量 delete_range 后逐批写入，或写入临时 CF 后原子 swap），保证恢复结果是快照状态的精确副本。
 
 ### 7. `install_snapshot` 后未同步 `last_applied` 与 membership
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: `install_snapshot` 在 `recover_snapshot`（KV 数据，同步，#2）完成后调用新增的 `sync_snapshot_meta(&SnapshotMeta)`——把 `last_log_id` 写入 `_sm_meta`（None 时删除）、`last_membership` 写入新 `LAST_MEMBERSHIP_KEY`（复用 #3 的持久化），并从 membership 的 `nodes()` 重建 nodes 表；`sys_data` 缓存（last_applied/last_membership/nodes）在 DB 写成功后统一更新。与 #3/#6 的不变量一致：membership/nodes 以 raft log 的 membership 为单一事实来源。新增回归测试 `test_install_snapshot_syncs_meta`（旧状态→装新快照→内存视图与 reopen 恢复后均与快照 meta 一致）。
 - **位置**: `src/raft/store/snapshot/recover.rs` 的 `recover_snapshot`；`src/raft/store/statemachine.rs` 的 `recover_sys_data()`
 - **问题**: 快照恢复只写 `_sm_data` 的 KV 数据，不更新 `_sm_meta` 的 `last_applied_log_id` 和 `nodes`，而 `applied_state()` / `get_last_membership()` 都从这两处读取。
 - **危害**: 重启后 `applied_state()` 报告的位置/成员与恢复出的实际数据不一致，可能影响启动时的日志重放起点与成员判断（与 #5 同族）。
@@ -238,7 +240,7 @@
 2. **#2**（已完成）
 3. **#8**（已完成）
 4. **#9**（已完成）、**#4**（已完成）、**#27**（已完成）
-5. **#6**（快照恢复残留旧 key → 分歧风险）、**#7**（恢复后 meta 未同步）
+5. **#6**（已完成）、**#7**（已完成）、**#5**（已完成）
 6. **#13**（磁盘无限增长）、**#10/#11/#12**（死代码清理或实现决策）
 7. **#15/#16**（转发性能）
 8. **#20**（shutdown 正确性）
