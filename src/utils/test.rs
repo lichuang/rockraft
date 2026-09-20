@@ -16,7 +16,7 @@ use crate::raft::store::{
   RocksLogStore, RocksStateMachine,
   keys::{LOG_DATA_FAMILY, LOG_META_FAMILY, SM_DATA_FAMILY, SM_META_FAMILY},
 };
-use crate::raft::types::{Cmd, Entry, LeaderId, LogEntry, LogId, Operation, TypeConfig, UpsertKV};
+use crate::raft::types::{Cmd, Entry, LeaderId, LogEntry, LogId, TypeConfig, UpsertKV};
 use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
 use rocksdb::DB;
@@ -124,10 +124,9 @@ pub async fn create_test_state_machine_with_path(path: &str) -> RocksStateMachin
 pub fn create_entry(term: u64, node_id: u64, index: u64) -> Entry {
   Entry {
     log_id: create_log_id(term, node_id, index),
-    payload: openraft::EntryPayload::Normal(LogEntry::new(Cmd::UpsertKV(UpsertKV::new(
+    payload: openraft::EntryPayload::Normal(LogEntry::new(Cmd::UpsertKV(UpsertKV::insert(
       format!("key_{}_{}", term, index),
-      Operation::Update(format!("data_{}_{}", term, index).into_bytes()),
-      None,
+      &format!("data_{}_{}", term, index).into_bytes(),
     )))),
   }
 }

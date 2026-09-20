@@ -16,7 +16,6 @@ byteorder = "1.4.3"
 bytes = { version = "1", features = ["serde"] }
 dashmap = { version = "6.1.0", features = ["serde"] }
 derive_more = { version = "1.0.0", features = ["full"] }
-display-more = { version = "0.2.1" }
 futures = "0.3.31"
 hickory-resolver = "0.25"
 hyper-util = { version = "0.1.9", features = ["client", "client-legacy", "tokio", "service"] }

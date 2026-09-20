@@ -91,7 +91,9 @@
 ## 二、未实现 / 死代码
 
 ### 10. TTL/过期功能全链路未实现
-- [ ] **未完成**
+- [x] **已完成（决策：删除而非实现）**
+- **决策依据**: 核实 CoreDB（`../coredb`）确认上层从未使用 `value_meta`（grep 零命中）——CoreDB 的 TTL 在应用层自行实现：`StringValue`/`HashMeta`/`ZSetMeta` 等 encode 结构内嵌 `expires_at`（毫秒）随 value 序列化写入，过期判定在 protocol 层（`is_expired(now)`）。这是幂等且随日志复制的业界常见模式。rockraft 层再实现 TTL 需解决 leader/follower 时钟一致性（`time_ms` 同源）一类正确性问题，且会与应用层 TTL 产生语义冲突，不值得。
+- **完成说明**: 已删除整条死链路——`cmd/meta.rs`（`MetaSpec`）、`cmd/time.rs`（`Interval`/`flexible_timestamp_to_duration`）两个文件移除；`UpsertKV.value_meta` 字段、`with_ttl()`/`with_expire_sec()`/`With` trait/`UpsertKV::new` meta 参数删除；`display-more` 依赖移除（无使用者）。序列化兼容性：`value_meta` 为 `Option<MetaSpec>` 且 postcard 对 `None` 编码紧凑，历史日志中带 meta 的 entry 已随日志 purge 自然消失，无需迁移。
 - **位置**: `src/raft/types/cmd/upsert_kv.rs`、`meta.rs`、`time.rs`；`src/raft/store/statemachine.rs` 的 `apply_upsert_kv()`
 - **问题**: `UpsertKV.value_meta`（`MetaSpec` 的 `expire_at`/`ttl`）在 apply 时被完全忽略，只写 value。`with_ttl()`/`with_expire_sec()` 是死代码，`MetaSpec`/`Interval`/`flexible_timestamp_to_duration` 无任何消费者。
 - **决策**: 要么完整实现（apply 时写带 TTL 的 key、读取/scan 时过滤过期，`LogEntry.time_ms` 字段已有铺垫），要么删除整条链路。

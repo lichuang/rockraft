@@ -1,8 +1,6 @@
 #[allow(clippy::module_inception)]
 mod cmd;
-mod meta;
 mod operation;
-mod time;
 mod txn;
 mod upsert_kv;
 
