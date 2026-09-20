@@ -53,7 +53,7 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
 ///
 /// This function handles the core recovery logic:
 /// - Reads and decompresses snapshot data
-/// - Restores key-value pairs to the database in batches
+/// - Clears the KV column family, then restores snapshot key-value pairs
 /// - Uses WriteBatch for efficient bulk writes (every 1000 entries)
 ///
 /// Arguments:
@@ -66,8 +66,12 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
 /// Recovery Process:
 ///   1. Decompress snapshot data using zstd
 ///   2. Read entries in format: [key_len][key][value_len][value]
-///   3. Accumulate entries in WriteBatch (max 1000 per batch)
-///   4. Write batch to database when batch is full
+///   3. First batch carries a `delete_range` over the whole KV column family
+///      plus the first chunk of snapshot entries, so the switch from old
+///      state to snapshot state is atomic — a crash before that batch
+///      commits leaves the old state intact, a crash after it leaves the
+///      snapshot state, and no half-cleared state is ever observable
+///   4. Subsequent batches only append snapshot entries
 ///   5. Write any remaining entries in final batch
 ///
 /// Performance:
@@ -86,6 +90,15 @@ fn do_recover_snapshot_sync(db: &Arc<DB>, snapshot_file: std::fs::File) -> Resul
     zstd::Decoder::new(snapshot_file).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
 
   let mut batch = rocksdb::WriteBatch::default();
+  // Drop every pre-existing key in the KV column family atomically together
+  // with the first chunk of snapshot entries, so the target node ends up
+  // holding exactly the snapshot state — no stale keys from previously
+  // applied logs or older snapshots can survive the install.
+  // Bounds: empty begin = smallest key; a 64-byte 0xFF end covers every
+  // realistic key (only a key of 64+ consecutive 0xFF bytes would exceed it).
+  let empty_key: Vec<u8> = Vec::new();
+  let max_key = vec![0xFF; 64];
+  batch.delete_range_cf(&cf_handle, &empty_key, &max_key);
   let mut count = 0u64;
   let mut len_buf = [0u8; 4];
 
@@ -556,6 +569,65 @@ mod tests {
 
     let value1 = db.get_cf(&cf_handle, b"key-1").unwrap().unwrap();
     assert_eq!(String::from_utf8(value1).unwrap(), "value-1");
+  }
+
+  /// Test Point: Recovery removes keys that the snapshot does not contain
+  ///
+  /// Keys left in the target database from previously applied logs or an
+  /// older snapshot must not survive an install: the recovered state must be
+  /// an exact copy of the snapshot, otherwise the node diverges from the
+  /// source node permanently.
+  #[tokio::test]
+  async fn test_recover_snapshot_removes_stale_keys() {
+    let db = create_test_db();
+    let cf_handle = db.cf_handle(SM_DATA_FAMILY).unwrap();
+
+    // Pre-populate with keys the snapshot will NOT contain
+    db.put_cf(&cf_handle, b"stale-key-1", b"stale-value-1")
+      .unwrap();
+    db.put_cf(&cf_handle, b"stale-key-2", b"stale-value-2")
+      .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("stale.snapshot");
+
+    // Snapshot contains only "fresh-key"
+    let file = std::fs::File::create(&snapshot_file_path).unwrap();
+    let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+    encoder
+      .write_all(&("fresh-key".len() as u32).to_le_bytes())
+      .unwrap();
+    encoder.write_all(b"fresh-key").unwrap();
+    encoder
+      .write_all(&("fresh-value".len() as u32).to_le_bytes())
+      .unwrap();
+    encoder.write_all(b"fresh-value").unwrap();
+    encoder.finish().unwrap();
+
+    let snapshot_meta = SnapshotMeta {
+      last_log_id: None,
+      last_membership: StoredMembership::new(None, Membership::default()),
+      snapshot_id: String::from("stale-snapshot"),
+    };
+
+    let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
+    let snapshot = Snapshot {
+      meta: snapshot_meta,
+      snapshot: file,
+    };
+
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
+    assert!(result.is_ok());
+
+    // The snapshot state replaced the old one entirely
+    let entry_count = count_db_entries(&db);
+    assert_eq!(entry_count, 1, "Only the snapshot key should remain");
+
+    assert!(db.get_cf(&cf_handle, b"stale-key-1").unwrap().is_none());
+    assert!(db.get_cf(&cf_handle, b"stale-key-2").unwrap().is_none());
+
+    let value = db.get_cf(&cf_handle, b"fresh-key").unwrap().unwrap();
+    assert_eq!(String::from_utf8(value).unwrap(), "fresh-value");
   }
 
   #[tokio::test]

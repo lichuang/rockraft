@@ -51,7 +51,8 @@
 - **修法**: 把 `LAST_APPLIED_LOG_KEY` 的写入放进同一个 WriteBatch。
 
 ### 6. `install_snapshot` 恢复时不清除目标节点的旧数据
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: `do_recover_snapshot_sync` 的第一笔 WriteBatch 携带 `delete_range_cf(SM_DATA, "", [0xFF;64])`（空起始 = 最小 key，上界覆盖现实 key 范围），与首批快照 KV 原子提交——旧状态到快照状态的切换是原子的，崩溃点要么在切换前（旧数据完整保留、恢复可重试）要么在切换后（快照状态），不存在半清空状态。后续批次仅追加。新增回归测试 `test_recover_snapshot_removes_stale_keys`（快照不含的残留 key 被清除）。
 - **位置**: `src/raft/store/snapshot/recover.rs` 的 `do_recover_snapshot_sync`
 - **问题**: 恢复只把快照里的 key 逐个 `put_cf` 进 `_sm_data`，**不会删除目标 DB 中快照已不含有的 key**。若接收节点在安装快照前已应用过部分日志（或曾安装过旧快照），这些"快照点之后已被删除"的 key 会永久残留。
 - **危害**: 与快照源节点产生状态分歧，且分歧随后续 apply 固化。
