@@ -11,9 +11,7 @@ use tokio::time::{sleep, timeout};
 use tracing::debug;
 
 use crate::error::{ApiError, Error, Result, RetryReason};
-use crate::network::JoinConnectionFactory;
 use crate::raft::protobuf::RaftReply;
-use crate::raft::protobuf::raft_service_client::RaftServiceClient;
 use crate::raft::types::{
   ForwardRequest, ForwardResponse, ForwardToLeader, NodeId, RequestPayload, decode,
 };
@@ -24,7 +22,26 @@ use super::node::RaftNode;
 /// Retry configuration for forward operations
 const MAX_RETRIES: u32 = 20;
 const RETRY_INITIAL_INTERVAL: Duration = Duration::from_millis(200);
-const RETRY_MAX_INTERVAL: Duration = Duration::from_secs(3);
+const RETRY_MAX_INTERVAL: Duration = Duration::from_secs(1);
+/// Total wall-clock budget for one request's retry loop. Without a cap the
+/// worst case was 20 attempts x 2s leader probe + backoff (~90s), which held
+/// client connections and amplified election-period pile-ups.
+const RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(5);
+/// When no leader is known, wait this long for one before reporting
+/// `NoLeader` and letting the retry loop back off. Previously every probe
+/// waited up to 2s, making each failed attempt cost 2s on top of the backoff.
+const LEADER_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Cheap per-call pseudo-random value for backoff jitter. Uses nanosecond
+/// clock bits; not cryptographically random, but enough to de-synchronize
+/// concurrent retries across requests and tasks.
+fn jitter_millis() -> u64 {
+  let nanos = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() & 0xFFFF))
+    .unwrap_or(0);
+  nanos % RETRY_INITIAL_INTERVAL.as_millis() as u64
+}
 
 impl RaftNode {
   /// Get the current leader node ID, waiting up to a deadline.
@@ -32,7 +49,7 @@ impl RaftNode {
   /// Returns `Ok(Some(leader_id))` if a leader is found within the deadline,
   /// `Ok(None)` if no leader is found before timeout.
   pub(crate) async fn get_leader(&self) -> Result<Option<NodeId>> {
-    let deadline = Duration::from_millis(2000);
+    let deadline = LEADER_PROBE_TIMEOUT;
     let mut metrics_rx = self.raft().metrics();
 
     let result = timeout(deadline, async {
@@ -95,7 +112,14 @@ impl RaftNode {
     &self,
     payload: RequestPayload,
   ) -> Result<ForwardResponse> {
+    let deadline = tokio::time::Instant::now() + RETRY_TOTAL_BUDGET;
     for attempt in 0..MAX_RETRIES {
+      if tokio::time::Instant::now() >= deadline {
+        return Err(Error::retryable(std::io::Error::new(
+          std::io::ErrorKind::TimedOut,
+          "forward retry budget exhausted",
+        )));
+      }
       let result = match self.assume_leader().await {
         Ok(leader) => Self::dispatch_leader_handler(leader, payload.clone()).await,
         Err(forward_err) => match forward_err.leader_id {
@@ -140,8 +164,12 @@ impl RaftNode {
         Ok(response) => return Ok(response),
         Err(err) => {
           if err.is_retryable() && attempt < MAX_RETRIES - 1 {
-            let delay = RETRY_INITIAL_INTERVAL * 2u32.saturating_pow(attempt);
-            let delay = delay.min(RETRY_MAX_INTERVAL);
+            // Exponential backoff with jitter: synchronized retries after an
+            // election pile up on the new leader; a random factor spreads
+            // them out. 200ms..(min(base*2^attempt, cap) * 1.5]
+            let base = RETRY_INITIAL_INTERVAL * 2u32.saturating_pow(attempt);
+            let jitter = jitter_millis();
+            let delay = (base + Duration::from_millis(jitter)).min(RETRY_MAX_INTERVAL * 3 / 2);
             debug!(
               "execute_or_forward: retry {}/{} after {:?}: {}",
               attempt + 1,
@@ -174,26 +202,17 @@ impl RaftNode {
 
   // -- Private helpers --
 
-  /// Send a forward request to a gRPC endpoint.
+  /// Send a forward request to a gRPC endpoint via the shared connection pool.
+  ///
+  /// Reuses pooled connections instead of dialing per request: forwarding is
+  /// the hot entry path for non-leader nodes, and per-request channel setup
+  /// (TCP + HTTP/2 handshake + DNS) dominated cluster write latency.
   pub(crate) async fn send_forward_request(
     &self,
-    addr: &String,
+    addr: &str,
     request: ForwardRequest,
   ) -> Result<RaftReply> {
-    let timeout = Some(Duration::from_millis(10_000));
-    let channel = JoinConnectionFactory::create_rpc_channel(addr, timeout, None)
-      .await
-      .map_err(|e| {
-        tracing::error!("Failed to connect to {}: {:?}", addr, e);
-        e
-      })?;
-
-    // Same limit as the raft RPC clients: forwarded payloads can also
-    // exceed the tonic default 4MB limit.
-    let max_message_size = self.config.raft.grpc_max_message_size();
-    let mut raft_client = RaftServiceClient::new(channel)
-      .max_decoding_message_size(max_message_size)
-      .max_encoding_message_size(max_message_size);
+    let mut raft_client = self.client_pool.raft_service_client(addr).await?;
 
     let response = raft_client
       .forward(request)

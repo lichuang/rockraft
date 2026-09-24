@@ -36,7 +36,8 @@
 
 ### 🔴 1. 转发热路径每次新建 gRPC channel（压测 P0 主因）
 
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: `RaftNode` 增加 `client_pool` 字段（与 raft network factory 共享同一池），`send_forward_request` 改走 `ClientPool::raft_service_client()` 复用连接；`JoinConnectionFactory` 不再出现在转发热路径（仅保留 join 启动用途）。`RaftNode.factory` 字段（无人读取）与 `NetworkConnection::forward` 的 dead_code 标注一并清理。
 - **侧**: rockraft
 - **位置**: `src/node/forward.rs` 的 `send_forward_request()`
 - **证据**: 每次转发调用 `JoinConnectionFactory::create_rpc_channel()`（TCP 握手 + HTTP/2 建连 + hickory DNS 解析）后重建 `RaftServiceClient`，无连接复用。转发是集群写唯一非 leader 入口，直连 leader 32k vs 转发 300-600 rps。
@@ -55,7 +56,8 @@
 
 ### 3. `get_leader` 每次写等 watch + 重试风暴无总预算无 jitter（雪崩放大器）
 
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: (a) `LEADER_PROBE_TIMEOUT` 从 2s 降至 200ms——leader 已知时零等待，未知时短暂探测后交给退避；(b) 新增 `RETRY_TOTAL_BUDGET=5s` 总预算，超时立即返回可重试错误（原最坏 ~90s）；(c) 退避加 nanosecond-clock jitter（`jitter_millis()`，无新依赖），避免选举后惊群；(d) `RETRY_MAX_INTERVAL` 3s→1s 配合预算。
 - **侧**: rockraft
 - **位置**: `src/node/forward.rs:34-56`（`get_leader` 2s timeout）；`execute_or_forward`（`MAX_RETRIES=20` + `RETRY_INITIAL_INTERVAL=200ms` → `RETRY_MAX_INTERVAL=3s` 指数退避）
 - **证据**: 压测 p99=3000ms 正是 3s 重试上限特征值；MSET d16384 后雪崩（32k→300 rps 不恢复）。最坏路径 ≈ 20×(2s get_leader) + 48s 退避 ≈ 88s
@@ -92,7 +94,9 @@
 
 ### 7. `ClientPool` 初始化竞态 + `check()` 空实现（伪超时）
 
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: 竞态修复——`raft_service_client()` 改用 `DashMap::entry(addr).or_insert_with(...)` 原子初始化，消除并发首访重复建池。`check()` 评估后维持空实现：tonic 0.14 的 `Channel` 无公开 health/readiness API（仅 `Service::poll_ready`），而连接断开时 `Buffer` 层会让请求失败并回到 mobc 的重试路径——伪超时的主因（每请求新建 channel）已由优化项 #1 根除。
+- **日志**: 逐事务 `info!("Applied transaction...")` 降为 `debug!`（每个客户端事务触发一次，上层 `RUST_LOG=info` 下不再产生逐命令输出）。
 - **侧**: rockraft
 - **位置**: `src/network/pool/client_pool.rs`（`contains_key` + `insert` 非原子）；`src/network/pool/manager.rs` 的 `check()`（直接 `Ok(conn)`，不校验 channel 存活）
 - **证据**: 断连的 channel 会被分发 → 请求走完整 10s 超时才失败 → 命中重试（3s 退避），是压测 p99=3000ms 的放大器之一

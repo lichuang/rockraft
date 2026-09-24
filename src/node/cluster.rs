@@ -227,7 +227,7 @@ impl RaftNode {
     )))
   }
 
-  async fn join_via(&self, addr: &String) -> Result<()> {
+  async fn join_via(&self, addr: &str) -> Result<()> {
     let config = &self.config;
 
     let join_req = JoinRequest {

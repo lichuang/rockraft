@@ -18,6 +18,7 @@ use openraft::alias::SnapshotDataOf;
 use openraft::storage::EntryResponder;
 use openraft::storage::RaftStateMachine;
 use rocksdb::BoundColumnFamily;
+use tracing::debug;
 use tracing::info;
 
 use rocksdb::DB;
@@ -465,7 +466,7 @@ impl RocksStateMachine {
       self.stage_upsert_kv(kv, batch, pending);
     }
 
-    info!(
+    debug!(
       "Applied transaction: conditions_met={}, if_then_ops={}, else_then_ops={}",
       all_conditions_met,
       req.if_then.len(),

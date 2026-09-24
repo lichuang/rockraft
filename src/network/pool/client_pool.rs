@@ -5,7 +5,6 @@ use crate::error::{Error, Result};
 use dashmap::DashMap;
 use mobc::{Connection, Pool};
 use tracing::debug;
-use tracing::info;
 use tracing::warn;
 
 use super::manager::RaftServiceManager;
@@ -62,48 +61,39 @@ impl ClientPool {
   }
 
   pub async fn raft_service_client(&self, addr: &str) -> Result<Connection<RaftServiceManager>> {
-    // Initialize pool if not exists
-    if !self.service_pool.contains_key(addr) {
-      debug!("Creating new connection pool at {}", addr);
-      let manager = RaftServiceManager::new(addr.to_owned(), self.max_message_size);
-      let pool = Pool::builder()
-        .max_open(self.max_open_connection)
-        .build(manager);
-      self.service_pool.insert(addr.to_owned(), pool);
-      info!(
-        "Connection pool at {} initialized (max_open: {}, timeout: {:?})",
-        addr, self.max_open_connection, self.connection_timeout
-      );
-    }
+    // Atomically initialize the per-address pool: `entry()` avoids the
+    // contains_key/insert race where concurrent first accesses could build
+    // and drop multiple pools.
+    let pool = self
+      .service_pool
+      .entry(addr.to_owned())
+      .or_insert_with(|| {
+        debug!("Creating new connection pool at {}", addr);
+        let manager = RaftServiceManager::new(addr.to_owned(), self.max_message_size);
+        Pool::builder()
+          .max_open(self.max_open_connection)
+          .build(manager)
+      })
+      .clone();
 
-    if let Some(pool) = self.service_pool.get(addr) {
-      let pool_state_before = pool.state().await;
-      debug!(
-        "Attempting to get connection at {} (state: {:?})",
-        addr, pool_state_before
-      );
+    match pool.get_timeout(self.connection_timeout).await {
+      Ok(conn) => {
+        debug!("Successfully obtained connection at {}", addr);
+        Ok(conn)
+      }
+      Err(e) => {
+        let pool_state = pool.state().await;
 
-      match pool.get_timeout(self.connection_timeout).await {
-        Ok(conn) => {
-          debug!("Successfully obtained connection at {}", addr);
-          return Ok(conn);
-        }
-        Err(e) => {
-          let pool_state_after = pool.state().await;
+        warn!(
+          "Connection pool at {} has no connection available. Error: {}, State: {:?}",
+          addr, e, pool_state
+        );
 
-          warn!(
-            "Connection pool at {} has no connection available. Error: {}, State before: {:?}, State after: {:?}",
-            addr, e, pool_state_before, pool_state_after
-          );
-
-          return Err(Error::retryable(io::Error::other(format!(
-            "get grpc client failed, err: {}, state: {:?}",
-            e, pool_state_after
-          ))));
-        }
+        Err(Error::retryable(io::Error::other(format!(
+          "get grpc client failed, err: {}, state: {:?}",
+          e, pool_state
+        ))))
       }
     }
-
-    Err(Error::internal("connection pool is not initialized"))
   }
 }

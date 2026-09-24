@@ -36,8 +36,8 @@ pub struct RaftNode {
   pub(crate) engine: Arc<RocksDBEngine>,
   pub(crate) raft: Arc<Raft<TypeConfig>>,
   pub(crate) config: Config,
-  #[allow(dead_code)]
-  pub(crate) factory: NetworkFactory,
+  /// Pooled gRPC clients for inter-node RPCs, shared with the raft network.
+  pub(crate) client_pool: Arc<ClientPool>,
   pub(crate) state_machine: Arc<RocksStateMachine>,
   pub(crate) shutdown_tx: broadcast::Sender<()>,
   pub(crate) service_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -80,7 +80,7 @@ impl RaftNode {
       10,
       config.raft.grpc_max_message_size(),
     ));
-    let factory = NetworkFactory::new(client_pool);
+    let factory = NetworkFactory::new(client_pool.clone());
     let raft_config = config.raft.to_openraft_config();
 
     let raft = Arc::new(
@@ -101,7 +101,7 @@ impl RaftNode {
       engine,
       raft,
       config: config.clone(),
-      factory,
+      client_pool,
       state_machine: Arc::new(state_machine),
       shutdown_tx,
       service_handle: Mutex::new(None),
