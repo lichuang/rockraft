@@ -297,6 +297,24 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
       .delete_range_cf(&self.cf_logs(), &from, &to)
       .map_err(read_logs_err)?;
 
+    // `delete_range_cf` only lays down tombstones; the disk space is reclaimed
+    // when compaction drops them. Schedule a compaction over the purged span
+    // in the background — not awaited here, because compaction flushes
+    // memtables and races with the log writes that follow the purge.
+    let db = self.db.clone();
+    let compact_from = from;
+    let compact_to = to;
+    tokio::spawn(async move {
+      let _ = spawn_blocking(move || {
+        let cf = db
+          .cf_handle(LOG_DATA_FAMILY)
+          .ok_or_else(|| io::Error::other("column family `_log_data` not found"))?;
+        db.compact_range_cf(&cf, Some(&compact_from), Some(&compact_to));
+        Ok::<(), io::Error>(())
+      })
+      .await;
+    });
+
     // Purging does not need to be persistent.
     Ok(())
   }

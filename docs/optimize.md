@@ -122,7 +122,8 @@
 
 ### 10. `truncate_after`/`purge` 用 `delete_range_cf`（惰性删除）
 
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: `purge()` 在 range delete 后调度一个后台 compaction（`spawn_blocking` + `tokio::spawn`，覆盖被 purge 的 key 范围）——空间由 compaction 落实回收。刻意**不**在 purge 调用栈内同步等待：`compact_range` 会触发 memtable flush，与紧随 purge 的日志写入产生文件竞争（测试实证 `000008.log: No such file or directory`）。后台执行即达成"purge 后空间最终回收"的目标，且不影响 purge 的延迟。
 - **侧**: rockraft
 - **位置**: `src/raft/store/log_store.rs`
 - **问题**: range delete 是 lazy 的，需 compaction 才释放空间
