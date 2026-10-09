@@ -152,6 +152,7 @@
 | 8 | #8 pipeline 并发 | coredb | pipeline 吞吐 ×N | 中 |
 | 9 | #9 INCR 原子化 | coredb | 正确性 + 减往返 | 中 |
 | 10 | #10 purge + compact_range | rockraft | 空间回收 | 低 |
+| 11 | vacuum 快照清理（todo #13） | rockraft | 磁盘空间不无限增长 | 低 |
 
 **最短见效路径**：#2（一行改动 +19%）→ #1（转发接入池，集群写跳级）→ #3（探测/预算/jitter，雪崩消失）→ #4。前三项完成后集群写预计从 300-600 rps 跳到万级；MSET d16384 雪崩（bench.md P3）大概率随之消失，需复测确认。
 

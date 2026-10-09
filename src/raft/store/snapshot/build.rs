@@ -17,6 +17,7 @@ use super::util::save_last_snapshot_id_file;
 use super::util::save_snapshot_meta;
 use super::util::snapshot_data_file;
 use super::util::snapshot_dump_file;
+use super::util::snapshot_last_snapshot_id_file;
 use crate::raft::store::keys::SM_DATA_FAMILY;
 use crate::raft::store::snapshot::util::snapshot_id_dir;
 use crate::raft::types::LogId;
@@ -202,27 +203,55 @@ pub async fn build_snapshot(
 
 /// Clean up old snapshot files, keeping only the latest one
 ///
-/// This function removes old snapshot directories to prevent disk space
-/// from growing unbounded. It should keep only the snapshot specified
-/// by last_snapshot_id and remove all others.
+/// Iterates the snapshot directory and removes every entry except the
+/// directory of `last_snapshot_id` and the `last_snapshot_id` pointer file
+/// itself, so repeated snapshot builds stop growing the disk unboundedly.
 ///
 /// Arguments:
 ///   snapshot_dir: Directory containing all snapshots
 ///   last_snapshot_id: ID of the snapshot to keep (all others should be removed)
 ///
 /// Returns:
-///   Result<(), io::Error>: Ok(()) on success or partial failure, error on critical failure
+///   Result<(), io::Error>: Ok(()) on success or partial failure
 ///
-/// Current Implementation:
-///   - This is currently a stub that always returns Ok(())
-///   - TODO: Implement actual cleanup logic to remove old snapshot directories
-///   - TODO: Should iterate snapshot_dir, find all snapshot IDs, and remove all except last_snapshot_id
-///
-/// Note: This is called asynchronously in the background, so errors are logged but not propagated
-fn vacuum_snapshot_files(
-  _snapshot_dir: PathBuf,
-  _last_snapshot_id: String,
-) -> Result<(), io::Error> {
+/// Concurrency:
+///   - Runs in the background after the new snapshot's data/meta files and
+///     the `last_snapshot_id` pointer are durably updated.
+///   - Deleting a directory that a concurrent reader still holds open is
+///     safe on POSIX: unlink removes the name, and open file handles keep
+///     working until closed, so an in-flight snapshot transfer is unaffected.
+fn vacuum_snapshot_files(snapshot_dir: PathBuf, last_snapshot_id: String) -> Result<(), io::Error> {
+  if !snapshot_dir.is_dir() {
+    return Ok(());
+  }
+
+  for entry in std::fs::read_dir(&snapshot_dir)? {
+    let entry = entry?;
+    let path = entry.path();
+
+    // Skip the pointer file and anything that is not a snapshot directory.
+    if entry.file_name().to_string_lossy() == snapshot_last_snapshot_id_file(&snapshot_dir)
+      || !path.is_dir()
+    {
+      continue;
+    }
+
+    if entry.file_name().to_string_lossy() == last_snapshot_id {
+      continue;
+    }
+
+    if let Err(e) = std::fs::remove_dir_all(&path) {
+      // Best-effort: log and continue with the remaining entries.
+      error!(
+        "Failed to remove old snapshot directory {}: {}",
+        path.display(),
+        e
+      );
+    } else {
+      info!("Vacuumed old snapshot directory {}", path.display());
+    }
+  }
+
   Ok(())
 }
 
@@ -666,5 +695,63 @@ mod tests {
     };
 
     assert_eq!(snapshot_id, "T3-N5-100-1234567890");
+  }
+}
+
+#[cfg(test)]
+mod vacuum_tests {
+  use super::*;
+  use crate::raft::store::snapshot::util::save_last_snapshot_id_file;
+  use crate::raft::store::snapshot::util::snapshot_id_dir;
+  use tempfile::tempdir;
+
+  /// Helper: lay down N fake snapshot directories (meta + data files) and
+  /// point last_snapshot_id at the newest one — the same layout build_snapshot
+  /// produces.
+  async fn make_snapshot_layout(snapshot_dir: &Path, ids: &[&str], keep: &str) {
+    tokio::fs::create_dir_all(snapshot_dir).await.unwrap();
+    for id in ids {
+      let dir = snapshot_id_dir(snapshot_dir, id);
+      tokio::fs::create_dir_all(&dir).await.unwrap();
+      tokio::fs::write(dir.join("meta"), b"m").await.unwrap();
+      tokio::fs::write(dir.join("snapshot"), b"d").await.unwrap();
+    }
+    save_last_snapshot_id_file(snapshot_dir, keep)
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn test_vacuum_removes_all_but_last_snapshot_id() {
+    let temp = tempdir().unwrap();
+    let snapshot_dir = temp.path().join("snapshots");
+    make_snapshot_layout(&snapshot_dir, &["snap-1", "snap-2", "snap-3"], "snap-3").await;
+
+    vacuum_snapshot_files(snapshot_dir.clone(), "snap-3".to_string()).unwrap();
+
+    let remaining: Vec<_> = std::fs::read_dir(&snapshot_dir)
+      .unwrap()
+      .filter_map(|e| e.ok())
+      .map(|e| e.file_name().to_string_lossy().to_string())
+      .collect();
+
+    assert_eq!(
+      remaining.len(),
+      2,
+      "only snap-3 dir + last_snapshot_id file remain: {:?}",
+      remaining
+    );
+    assert!(snapshot_dir.join("last_snapshot_id").exists());
+    assert!(snapshot_id_dir(&snapshot_dir, "snap-3").exists());
+    assert!(!snapshot_id_dir(&snapshot_dir, "snap-1").exists());
+    assert!(!snapshot_id_dir(&snapshot_dir, "snap-2").exists());
+  }
+
+  #[tokio::test]
+  async fn test_vacuum_on_missing_directory_is_noop() {
+    let temp = tempdir().unwrap();
+    let snapshot_dir = temp.path().join("nonexistent");
+    vacuum_snapshot_files(snapshot_dir.clone(), "snap-x".to_string()).unwrap();
+    assert!(!snapshot_dir.exists());
   }
 }

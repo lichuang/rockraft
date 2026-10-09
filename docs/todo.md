@@ -116,7 +116,8 @@
 - **修法**: 删除该字段。
 
 ### 13. `vacuum_snapshot_files` 是 stub → 磁盘无限增长
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: 实装——遍历 snapshot_dir，跳过 `last_snapshot_id` 指针文件与非目录项，保留 last_snapshot_id 指向的快照目录、删除其余（`remove_dir_all`，单项目失败记日志继续）。并发安全：POSIX unlink 语义下删目录不影响已打开的文件句柄（在途快照传输/读者不受影响）；误删防护——build_snapshot 先落新快照 data/meta + 更新 last_snapshot_id 指针后才在后台调 vacuum。新增 2 个测试（多目录清理、目录不存在 noop）。
 - **位置**: `src/raft/store/snapshot/build.rs`
 - **问题**: 注释明确 TODO，不清理旧快照。每次 build snapshot 新增一个目录，旧的永不删除。
 - **危害**: 长期运行磁盘无限增长。
