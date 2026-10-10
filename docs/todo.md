@@ -134,20 +134,23 @@
 ## 三、性能
 
 ### 15. 转发热路径不走连接池
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: `send_forward_request` 改走 `ClientPool::raft_service_client()` 复用连接（RaftNode 持有 client_pool 字段），提交 4378428。
 - **位置**: `src/node/forward.rs` 的 `send_forward_request()`
 - **问题**: 用 `JoinConnectionFactory::create_rpc_channel` 每次新建 channel（TCP 握手开销），而 `ClientPool` 只服务于 append/vote/snapshot RPC。
 - **危害**: 转发是高频路径，每次请求付出建连成本。
 - **修法**: 转发路径接入 `ClientPool`。
 
 ### 16. `ClientPool` 初始化有竞态
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: `raft_service_client()` 改用 `DashMap::entry().or_insert_with()` 原子初始化，提交 4378428。
 - **位置**: `src/network/pool/client_pool.rs` 的 `raft_service_client()`
 - **问题**: `if !contains_key(addr) { insert }` 非原子，并发首次访问同一 addr 时可能重复创建 pool（旧 pool 泄漏）。
 - **修法**: 使用 `DashMap::entry(addr).or_insert_with(...)` API。
 
 ### 17. 无 leader 时客户端等待过长
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: leader 探测 2s→200ms、重试总预算 5s（超时返回可重试错误）、退避加 jitter，提交 4378428。
 - **位置**: `src/node/forward.rs` 的 `get_leader()`（2s 超时）、`execute_or_forward()`（20 次重试 + 指数退避）
 - **问题**: 最坏情况 2s×20 + 指数退避，阻塞可达 40s+，客户端超时体验差。
 - **修法**: 缩短单次等待、降低总预算、尽早返回可重试错误让上层决策。
@@ -160,7 +163,8 @@
 - **决策**: 明确读一致性语义后选择方案。
 
 ### 19. `truncate_after`/`purge` 用 `delete_range_cf`（惰性删除）
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: purge 后调度后台 compaction 覆盖 purged 范围（同步等待会与后续日志写产生文件竞争，刻意后台化），提交 3ad1c07。
 - **位置**: `src/raft/store/log_store.rs`
 - **问题**: RocksDB 的 range delete 是 lazy 的，需 compaction 才真正释放空间，大量删除可能影响后续读性能。
 - **修法**: purge 后可配合 `compact_range` 触发空间回收（权衡 compaction 开销）。
@@ -197,13 +201,15 @@
 - **修法**: 使用 `SocketAddr::from_str` 或处理方括号语法。
 
 ### 24. snapshot_id 用 `now_millis()` 可能碰撞
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: 引入进程级 `AtomicU64` 序列（`SNAPSHOT_SEQ`），ID 格式扩展为 `{leader_id}-{index}-{timestamp}-{seq}`/`0-0-{timestamp}-{seq}`——同毫秒内连续 build ID 必不相同。连带修复一个 vacuum 竞态：并发 build 时旧 build 的 vacuum 可能删掉新 build 尚未写完指针的目录（测试实证 NotFound）——vacuum 现在重读当前指针 + 按 ID 尾部序列只删除不新于自己 build 的目录。既有 2 处 `starts_with("0-0-")` 断言保持兼容。新增同毫秒唯一性回归测试。
 - **位置**: `src/raft/store/snapshot/build.rs`
 - **问题**: 同一毫秒内连续 trigger snapshot 会生成相同 ID，覆盖已有快照（集成测试有 rapid sequential 场景）。
 - **修法**: ID 中加入原子自增序列或随机后缀。
 
 ### 25. mobc `Manager::check` 空实现
-- [ ] **未完成**
+- [x] **已完成（评估保留空实现）**
+- **说明**: tonic 0.14 Channel 无公开 health/readiness API；断连时请求失败进 mobc 重试路径。伪超时主因（每请求建连）已由 #15 根除。
 - **位置**: `src/network/pool/manager.rs`
 - **问题**: `check()` 直接返回 Ok，不校验 channel 存活，可能把已断连的连接分发给调用方（失败重试会掩盖问题但增加延迟）。
 - **修法**: 至少校验 channel 状态，或在失败时从池中剔除并重试一次。

@@ -4,6 +4,8 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use openraft::SnapshotMeta;
 use rocksdb::DB;
@@ -26,6 +28,14 @@ use crate::raft::types::StoredMembership;
 use crate::raft::types::read_logs_err;
 use crate::utils::now_millis;
 
+/// Process-wide generator for the per-build sequence embedded in snapshot IDs.
+///
+/// `now_millis()` alone can repeat within the same millisecond (rapid
+/// sequential triggers), producing identical IDs that overwrite each other and
+/// even point at a half-written directory. The sequence disambiguates IDs
+/// created within one process lifetime.
+static SNAPSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Build a snapshot from the current database state
 ///
 /// This function creates a compressed snapshot of the SM_DATA_FAMILY column family,
@@ -47,9 +57,9 @@ use crate::utils::now_millis;
 ///   - snapshot_dir/last_snapshot_id    : Text file with current snapshot ID
 ///
 /// Snapshot ID Format:
-///   - With log_id: "{leader_id}-{index}-{timestamp}"
-///   - Without log_id: "0-0-{timestamp}"
-///     Example: "T3-N5-100-1234567890"
+///   - With log_id: "{leader_id}-{index}-{timestamp}-{seq}"
+///   - Without log_id: "0-0-{timestamp}-{seq}"
+///     Example: "T3-N5-100-1234567890-1"
 ///
 /// Process:
 ///   1. Generate unique snapshot ID based on current time and log state
@@ -65,21 +75,24 @@ pub async fn build_snapshot(
   last_applied_log_id: Option<LogId>,
   last_membership: StoredMembership,
 ) -> Result<Snapshot, io::Error> {
-  // Generate unique snapshot ID based on current timestamp and log state
+  // Generate unique snapshot ID: timestamp + a process-wide sequence, so
+  // builds within the same millisecond cannot collide into the same
+  // directory name.
   let snapshot_idx = now_millis();
+  let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
 
-  // Build snapshot ID:
-  // - If we have a last_applied_log_id, use: "{leader_id}-{index}-{timestamp}"
-  // - If no log_id (initial state), use: "0-0-{timestamp}"
+  // ID format: "{leader_id}-{index}-{timestamp}-{seq}", or
+  // "0-0-{timestamp}-{seq}" without a last_applied_log_id.
   let snapshot_id = if let Some(last) = last_applied_log_id {
     format!(
-      "{}-{}-{}",
+      "{}-{}-{}-{}",
       last.committed_leader_id(),
       last.index(),
-      snapshot_idx
+      snapshot_idx,
+      seq
     )
   } else {
-    format!("0-0-{}", snapshot_idx)
+    format!("0-0-{}-{}", snapshot_idx, seq)
   };
   // Create snapshot directory (including all parent directories if they don't exist)
   let snapshot_id_dir = snapshot_id_dir(snapshot_dir, &snapshot_id);
@@ -180,10 +193,11 @@ pub async fn build_snapshot(
   // This is a best-effort operation that runs asynchronously
   let snapshot_dir_owned = snapshot_dir.to_path_buf();
   let snapshot_id_clone = snapshot_id.clone();
+  let own_seq = seq;
   spawn(async move {
     // Attempt to remove old snapshots (keep only the latest one)
     // Errors are logged but don't fail the snapshot build operation
-    if let Err(e) = vacuum_snapshot_files(snapshot_dir_owned, snapshot_id_clone) {
+    if let Err(e) = vacuum_snapshot_files(snapshot_dir_owned, snapshot_id_clone, own_seq) {
       error!("Fail to cleanup old snapshot files: {}", e);
     }
   });
@@ -203,27 +217,43 @@ pub async fn build_snapshot(
 
 /// Clean up old snapshot files, keeping only the latest one
 ///
-/// Iterates the snapshot directory and removes every entry except the
-/// directory of `last_snapshot_id` and the `last_snapshot_id` pointer file
-/// itself, so repeated snapshot builds stop growing the disk unboundedly.
+/// Iterates the snapshot directory and removes every snapshot directory that
+/// is neither protected by the current `last_snapshot_id` pointer nor newer
+/// than this vacuum's own build, so repeated snapshot builds stop growing the
+/// disk unboundedly.
 ///
 /// Arguments:
 ///   snapshot_dir: Directory containing all snapshots
-///   last_snapshot_id: ID of the snapshot to keep (all others should be removed)
+///   fallback_id: The snapshot ID this vacuum was scheduled for
+///   own_seq: This build's embedded sequence; directories with a strictly
+///            larger trailing sequence belong to newer, possibly in-flight
+///            builds and are never removed
 ///
 /// Returns:
 ///   Result<(), io::Error>: Ok(()) on success or partial failure
 ///
 /// Concurrency:
-///   - Runs in the background after the new snapshot's data/meta files and
-///     the `last_snapshot_id` pointer are durably updated.
+///   - Runs in the background after this build's data/meta files and the
+///     `last_snapshot_id` pointer are durably updated.
+///   - The pointer may have already moved to a newer build; the pointer is
+///     re-read at vacuum time, and the trailing sequence guard protects that
+///     build's directory even before its pointer save lands.
 ///   - Deleting a directory that a concurrent reader still holds open is
 ///     safe on POSIX: unlink removes the name, and open file handles keep
 ///     working until closed, so an in-flight snapshot transfer is unaffected.
-fn vacuum_snapshot_files(snapshot_dir: PathBuf, last_snapshot_id: String) -> Result<(), io::Error> {
+fn vacuum_snapshot_files(
+  snapshot_dir: PathBuf,
+  fallback_id: String,
+  own_seq: u64,
+) -> Result<(), io::Error> {
   if !snapshot_dir.is_dir() {
     return Ok(());
   }
+
+  let last_pointer_file = std::path::PathBuf::from(snapshot_last_snapshot_id_file(&snapshot_dir));
+  // Re-read the CURRENT pointer at vacuum time: a concurrent newer build may
+  // have updated it after this vacuum was scheduled with `fallback_id`.
+  let protected = std::fs::read_to_string(&last_pointer_file).unwrap_or(fallback_id);
 
   for entry in std::fs::read_dir(&snapshot_dir)? {
     let entry = entry?;
@@ -236,7 +266,16 @@ fn vacuum_snapshot_files(snapshot_dir: PathBuf, last_snapshot_id: String) -> Res
       continue;
     }
 
-    if entry.file_name().to_string_lossy() == last_snapshot_id {
+    let name = entry.file_name().to_string_lossy().to_string();
+    if name == protected {
+      continue;
+    }
+
+    // Never touch directories from builds newer than this vacuum's own
+    // build: their pointer save may still be in flight.
+    if let Some(dir_seq) = name.rsplit('-').next().and_then(|s| s.parse::<u64>().ok())
+      && dir_seq > own_seq
+    {
       continue;
     }
 
@@ -682,19 +721,70 @@ mod tests {
       index: 100,
     });
     let snapshot_idx = 1234567890;
+    let seq = 1;
 
     let snapshot_id = if let Some(last) = last_applied_log_id {
       format!(
-        "{}-{}-{}",
+        "{}-{}-{}-{}",
         last.committed_leader_id(),
         last.index(),
-        snapshot_idx
+        snapshot_idx,
+        seq
       )
     } else {
-      format!("0-0-{}", snapshot_idx)
+      format!("0-0-{}-{}", snapshot_idx, seq)
     };
 
-    assert_eq!(snapshot_id, "T3-N5-100-1234567890");
+    assert_eq!(snapshot_id, "T3-N5-100-1234567890-1");
+  }
+}
+
+#[cfg(test)]
+mod seq_tests {
+  use super::*;
+  use openraft::Membership;
+  use tempfile::tempdir;
+
+  fn create_empty_db() -> Arc<DB> {
+    let temp_dir = tempdir().unwrap();
+    let mut opts = rocksdb::Options::default();
+    opts.create_if_missing(true);
+    opts.create_missing_column_families(true);
+    let db = DB::open_cf(&opts, temp_dir.path(), vec![SM_DATA_FAMILY]).unwrap();
+    std::mem::forget(temp_dir);
+    Arc::new(db)
+  }
+
+  /// Regression: builds within the same millisecond must not collide into
+  /// the same snapshot directory (which would overwrite a possibly
+  /// in-flight snapshot).
+  #[tokio::test]
+  async fn test_snapshot_ids_unique_within_same_millisecond() {
+    let db = create_empty_db();
+    let temp = tempdir().unwrap();
+    let snapshot_dir = temp.path().join("snapshots");
+    tokio::fs::create_dir_all(&snapshot_dir).await.unwrap();
+
+    let membership = StoredMembership::new(None, Membership::default());
+
+    let mut ids = Vec::new();
+    for _ in 0..8 {
+      let snap = build_snapshot(&db, &snapshot_dir, None, membership.clone())
+        .await
+        .unwrap();
+      ids.push(snap.meta.snapshot_id);
+    }
+
+    let unique: std::collections::HashSet<_> = ids.iter().collect();
+    assert_eq!(
+      unique.len(),
+      ids.len(),
+      "snapshot IDs must be unique: {:?}",
+      ids
+    );
+    for id in &ids {
+      assert!(id.starts_with("0-0-"), "format prefix kept: {}", id);
+    }
   }
 }
 
@@ -727,7 +817,7 @@ mod vacuum_tests {
     let snapshot_dir = temp.path().join("snapshots");
     make_snapshot_layout(&snapshot_dir, &["snap-1", "snap-2", "snap-3"], "snap-3").await;
 
-    vacuum_snapshot_files(snapshot_dir.clone(), "snap-3".to_string()).unwrap();
+    vacuum_snapshot_files(snapshot_dir.clone(), "snap-3".to_string(), 3).unwrap();
 
     let remaining: Vec<_> = std::fs::read_dir(&snapshot_dir)
       .unwrap()
@@ -751,7 +841,7 @@ mod vacuum_tests {
   async fn test_vacuum_on_missing_directory_is_noop() {
     let temp = tempdir().unwrap();
     let snapshot_dir = temp.path().join("nonexistent");
-    vacuum_snapshot_files(snapshot_dir.clone(), "snap-x".to_string()).unwrap();
+    vacuum_snapshot_files(snapshot_dir.clone(), "snap-x".to_string(), 0).unwrap();
     assert!(!snapshot_dir.exists());
   }
 }
