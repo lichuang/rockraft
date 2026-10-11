@@ -4,6 +4,7 @@ use serde::Serialize;
 use super::default::default_raft_config;
 use super::default::default_rocksdb_config;
 use super::endpoint::Endpoint;
+use super::read_consistency::ReadConsistency;
 use crate::error::Result;
 use openraft::Config as OpenRaftConfig;
 
@@ -45,6 +46,11 @@ pub struct RaftConfig {
   /// Defaults to 256MB. Must be large enough for the biggest AppendEntries
   /// payload (`max_payload_entries` × max entry size) or replication breaks.
   pub grpc_max_message_size: Option<u64>,
+  /// How reads are served: staleness/performance trade-off chosen per node.
+  ///
+  /// Defaults to `LeaderApplied` (the historical behavior). See
+  /// `ReadConsistency` for the semantics of each level.
+  pub read_consistency: ReadConsistency,
 }
 
 impl RaftConfig {
@@ -100,6 +106,8 @@ pub(crate) struct RawRaftConfig {
   pub election_timeout_max: Option<u64>,
   #[serde(default)]
   pub grpc_max_message_size: Option<u64>,
+  #[serde(default)]
+  pub read_consistency: ReadConsistency,
 }
 
 impl Config {
@@ -128,6 +136,7 @@ impl Config {
         election_timeout_min: raw.raft.election_timeout_min,
         election_timeout_max: raw.raft.election_timeout_max,
         grpc_max_message_size: raw.raft.grpc_max_message_size,
+        read_consistency: raw.raft.read_consistency,
       },
       rocksdb: RocksdbConfig {
         data_path: raw.rocksdb.data_path,
@@ -163,6 +172,7 @@ impl Serialize for Config {
         election_timeout_min: self.raft.election_timeout_min,
         election_timeout_max: self.raft.election_timeout_max,
         grpc_max_message_size: self.raft.grpc_max_message_size,
+        read_consistency: self.raft.read_consistency,
       },
       rocksdb: self.rocksdb.clone(),
     };
@@ -185,6 +195,7 @@ mod tests {
       election_timeout_min: None,
       election_timeout_max: None,
       grpc_max_message_size,
+      read_consistency: ReadConsistency::default(),
     }
   }
 
@@ -212,6 +223,7 @@ mod tests {
         election_timeout_min: None,
         election_timeout_max: None,
         grpc_max_message_size: Some(8 * 1024 * 1024),
+        read_consistency: ReadConsistency::default(),
       },
       rocksdb: Default::default(),
     };
@@ -219,5 +231,53 @@ mod tests {
     let config = Config::validate_and_parse(raw).unwrap();
     assert_eq!(config.raft.grpc_max_message_size, Some(8 * 1024 * 1024));
     assert_eq!(config.raft.grpc_max_message_size(), 8 * 1024 * 1024);
+  }
+}
+
+#[cfg(test)]
+mod read_consistency_tests {
+  use super::*;
+  use crate::config::ReadConsistency;
+
+  /// TOML with an explicit read_consistency value must flow through the
+  /// RawConfig -> Config parse chain unaffected.
+  #[test]
+  fn test_read_consistency_from_toml() {
+    let toml = r#"
+node_id = 1
+[raft]
+address = "127.0.0.1:7001"
+advertise_host = "127.0.0.1"
+join = []
+read_consistency = "read_index"
+[rocksdb]
+data_path = "/tmp/rc-test"
+max_open_files = 10000
+"#;
+    let config: Config = toml::from_str(toml).unwrap();
+    assert_eq!(config.raft.read_consistency, ReadConsistency::ReadIndex);
+  }
+
+  /// No field = default (current behavior preserved).
+  #[test]
+  fn test_read_consistency_defaults_forwarded() {
+    let config: Config = toml::from_str("node_id = 1").unwrap();
+    assert_eq!(config.raft.read_consistency, ReadConsistency::LeaderApplied);
+  }
+
+  #[test]
+  fn test_read_consistency_invalid_value_rejected() {
+    let toml = r#"
+node_id = 1
+[raft]
+address = "127.0.0.1:7001"
+advertise_host = "127.0.0.1"
+join = []
+read_consistency = "ultra"
+"#;
+    assert!(
+      toml::from_str::<Config>(toml).is_err(),
+      "unknown mode must be a config error, not silently ignored"
+    );
   }
 }

@@ -1,5 +1,6 @@
 use super::config::RawRaftConfig;
 use super::config::RocksdbConfig;
+use super::read_consistency::ReadConsistency;
 
 /// Default maximum gRPC message size (encode and decode) for raft RPCs.
 ///
@@ -18,6 +19,7 @@ pub(crate) fn default_raft_config() -> RawRaftConfig {
     election_timeout_min: None,
     election_timeout_max: None,
     grpc_max_message_size: None,
+    read_consistency: ReadConsistency::default(),
   }
 }
 

@@ -21,6 +21,28 @@ Rockraft is a Rust library that provides distributed consensus for data replicat
 - ✅ **Snapshot Support** - Efficient storage recovery and compaction
 - ✅ **Connection Pooling** - Optimized gRPC connection management
 - ✅ **Multi-Node Support** - Scale from single node to large clusters
+- ✅ **Configurable Read Consistency** - Choose per deployment: leader-applied (default), local-applied, lease-read, or quorum-confirmed linearizable reads
+
+## Read Consistency Modes
+
+Reads are NOT linearizable by default — that is the classic trade-off of reading a leader's
+applied state without quorum confirmation (a deposed-but-unaware leader can serve stale values,
+and a just-committed write can be missed until it is applied). Configure the level per node:
+
+```toml
+[raft]
+read_consistency = "read_index"   # leader_applied (default) | local_applied | lease_read | read_index
+```
+
+| Mode | Staleness guarantee | Cost |
+|---|---|---|
+| `leader_applied` (default) | Sees only committed data, but may miss just-committed writes and can go stale if the leader was deposed without knowing | One forward hop; cheapest |
+| `local_applied` | Same, plus the local view can lag the leader further | Zero network; for staleness-tolerant read-heavy workloads |
+| `lease_read` | Linearizable assuming clocks drift less than the election-timeout lease | Near-free confirmation |
+| `read_index` | **Linearizable, unconditional** (majority confirmation + state-machine catch-up) | One quorum round-trip per read; concurrent reads can share one confirmation |
+
+Pick `read_index` when reads must reflect every committed write; `lease_read` inside clock-controlled
+Lans; keep the default for general KV workloads.
 
 ## License
 

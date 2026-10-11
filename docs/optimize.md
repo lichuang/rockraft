@@ -103,6 +103,11 @@
 - **修法**: `DashMap::entry(addr).or_insert_with(...)`；`check()` 做 `channel.health()` 或轻量探测，失败剔除重试一次
 - **关联**: todo.md #16（竞态）、#25（check 空实现）
 
+### 7b. 读一致性可配置（todo #18 决策落地）
+
+- [x] **已完成**
+- **完成说明**: 新增 `RaftConfig.read_consistency`（`LeaderApplied`/`LocalApplied`/`LeaseRead`/`ReadIndex`，默认保持现状）。`LocalApplied` 在节点入口直接本地答（零网络）；`LeaseRead`/`ReadIndex` 在 leader 端经 `raft.ensure_linearizable`（openraft 内建 ReadIndex/Lease 协议）确认后读，确认失败映射为可重试错误。CoreDB 等上层 TOML 经既有 serde 链自动透传（随 rockraft 下一版发布生效）。
+
 ### 8. pipeline 无并发（每连接串行处理）
 
 - [ ] **未完成**

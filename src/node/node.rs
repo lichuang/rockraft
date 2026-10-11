@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, broadcast};
 use tracing::debug;
 
 use crate::config::Config;
+use crate::config::ReadConsistency;
 use crate::engine::RocksDBEngine;
 use crate::error::{Error, Result};
 use crate::network::ClientPool;
@@ -218,8 +219,19 @@ impl RaftNode {
   }
 
   /// Read a value from the KV store
+  ///
+  /// Dispatches on `config.raft.read_consistency`: `LocalApplied` answers
+  /// from this node's own applied state without forwarding; the other levels
+  /// route through the standard execute-or-forward path (leaders additionally
+  /// run their level's confirmation inside `LeaderHandler`).
   pub async fn read(&self, req: GetKVReq) -> Result<GetKVReply> {
     debug!("read kv: {:?}", req);
+    if self.config.raft.read_consistency == ReadConsistency::LocalApplied {
+      return self
+        .state_machine()
+        .get_kv(&req.key)
+        .map_err(|e| Error::internal(format!("local read kv: {}", e)));
+    }
     self
       .execute_or_forward(RequestPayload::GetKV(req))
       .await?
@@ -227,8 +239,16 @@ impl RaftNode {
   }
 
   /// Scan keys with a given prefix
+  ///
+  /// Same consistency dispatch as `read`.
   pub async fn scan_prefix(&self, req: ScanPrefixReq) -> Result<ScanPrefixReply> {
     debug!("scan_prefix: {:?}", req);
+    if self.config.raft.read_consistency == ReadConsistency::LocalApplied {
+      return self
+        .state_machine()
+        .scan_prefix(&req.prefix)
+        .map_err(|e| Error::internal(format!("local scan_prefix: {}", e)));
+    }
     self
       .execute_or_forward(RequestPayload::ScanPrefix(req))
       .await?
@@ -329,6 +349,7 @@ mod tests {
         election_timeout_min: None,
         election_timeout_max: None,
         grpc_max_message_size: None,
+        read_consistency: ReadConsistency::default(),
       },
       rocksdb: RocksdbConfig {
         data_path: data_dir.to_string(),

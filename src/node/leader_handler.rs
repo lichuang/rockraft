@@ -1,6 +1,8 @@
+use crate::config::ReadConsistency;
 use crate::error::Error;
 use crate::error::ErrorKind;
 use crate::error::Result;
+use crate::error::RetryReason;
 use crate::node::RaftNode;
 use crate::raft::types::AppliedState;
 use crate::raft::types::BatchWriteReq;
@@ -20,8 +22,10 @@ use crate::raft::types::TxnReq;
 use crate::raft::types::TypeConfig;
 use openraft::ChangeMembers;
 use openraft::Raft;
+use openraft::ReadPolicy;
 use openraft::async_runtime::watch::WatchReceiver;
 use openraft::error::ClientWriteError;
+use openraft::error::LinearizableReadError;
 use openraft::error::RaftError;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -283,24 +287,76 @@ impl<'a> LeaderHandler<'a> {
 
   /// Read a value from the state machine (leader-only)
   ///
-  /// Reads directly from the local state machine.
-  /// Consider using `RaftNode::read()` which can read from any node.
+  /// Read a value, honoring the configured read consistency level.
+  ///
+  /// `LeaseRead`/`ReadIndex` run the openraft leadership confirmation and
+  /// state-machine catch-up before the lookup; the weaker levels read the
+  /// local state machine directly. This is reached only on the leader (via
+  /// the forward path), so the confirmation here applies to the node that
+  /// answers.
   pub async fn read(&self, req: GetKVReq) -> Result<Option<Vec<u8>>> {
-    map_err_log!(
-      self.node.state_machine().get_kv(&req.key),
-      "Failed to get kv"
-    )
+    self
+      .linearizable_read(|| {
+        map_err_log!(
+          self.node.state_machine().get_kv(&req.key),
+          "Failed to get kv"
+        )
+      })
+      .await
   }
 
-  /// Scan keys by prefix from the state machine (leader-only)
+  /// Scan keys by prefix, honoring the configured read consistency level.
   ///
-  /// Returns all key-value pairs with keys starting with the given prefix.
-  /// Results are sorted lexicographically by key.
+  /// Same confirmation flow as `read`.
   pub async fn scan_prefix(&self, req: ScanPrefixReq) -> Result<ScanPrefixReply> {
-    map_err_log!(
-      self.node.state_machine().scan_prefix(&req.prefix),
-      "Failed to scan prefix"
-    )
+    self
+      .linearizable_read(|| {
+        map_err_log!(
+          self.node.state_machine().scan_prefix(&req.prefix),
+          "Failed to scan prefix"
+        )
+      })
+      .await
+  }
+
+  /// Run `f` behind the configured read-consistency confirmation.
+  ///
+  /// `LeaseRead`/`ReadIndex` call `raft.ensure_linearizable` with the
+  /// matching openraft policy before running `f`; the other levels run `f`
+  /// directly. The confirmation error is retryable — leadership may be in
+  /// transition, and the caller (CoreDB) retries.
+  async fn linearizable_read<T, F>(&self, f: F) -> Result<T>
+  where
+    F: FnOnce() -> Result<T>,
+  {
+    match self.node.config.raft.read_consistency {
+      ReadConsistency::LeaderApplied | ReadConsistency::LocalApplied => f(),
+      ReadConsistency::LeaseRead => {
+        self.confirm_read(ReadPolicy::LeaseRead).await?;
+        f()
+      }
+      ReadConsistency::ReadIndex => {
+        self.confirm_read(ReadPolicy::ReadIndex).await?;
+        f()
+      }
+    }
+  }
+
+  /// Confirm leadership for a linearizable read, mapping openraft's error to
+  /// a retryable library error.
+  async fn confirm_read(&self, policy: ReadPolicy) -> Result<()> {
+    self
+      .raft()
+      .ensure_linearizable(policy)
+      .await
+      .map_err(|e| match e {
+        RaftError::APIError(LinearizableReadError::ForwardToLeader(leader_id)) => {
+          debug!("linearizable read redirect: leader_id={:?}", leader_id);
+          Error::retryable_with_reason(RetryReason::LeaderTransition)
+        }
+        other => Error::internal(format!("linearizable read confirmation failed: {}", other)),
+      })?;
+    Ok(())
   }
 
   /// Get cluster membership from the state machine
