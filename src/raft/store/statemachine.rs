@@ -379,7 +379,7 @@ impl RocksStateMachine {
       Cmd::BatchUpsertKV { entries } => self.apply_batch_upsert_kv(&entries, batch, pending),
       Cmd::AddNode { node, .. } => self.apply_add_node(&node),
       Cmd::RemoveNode { node_id } => self.apply_remove_node(node_id),
-      Cmd::Txn { req, .. } => self.apply_txn(&req, batch, pending),
+      Cmd::Txn { req } => self.apply_txn(&req, batch, pending),
     }
   }
 
@@ -886,13 +886,11 @@ mod tests {
       req: TxnReq::new(vec![TxnCondition::not_exists("txn_chain")])
         .if_then(UpsertKV::insert("txn_chain", b"first"))
         .if_then(UpsertKV::insert("txn1_branch", b"if")),
-      result: None,
     };
     let txn2 = Cmd::Txn {
       req: TxnReq::new(vec![TxnCondition::eq("txn_chain", b"first")])
         .if_then(UpsertKV::insert("txn_chain", b"second"))
         .if_then(UpsertKV::insert("txn2_branch", b"if")),
-      result: None,
     };
 
     apply_entries(
@@ -924,7 +922,6 @@ mod tests {
     let txn = Cmd::Txn {
       req: TxnReq::new(vec![TxnCondition::not_exists("del_key")])
         .if_then(UpsertKV::insert("del_key", b"reborn")),
-      result: None,
     };
 
     apply_entries(
@@ -952,7 +949,6 @@ mod tests {
       req: TxnReq::new(vec![TxnCondition::eq("counter", b"2")])
         .if_then(UpsertKV::insert("result_key", b"if"))
         .else_then(UpsertKV::insert("result_key", b"else")),
-      result: None,
     };
 
     apply_entries(

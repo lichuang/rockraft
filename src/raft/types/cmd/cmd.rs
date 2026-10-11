@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::raft::types::{Node, NodeId};
 
-use super::txn::{TxnReply, TxnReq};
+use super::txn::TxnReq;
 use super::upsert_kv::UpsertKV;
 
 /// A Cmd describes what a user want to do to raft state machine
@@ -32,10 +32,7 @@ pub enum Cmd {
   ///
   /// The transaction executes condition checks and performs operations
   /// atomically based on the condition results.
-  Txn {
-    req: TxnReq,
-    result: Option<TxnReply>,
-  },
+  Txn { req: TxnReq },
 }
 
 impl fmt::Display for Cmd {
@@ -60,7 +57,7 @@ impl fmt::Display for Cmd {
         write!(f, "batch_upsert_kv: {} entries", entries.len())
       }
 
-      Cmd::Txn { req, .. } => {
+      Cmd::Txn { req } => {
         write!(
           f,
           "txn: {} conditions, {} if_then, {} else_then",

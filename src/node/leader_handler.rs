@@ -303,10 +303,11 @@ impl<'a> LeaderHandler<'a> {
     )
   }
 
-  /// Get cluster membership from state machine (leader-only)
+  /// Get cluster membership from the state machine
   ///
-  /// Returns the committed membership configuration.
-  /// This reflects the last applied membership change.
+  /// Returns the applied membership configuration (voters and learners).
+  /// Reached via the forward path: followers route GetMembers to the leader,
+  /// and the leader answers from its own applied state.
   pub async fn get_members(&self, _req: GetMembersReq) -> Result<GetMembersReply> {
     map_err_log!(
       self.node.state_machine().get_nodes(),
@@ -323,7 +324,7 @@ impl<'a> LeaderHandler<'a> {
   /// Must be called on the leader. Use `RaftNode::assume_leader()` first.
   pub async fn txn(&self, req: TxnReq) -> Result<TxnReply> {
     // Build a transaction command
-    let entry = LogEntry::new(Cmd::Txn { req, result: None });
+    let entry = LogEntry::new(Cmd::Txn { req });
 
     match self
       .do_write(entry)

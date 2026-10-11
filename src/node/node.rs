@@ -29,8 +29,6 @@ use crate::raft::types::{
   ScanPrefixReq, TxnReply, TxnReq, TypeConfig, UpsertKV,
 };
 
-use super::LeaderHandler;
-
 pub struct RaftNode {
   #[allow(dead_code)]
   pub(crate) engine: Arc<RocksDBEngine>,
@@ -54,7 +52,12 @@ impl RaftNode {
     &self.state_machine
   }
 
-  /// Shutdown raft thread
+  /// Shutdown the raft node
+  ///
+  /// Order matters: stop the gRPC service first so no new RPCs arrive, then
+  /// shut down the raft runtime (election ticks, replication, apply loop).
+  /// Skipping `raft.shutdown()` leaks the runtime — a restarted node in the
+  /// same process would race a ghost election against the new instance.
   pub async fn shutdown(&self) -> Result<()> {
     let _ = self.shutdown_tx.send(());
 
@@ -63,6 +66,12 @@ impl RaftNode {
     if let Some(h) = handle {
       h.await.ok();
     }
+
+    self
+      .raft
+      .shutdown()
+      .await
+      .map_err(|e| Error::internal(format!("raft shutdown failed: {}", e)))?;
 
     Ok(())
   }
@@ -247,10 +256,16 @@ impl RaftNode {
   }
 
   /// Get the current cluster membership
+  ///
+  /// Routes through the standard execute-or-forward path: a follower forwards
+  /// the request to the leader, so every node returns the leader's applied
+  /// membership instead of its own possibly stale local view.
   pub async fn get_members(&self, req: GetMembersReq) -> Result<GetMembersReply> {
     debug!("get members: {:?}", req);
-    let leader_handler = LeaderHandler::new(self);
-    leader_handler.get_members(req).await
+    self
+      .execute_or_forward(RequestPayload::GetMembers(req))
+      .await?
+      .into_get_members()
   }
 
   // ---- Client API: Snapshot operations ----

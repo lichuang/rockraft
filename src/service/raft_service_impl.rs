@@ -40,6 +40,8 @@ impl<T, E: std::fmt::Display> IntoStatus<T> for Result<T, E> {
 struct StreamingSnapshot {
   data: tokio::fs::File,
   created_at: Instant,
+  /// Total bytes accepted so far; equals the next expected offset.
+  received: u64,
 }
 
 pub struct RaftServiceImpl {
@@ -199,7 +201,14 @@ impl RaftService for RaftServiceImpl {
         .await?;
 
       if done {
-        Some(guard.remove(&snapshot_id).unwrap())
+        // The entry must exist (write_chunk just accepted the chunk); treat
+        // a miss as a protocol error rather than panicking the RPC task.
+        Some(guard.remove(&snapshot_id).ok_or_else(|| {
+          Status::internal(format!(
+            "Streaming snapshot {} evicted before completion",
+            snapshot_id
+          ))
+        })?)
       } else {
         None
       }
@@ -262,6 +271,7 @@ impl RaftServiceImpl {
       StreamingSnapshot {
         data: tokio::fs::File::from_std(std_file),
         created_at: Instant::now(),
+        received: 0,
       },
     );
 
@@ -279,6 +289,16 @@ impl RaftServiceImpl {
       .get_mut(snapshot_id)
       .ok_or_else(|| Status::internal("Streaming snapshot not found"))?;
 
+    // Offset continuity: chunks must land exactly at the end of what we have
+    // accepted. A gap, rewind, or overlap would silently corrupt the
+    // assembled snapshot file.
+    if offset != streaming.received {
+      return Err(Status::invalid_argument(format!(
+        "Snapshot {} offset mismatch: expected {}, got {}",
+        snapshot_id, streaming.received, offset
+      )));
+    }
+
     streaming
       .data
       .seek(SeekFrom::Start(offset))
@@ -290,6 +310,8 @@ impl RaftServiceImpl {
       .write_all(data)
       .await
       .map_internal("Failed to write snapshot data")?;
+
+    streaming.received += data.len() as u64;
 
     Ok(())
   }

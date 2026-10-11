@@ -589,7 +589,7 @@ Press Ctrl+C to shutdown...
 - Node 1 becomes the initial leader by initializing the cluster
 - If Node 1 fails, Nodes 2 and 3 will elect a new leader
 - Only the leader accepts write requests (`POST /set`, `POST /delete`)
-- All nodes can serve read requests (`GET /get`)
+- All nodes accept read requests (`GET /get`); followers forward them to the leader
 
 ### Data Consistency
 
@@ -618,9 +618,14 @@ Press Ctrl+C to shutdown...
 ### Read Path (GET /get)
 
 1. Client sends GET request to any node
-2. Node reads directly from local RocksDB
-3. Returns value or null if key doesn't exist
-4. No Raft consensus required for reads
+2. If the node is not the leader, the read is forwarded to the leader
+3. The leader reads from its applied state machine (RocksDB)
+4. Returns value or null if key doesn't exist
+
+Note: reads are not linearizable — they return the leader's last-applied
+state, which may briefly lag the latest commit. Routing through the leader
+keeps a single consistent read point while avoiding cross-node replication
+coordination per read.
 
 ## Next Steps
 
