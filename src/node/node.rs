@@ -10,6 +10,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[allow(unused_imports)]
+use openraft::Config as OpenRaftConfig;
 use openraft::Raft;
 use openraft::async_runtime::watch::WatchReceiver;
 use tokio::sync::{Mutex, broadcast};
@@ -29,6 +31,28 @@ use crate::raft::types::{
   GetMembersReq, JoinRequest, LeaveRequest, LogEntry, RequestPayload, ScanPrefixReply,
   ScanPrefixReq, TxnReply, TxnReq, TypeConfig, UpsertKV,
 };
+
+/// Runtime knobs that live outside the serializable `Config` and are set
+/// through the builder. Defaults keep the historical hard-coded values.
+#[derive(Debug, Clone)]
+pub struct CreateOptions {
+  /// OpenRaft overrides; `None` uses `config.raft.to_openraft_config()`.
+  pub raft_config: Option<OpenRaftConfig>,
+  /// Max pooled gRPC connections per remote address.
+  pub client_pool_size: u64,
+  /// gRPC connection timeout, also applied as the pooled client dial timeout.
+  pub grpc_timeout: std::time::Duration,
+}
+
+impl Default for CreateOptions {
+  fn default() -> Self {
+    Self {
+      raft_config: None,
+      client_pool_size: 10,
+      grpc_timeout: std::time::Duration::from_secs(10),
+    }
+  }
+}
 
 pub struct RaftNode {
   #[allow(dead_code)]
@@ -77,21 +101,26 @@ impl RaftNode {
     Ok(())
   }
 
-  pub(crate) async fn create(config: &Config) -> Result<Arc<Self>> {
+  pub(crate) async fn create(config: &Config, options: &CreateOptions) -> Result<Arc<Self>> {
     let engine = Arc::new(store::create_storage_engine(
       &config.rocksdb.data_path,
       config.rocksdb.max_open_files,
+      Some(&config.rocksdb.resolve_engine_config()),
     )?);
 
     let data_dir = PathBuf::from(&config.rocksdb.data_path);
     let (log_store, state_machine) = store::create_stores(&engine, data_dir).await?;
 
-    let client_pool = Arc::new(ClientPool::new_with_max_message_size(
-      10,
+    let client_pool = Arc::new(ClientPool::new_with_config(
+      options.client_pool_size,
+      options.grpc_timeout,
       config.raft.grpc_max_message_size(),
     ));
     let factory = NetworkFactory::new(client_pool.clone());
-    let raft_config = config.raft.to_openraft_config();
+    let raft_config = options
+      .raft_config
+      .clone()
+      .unwrap_or_else(|| config.raft.to_openraft_config());
 
     let raft = Arc::new(
       Raft::new(
@@ -354,6 +383,9 @@ mod tests {
       rocksdb: RocksdbConfig {
         data_path: data_dir.to_string(),
         max_open_files: 1024,
+        block_cache_size: None,
+        write_buffer_size: None,
+        max_write_buffer_number: None,
       },
     }
   }
@@ -376,7 +408,7 @@ mod tests {
     let data_path = temp_dir.into_os_string().into_string().unwrap();
 
     let config = create_test_config(&data_path, 1, "127.0.0.1:5001");
-    let raft_node = RaftNode::create(&config).await?;
+    let raft_node = RaftNode::create(&config, &CreateOptions::default()).await?;
 
     setup_nodes(&raft_node, vec![1, 2, 3]).await;
 
@@ -392,7 +424,7 @@ mod tests {
     let data_path = temp_dir.into_os_string().into_string().unwrap();
 
     let config = create_test_config(&data_path, 4, "127.0.0.1:5004");
-    let raft_node = RaftNode::create(&config).await?;
+    let raft_node = RaftNode::create(&config, &CreateOptions::default()).await?;
 
     setup_nodes(&raft_node, vec![1, 2, 3]).await;
 

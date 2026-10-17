@@ -25,6 +25,9 @@
 //!     rocksdb: RocksdbConfig {
 //!         data_path: "/tmp/raft".to_string(),
 //!         max_open_files: 1024,
+//!         block_cache_size: None,
+//!         write_buffer_size: None,
+//!         max_write_buffer_number: None,
 //!     },
 //! };
 //! ```

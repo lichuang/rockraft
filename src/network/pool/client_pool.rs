@@ -47,7 +47,7 @@ impl ClientPool {
     )
   }
 
-  fn new_with_config(
+  pub fn new_with_config(
     max_open_connection: u64,
     connection_timeout: Duration,
     max_message_size: usize,

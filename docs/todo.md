@@ -101,16 +101,12 @@
 - **决策**: 要么完整实现（apply 时写带 TTL 的 key、读取/scan 时过滤过期，`LogEntry.time_ms` 字段已有铺垫），要么删除整条链路。
 
 ### 11. `RaftNodeBuilder` 三个配置项是摆设
-- [ ] **未完成**
-- **位置**: `src/node/node_builder.rs`；`src/node/node.rs` 的 `create()`
-- **问题**:
-  - `raft_config: Option<OpenRaftConfig>` — `build()` 中从未使用，实际用 `config.raft.to_openraft_config()`
-  - `grpc_timeout_seconds` — 只做校验，未传入 create
-  - `max_client_pool_size` — 只做校验，未传入 create；`create()` 里硬编码 `ClientPool::new(10)`、转发超时 10s
-- **修法**: 要么把 builder 选项真正接到 `create()`，要么删除。
+- [x] **已完成**
+- **完成说明**: 新增 `CreateOptions`（raft_config/client_pool_size/grpc_timeout，默认保持历史硬编码值 10/10s）；`RaftNodeBuilder::build()` 把三个选项组装进 `CreateOptions` 传入 `RaftNode::create(config, &options)`——`raft_config` 非 None 时优先于 `config.raft.to_openraft_config()`，pool size 与超时真正传入 `ClientPool`。
 
 ### 12. `Cmd::Txn` 的 `result` 字段是死代码
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: 字段删除（构造点/apply 分发/Display 全清理），提交 657717b。
 - **位置**: `src/raft/types/cmd/cmd.rs`；`src/raft/store/statemachine.rs` 的 `apply()`
 - **问题**: 构造时永远 `result: None`，apply 时忽略 `result` 直接返回 `AppliedState::Txn`。
 - **修法**: 删除该字段。
@@ -124,10 +120,8 @@
 - **修法**: 实现清理逻辑——遍历 snapshot_dir，保留 `last_snapshot_id` 指向的目录，删除其余（注意先校验新快照完整性再删旧）。
 
 ### 14. engine 调优参数不可配置
-- [ ] **未完成**
-- **位置**: `src/engine/rocksdb.rs`、`src/config/config.rs`
-- **问题**: `engine::RocksDBConfig`（block_cache_size/write_buffer 等）与 `config::RocksdbConfig`（data_path/max_open_files）是**两个同名不同类型**，前者未暴露到 `Config`，用户无法从配置控制 RocksDB 调优参数。
-- **修法**: 合并为一个配置结构，或在 `RocksdbConfig` 中增加调优字段。
+- [x] **已完成**
+- **完成说明**: `config::RocksdbConfig` 增加 `block_cache_size`/`write_buffer_size`/`max_write_buffer_number` 三个 `Option<...>` 调优字段（None=engine 默认），`resolve_engine_config()` 解析成 `engine::RocksDBConfig` 后经 `create_storage_engine` → `RocksDBEngine::new_with_config` 生效。TOML 可配，新增 2 个透传/默认值单测。
 
 ---
 
@@ -156,7 +150,8 @@
 - **修法**: 缩短单次等待、降低总预算、尽早返回可重试错误让上层决策。
 
 ### 18. 读路径全部转发到 leader
-- [ ] **未完成**
+- [x] **已完成（决策落地：四档可配置）**
+- **完成说明**: 新增 `RaftConfig.read_consistency`（leader_applied 默认保持现状 / local_applied 零转发 / lease_read 时钟假设 / read_index 多数派确认线性一致），提交 2f14690。语义决策权交给部署者。
 - **位置**: `src/node/node.rs` 的 `read()` / `scan_prefix()`
 - **问题**: 读也走 `execute_or_forward` 转发到 leader，leader 成为读瓶颈，且每次转发有一次 postcard 编解码 + 网络往返。
 - **说明**: 当前语义是读 leader 已 apply 数据（非线性一致读）。若接受 follower 本地读，可大幅降低 leader 压力；若要线性一致读则需引入 ReadIndex/lease 机制。
@@ -174,19 +169,22 @@
 ## 四、健壮性 / 资源管理
 
 ### 20. `RaftNode::shutdown` 不关闭 raft 实例
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: shutdown 补 `raft.shutdown().await`（先停 gRPC 再停 raft runtime），提交 657717b。
 - **位置**: `src/node/node.rs` 的 `shutdown()`
 - **问题**: 只停了 gRPC service，OpenRaft 的 `raft.shutdown()` 从未调用，raft runtime 未正确关闭。
 - **修法**: shutdown 流程中调用 `self.raft.shutdown().await` 并等待完成。
 
 ### 21. `get_members` 绕过了 leader 检查
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: 改走标准 execute_or_forward 转发路径（follower 返回 leader 已 apply 视图）+ 文档对齐，提交 657717b。
 - **位置**: `src/node/node.rs` 的 `get_members()`
 - **问题**: 直接 `LeaderHandler::new(self).get_members()`，不走 `execute_or_forward`，与 `LeaderHandler` 文档"leader-only"矛盾。follower 返回本地（可能滞后）视图；`RequestPayload::GetMembers` 的转发路径没被本地 API 使用。
 - **决策**: 要么走完整转发流程，要么修正文档明示"返回本地视图"。
 
 ### 22. snapshot 流式接收缺乏防御性校验
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: `received` 追踪 + offset 连续性校验（乱序/gap/回退报 invalid_argument）+ `remove().unwrap()` 防御化，提交 657717b。
 - **位置**: `src/service/raft_service_impl.rs`
 - **问题**:
   - 无 offset 连续性校验（任意 offset 直接 seek 写入，乱序块会静默产生损坏文件）
@@ -195,7 +193,8 @@
 - **修法**: 校验 offset 与当前文件长度一致；冲突时拒绝并要求重传；`remove` 改为防御性处理。
 
 ### 23. `Endpoint::parse` 不支持 IPv6
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: 方括号语法 `[::1]:8080` + to_string round-trip 重括号 + 单测，提交 657717b。
 - **位置**: `src/config/endpoint.rs` 的 `parse()`
 - **问题**: `splitn(2, ':')` 无法解析 `[::1]:8080` 形式的 IPv6 地址。
 - **修法**: 使用 `SocketAddr::from_str` 或处理方括号语法。
@@ -219,7 +218,8 @@
 ## 五、小问题
 
 ### 26. example/README.md 与实现不符
-- [ ] **未完成**
+- [x] **已完成**
+- **完成说明**: Read Path 一节如实描述转发 + 明示非线性一致语义，提交 657717b。
 - **位置**: `example/README.md` 的 "Read Path" 章节
 - **问题**: 文档说"读直接读本地 RocksDB，无需 Raft 共识"，实际 `read()` 走 `execute_or_forward` 转发到 leader。
 

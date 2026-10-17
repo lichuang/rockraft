@@ -18,6 +18,7 @@ pub use statemachine::RocksStateMachine;
 
 use std::path::PathBuf;
 
+use crate::engine;
 use crate::engine::RocksDBEngine;
 use crate::error::Result;
 use crate::raft::types::TypeConfig;
@@ -27,8 +28,17 @@ use crate::raft::types::TypeConfig;
 ///
 /// Callers that need a shared database for both stores should use this
 /// instead of assembling the column family list themselves.
-pub(crate) fn create_storage_engine(data_path: &str, max_open_files: i32) -> Result<RocksDBEngine> {
-  RocksDBEngine::new(data_path, max_open_files, keys::column_family_list())
+pub(crate) fn create_storage_engine(
+  data_path: &str,
+  max_open_files: i32,
+  tuning: Option<&engine::RocksDBConfig>,
+) -> Result<RocksDBEngine> {
+  RocksDBEngine::new_with_config(
+    data_path,
+    max_open_files,
+    tuning,
+    keys::column_family_list(),
+  )
 }
 
 /// Create both the log store and state machine from a shared RocksDB engine.

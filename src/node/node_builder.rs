@@ -1,9 +1,11 @@
 use crate::config::Config;
 use crate::error::{Error, Result};
+use crate::node::CreateOptions;
 use crate::node::RaftNode;
 use crate::raft::types::Node;
 use openraft::Config as OpenRaftConfig;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
 /// Builder for constructing a RaftNode with progressive configuration.
@@ -131,8 +133,13 @@ impl<'a> RaftNodeBuilder<'a> {
 
     info!("Building RaftNode with node_id={}", config.node_id);
 
-    // Create the RaftNode using the existing factory method
-    let raft_node = RaftNode::create(config).await?;
+    // Create the RaftNode with the builder's runtime knobs wired in
+    let options = CreateOptions {
+      raft_config: self.raft_config.clone(),
+      client_pool_size: self.max_client_pool_size as u64,
+      grpc_timeout: Duration::from_secs(self.grpc_timeout_seconds),
+    };
+    let raft_node = RaftNode::create(config, &options).await?;
 
     // Start the gRPC service
     RaftNode::start_raft_service(raft_node.clone()).await?;

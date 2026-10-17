@@ -20,10 +20,34 @@ pub struct Config {
 }
 
 /// RocksDB configuration
+///
+/// The tuning fields mirror `engine::RocksDBConfig`; `None` keeps the
+/// engine's built-in default for that field.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RocksdbConfig {
   pub data_path: String,
   pub max_open_files: i32,
+  /// Shared LRU block cache size in bytes.
+  pub block_cache_size: Option<usize>,
+  /// Memtable (write buffer) size in bytes per column family.
+  pub write_buffer_size: Option<usize>,
+  /// Number of memtables per column family before flushing is forced.
+  pub max_write_buffer_number: Option<i32>,
+}
+
+impl RocksdbConfig {
+  /// Resolve tuning options into an explicit engine config: `None` fields
+  /// fall back to the engine defaults.
+  pub(crate) fn resolve_engine_config(&self) -> crate::engine::RocksDBConfig {
+    let d = crate::engine::RocksDBConfig::default();
+    crate::engine::RocksDBConfig {
+      block_cache_size: self.block_cache_size.unwrap_or(d.block_cache_size),
+      write_buffer_size: self.write_buffer_size.unwrap_or(d.write_buffer_size),
+      max_write_buffer_number: self
+        .max_write_buffer_number
+        .unwrap_or(d.max_write_buffer_number),
+    }
+  }
 }
 
 /// Raft configuration with parsed endpoints
@@ -138,10 +162,7 @@ impl Config {
         grpc_max_message_size: raw.raft.grpc_max_message_size,
         read_consistency: raw.raft.read_consistency,
       },
-      rocksdb: RocksdbConfig {
-        data_path: raw.rocksdb.data_path,
-        max_open_files: raw.rocksdb.max_open_files,
-      },
+      rocksdb: raw.rocksdb,
     })
   }
 }
@@ -278,6 +299,58 @@ read_consistency = "ultra"
     assert!(
       toml::from_str::<Config>(toml).is_err(),
       "unknown mode must be a config error, not silently ignored"
+    );
+  }
+}
+
+#[cfg(test)]
+mod rocksdb_config_tests {
+  use super::*;
+
+  /// Explicit tuning values must flow TOML -> RocksdbConfig -> engine config.
+  #[test]
+  fn test_rocksdb_tuning_from_toml() {
+    let toml = r#"
+node_id = 1
+[raft]
+address = "127.0.0.1:7001"
+advertise_host = "127.0.0.1"
+join = []
+[rocksdb]
+data_path = "/tmp/tune-test"
+max_open_files = 42
+block_cache_size = 123456
+write_buffer_size = 654321
+max_write_buffer_number = 7
+"#;
+    let config: Config = toml::from_str(toml).unwrap();
+    let tuned = config.rocksdb.resolve_engine_config();
+    assert_eq!(tuned.block_cache_size, 123456);
+    assert_eq!(tuned.write_buffer_size, 654321);
+    assert_eq!(tuned.max_write_buffer_number, 7);
+  }
+
+  /// Missing tuning fields resolve to the engine defaults.
+  #[test]
+  fn test_rocksdb_tuning_defaults() {
+    let toml = r#"
+node_id = 1
+[raft]
+address = "127.0.0.1:7001"
+advertise_host = "127.0.0.1"
+join = []
+[rocksdb]
+data_path = "/tmp/tune-default"
+max_open_files = 42
+"#;
+    let config: Config = toml::from_str(toml).unwrap();
+    let resolved = config.rocksdb.resolve_engine_config();
+    let default = crate::engine::RocksDBConfig::default();
+    assert_eq!(resolved.block_cache_size, default.block_cache_size);
+    assert_eq!(resolved.write_buffer_size, default.write_buffer_size);
+    assert_eq!(
+      resolved.max_write_buffer_number,
+      default.max_write_buffer_number
     );
   }
 }

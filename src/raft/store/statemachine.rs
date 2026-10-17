@@ -1115,7 +1115,7 @@ mod tests {
     tokio::fs::create_dir_all(&snap_dir).await.unwrap();
     let snap_data_path = snap_dir.join("snapshot");
     let file = std::fs::File::create(&snap_data_path).unwrap();
-    let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+    let encoder = zstd::Encoder::new(file, 3).unwrap();
     encoder.finish().unwrap();
 
     // install_snapshot: recover KV + sync meta

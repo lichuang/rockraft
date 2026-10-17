@@ -27,5 +27,8 @@ pub(crate) fn default_rocksdb_config() -> RocksdbConfig {
   RocksdbConfig {
     max_open_files: 10000,
     data_path: ".rockraft_data".to_string(),
+    block_cache_size: None,
+    write_buffer_size: None,
+    max_write_buffer_number: None,
   }
 }
