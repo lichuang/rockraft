@@ -84,13 +84,9 @@
 
 ### 6. 转发 payload / KV value 的重复克隆
 
-- [ ] **未完成**
-- **侧**: rockraft
-- **位置**:
-  - `src/node/forward.rs:100,107,131` — `execute_or_forward` 循环内 `payload.clone()` 每次尝试克隆整个 payload（d16384 = 16KB+，重试 20 次放大）
-  - `src/raft/store/statemachine.rs` `stage_upsert_kv()` — `pending.insert(kv.key.clone(), Some(value.clone()))` 每 KV 两次堆分配（MSET(10) d16384 = 10×16KB×2）
-- **修法**: payload 包 `Arc<RequestPayload>`；PendingWrites/key 换 `Bytes` 零拷贝切片
-- **关联**: 压测 MSET d16384 雪崩场景的成本项
+- [x] **已完成（apply 路径零拷贝）**
+- **完成说明**: apply 消费链改按值传递——`stage_upsert_kv(kv: UpsertKV)` move 进 key 与 value，value 用 `Bytes::from(Vec)` 包裹（**复用原分配，零 memcpy**），`pending.insert(kv.key, ...)` 直接 move key。apply 路径每 KV 消除 2 次堆分配+拷贝（大 value 场景 MSET(10) d16384 约 10×16KB×2 的拷贝消失）；Txn 条件检查/prev_values 的 overlay 读变 `Bytes` 引用计数（`get_kv_with_overlay` 返回 `Option<Bytes>`），每条件一次 memcpy → 一次 refcount bump。`evaluate_condition` 签名改 `Option<&[u8]>` 切片。
+- **转发路径评估后不修**: 每 attempt 只有一个分支执行 → 现状 1 次 `payload.clone()`/attempt 已是最小值——`LeaderHandler::write` → `client_write`（openraft）与 tonic 消息都要求 owned 数据，借用形态无处安放；3 处 clone 并非叠加而是分支互斥。转发路径每 attempt 的真实成本是"clone + postcard encode"两次拷贝，重试罕见（选举办），不做过度微调。
 
 ### 7. `ClientPool` 初始化竞态 + `check()` 空实现（伪超时）
 

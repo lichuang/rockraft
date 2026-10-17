@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use bytes::Bytes;
+
 use crate::raft::types::{decode, encode};
 use futures::Stream;
 use futures::TryStreamExt;
@@ -68,30 +70,30 @@ pub struct RocksStateMachine {
 
 /// Writes buffered in the current apply batch but not yet committed.
 /// `None` value means a delete is pending for that key.
-type PendingWrites = BTreeMap<String, Option<Vec<u8>>>;
+type PendingWrites = BTreeMap<String, Option<Bytes>>;
 
 /// Evaluate a transaction condition against the actual value
-fn evaluate_condition(expected: &TxnOp, actual: Option<&Vec<u8>>) -> bool {
+fn evaluate_condition(expected: &TxnOp, actual: Option<&[u8]>) -> bool {
   match expected {
     TxnOp::Exists => actual.is_some(),
     TxnOp::NotExists => actual.is_none(),
     TxnOp::Equal(expected_value) => actual
-      .map(|v| v.as_slice() == expected_value.as_slice())
+      .map(|v| v == expected_value.as_slice())
       .unwrap_or(false),
     TxnOp::NotEqual(expected_value) => actual
-      .map(|v| v.as_slice() != expected_value.as_slice())
+      .map(|v| v != expected_value.as_slice())
       .unwrap_or(true),
     TxnOp::Greater(expected_value) => actual
-      .map(|v| v.as_slice() > expected_value.as_slice())
+      .map(|v| v > expected_value.as_slice())
       .unwrap_or(false),
     TxnOp::Less(expected_value) => actual
-      .map(|v| v.as_slice() < expected_value.as_slice())
+      .map(|v| v < expected_value.as_slice())
       .unwrap_or(false),
     TxnOp::GreaterEqual(expected_value) => actual
-      .map(|v| v.as_slice() >= expected_value.as_slice())
+      .map(|v| v >= expected_value.as_slice())
       .unwrap_or(false),
     TxnOp::LessEqual(expected_value) => actual
-      .map(|v| v.as_slice() <= expected_value.as_slice())
+      .map(|v| v <= expected_value.as_slice())
       .unwrap_or(false),
   }
 }
@@ -350,19 +352,20 @@ impl RocksStateMachine {
 
   fn stage_upsert_kv(
     &self,
-    kv: &UpsertKV,
+    kv: UpsertKV,
     batch: &mut rocksdb::WriteBatch,
     pending: &mut PendingWrites,
   ) {
     let cf_data = &self.cf_sm_data();
-    match &kv.value {
+    match kv.value {
       Operation::Update(value) => {
-        batch.put_cf(cf_data, kv.key.as_bytes(), value);
-        pending.insert(kv.key.clone(), Some(value.clone()));
+        batch.put_cf(cf_data, kv.key.as_bytes(), &value);
+        // Bytes::from(Vec) reuses the allocation: no memcpy on the hot path.
+        pending.insert(kv.key, Some(Bytes::from(value)));
       }
       Operation::Delete => {
         batch.delete_cf(cf_data, kv.key.as_bytes());
-        pending.insert(kv.key.clone(), None);
+        pending.insert(kv.key, None);
       }
     }
   }
@@ -375,17 +378,17 @@ impl RocksStateMachine {
     pending: &mut PendingWrites,
   ) -> Result<AppliedState, io::Error> {
     match cmd {
-      Cmd::UpsertKV(kv) => self.apply_upsert_kv(&kv, batch, pending),
-      Cmd::BatchUpsertKV { entries } => self.apply_batch_upsert_kv(&entries, batch, pending),
+      Cmd::UpsertKV(kv) => self.apply_upsert_kv(kv, batch, pending),
+      Cmd::BatchUpsertKV { entries } => self.apply_batch_upsert_kv(entries, batch, pending),
       Cmd::AddNode { node, .. } => self.apply_add_node(&node),
       Cmd::RemoveNode { node_id } => self.apply_remove_node(node_id),
-      Cmd::Txn { req } => self.apply_txn(&req, batch, pending),
+      Cmd::Txn { req } => self.apply_txn(req, batch, pending),
     }
   }
 
   fn apply_upsert_kv(
     &self,
-    kv: &UpsertKV,
+    kv: UpsertKV,
     batch: &mut rocksdb::WriteBatch,
     pending: &mut PendingWrites,
   ) -> Result<AppliedState, io::Error> {
@@ -395,7 +398,7 @@ impl RocksStateMachine {
 
   fn apply_batch_upsert_kv(
     &self,
-    entries: &[UpsertKV],
+    entries: Vec<UpsertKV>,
     batch: &mut rocksdb::WriteBatch,
     pending: &mut PendingWrites,
   ) -> Result<AppliedState, io::Error> {
@@ -431,7 +434,7 @@ impl RocksStateMachine {
 
   fn apply_txn(
     &self,
-    req: &TxnReq,
+    req: TxnReq,
     batch: &mut rocksdb::WriteBatch,
     pending: &mut PendingWrites,
   ) -> Result<AppliedState, io::Error> {
@@ -440,22 +443,29 @@ impl RocksStateMachine {
     let mut all_conditions_met = true;
     for condition in &req.condition {
       let actual_value = self.get_kv_with_overlay(&condition.key, pending)?;
-      if !evaluate_condition(&condition.expected, actual_value.as_ref()) {
+      if !evaluate_condition(&condition.expected, actual_value.as_deref()) {
         all_conditions_met = false;
         break;
       }
     }
 
+    // Move the branch's operations out so their keys and values can be
+    // consumed without cloning.
+    let (if_len, else_len) = (req.if_then.len(), req.else_then.len());
     let ops_to_execute = if all_conditions_met {
-      &req.if_then
+      req.if_then
     } else {
-      &req.else_then
+      req.else_then
     };
 
     let prev_values = if req.return_previous {
       let mut values = Vec::with_capacity(ops_to_execute.len());
-      for kv in ops_to_execute {
-        values.push(self.get_kv_with_overlay(&kv.key, pending)?);
+      for kv in &ops_to_execute {
+        values.push(
+          self
+            .get_kv_with_overlay(&kv.key, pending)?
+            .map(|b| b.to_vec()),
+        );
       }
       values
     } else {
@@ -468,9 +478,7 @@ impl RocksStateMachine {
 
     debug!(
       "Applied transaction: conditions_met={}, if_then_ops={}, else_then_ops={}",
-      all_conditions_met,
-      req.if_then.len(),
-      req.else_then.len()
+      all_conditions_met, if_len, else_len
     );
 
     Ok(AppliedState::Txn(TxnReply::Success {
@@ -495,11 +503,11 @@ impl RocksStateMachine {
     &self,
     key: &str,
     pending: &PendingWrites,
-  ) -> Result<Option<Vec<u8>>, io::Error> {
+  ) -> Result<Option<Bytes>, io::Error> {
     if let Some(pending_value) = pending.get(key) {
       return Ok(pending_value.clone());
     }
-    self.get_kv(key)
+    Ok(self.get_kv(key)?.map(Bytes::from))
   }
 
   /// Write the snapshot's apply progress and membership into _sm_meta and
