@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "rockraft"
-version = "0.1.8"
+version = "0.2.0"
 dependencies = [
  "anyerror",
  "anyhow",
