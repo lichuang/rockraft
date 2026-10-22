@@ -1,3 +1,28 @@
+## [0.2.0] - 2026-10-22
+
+### 🚀 Features
+
+- Add a configurable read consistency mode (read_consistency = leader_applied | local_applied | lease_read | read_index) so deployments can trade read cost against staleness, where lease_read and read_index run openraft's ensure_linearizable leadership confirmation and state-machine catch-up before serving, unconditionally making read_index linearizable, with leader_applied as the default preserving existing behavior
+- Wire the RaftNodeBuilder options through a CreateOptions struct so raft_config, max_client_pool_size and grpc_timeout_seconds actually take effect at node creation, and expose the RocksDB tuning knobs (block_cache_size, write_buffer_size, max_write_buffer_number) as optional RocksdbConfig fields resolved into the engine config, keeping historical values as defaults so existing configs are unaffected
+
+### 🐛 Bug Fixes
+
+- Make the applied membership entry the single source of truth by persisting it to SM_META, rebuilding the nodes table from it, and recovering it on restart so get_last_membership no longer drifts from the raft core or promotes learners to voters
+- Atomically clear the KV column family in the first snapshot recovery WriteBatch so keys deleted after the snapshot point no longer survive install_snapshot and the recovering node exactly matches the snapshot state
+- Commit last_applied in the same WriteBatch as the applied data and sync snapshot progress and membership into _sm_meta after install_snapshot so applied_state and get_last_membership stay consistent with the restored state across crashes and restarts
+- Implement the vacuum_snapshot_files stub to keep only the newest snapshot directory and remove stale ones in the background, with POSIX-unlink-safe concurrent readers and best-effort per-directory removal, so repeated snapshot builds stop growing the disk unboundedly
+- Make snapshot IDs collision-proof by appending a process-wide atomic sequence to the timestamp-based ID, and guard vacuum_snapshot_files with that sequence so a build racing against another's background cleanup can never have its directory deleted before its pointer save lands, fixing both same-millisecond ID collisions and the NotFound failure the unique-ID regression test exposed
+- Shut down the raft runtime on RaftNode::shutdown to stop ghost elections and node races on restart, route get_members through the standard forward path so followers return the leader's applied membership instead of a stale local view, reject out-of-order snapshot chunk offsets and defuse the streaming-map unwrap panic, parse bracketed IPv6 endpoints like [::1]:8080 with round-trippable to_string, and drop the dead Cmd::Txn.result field plus outdated example README read-path docs
+
+### 🚜 Refactor
+
+- Delete the unused TTL value_meta chain (MetaSpec, Interval, with_ttl/with_expire_sec builders, and the display-more dependency) since TTL is handled at the application layer and nothing consumes it
+
+### ⚡ Performance
+
+- Route forwarded requests through the shared gRPC ClientPool instead of dialing per request, cap the forward retry loop with a 5s budget and jittered backoff, shorten the leader probe to 200ms, and atomically initialize per-address pools so follower-routed writes no longer pay a TCP/HTTP2 handshake per command or pile up for ~90s during elections
+- Schedule a background compaction over the purged log span after purge so tombstoned log entries actually return disk space instead of piling up as range-delete tombstones between compactions
+- Consume UpsertKV by value through the apply path and store pending writes as Bytes so the overlay reuses the decoded allocation instead of cloning keys and values, eliminating two heap copies per KV operation on the hot write path and turning transaction condition reads from a memcpy into a refcount bump
 ## [0.1.8] - 2026-09-14
 
 ### 🚀 Features
@@ -44,6 +69,7 @@
 - Add todo.md
 - Add todo.md
 - Update readme, add coredb
+- Release v0.1.8
 ## [0.1.7] - 2026-04-12
 
 ### 🚜 Refactor
