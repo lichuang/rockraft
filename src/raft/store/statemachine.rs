@@ -492,8 +492,17 @@ impl RocksStateMachine {
 
   /// Apply a membership entry from the raft log, making it the single
   /// source of truth for both the stored membership and the nodes table.
-  fn apply_membership(&self, membership: Membership<TypeConfig>) -> Result<(), io::Error> {
-    let stored = StoredMembership::new(None, membership);
+  ///
+  /// The entry's own `LogId` is part of that record: openraft orders stored
+  /// memberships by it (`StoredMembership`), uses it to decide which membership
+  /// is committed, and carries it into every `SnapshotMeta`. Storing `None`
+  /// makes the applied membership compare as older than any real one.
+  fn apply_membership(
+    &self,
+    log_id: LogId,
+    membership: Membership<TypeConfig>,
+  ) -> Result<(), io::Error> {
+    let stored = StoredMembership::new(Some(log_id), membership);
     info!("applying membership: {:?}", stored);
     self.set_last_membership(stored)
   }
@@ -663,13 +672,14 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     let mut pending_writes = PendingWrites::new();
 
     while let Some((entry, responder)) = entries.try_next().await? {
-      last_applied_log_id = Some(entry.log_id);
+      let log_id = entry.log_id;
+      last_applied_log_id = Some(log_id);
 
       let response = match entry.payload {
         EntryPayload::Blank => AppliedState::None,
         EntryPayload::Normal(req) => self.apply_cmd(req.cmd, &mut batch, &mut pending_writes)?,
         EntryPayload::Membership(membership) => {
-          self.apply_membership(membership)?;
+          self.apply_membership(log_id, membership)?;
           AppliedState::None
         }
       };
@@ -1099,10 +1109,16 @@ mod tests {
       .unwrap();
 
     // get_last_membership now comes from the stored entry: learners are kept
-    // as learners, not promoted to voters.
+    // as learners, not promoted to voters, and the entry keeps its own log id
+    // so openraft can order it against the memberships it tracks.
     let stored = sm.get_last_membership()?;
     let voter_ids: BTreeSet<_> = stored.membership().voter_ids().collect();
     assert_eq!(voter_ids, BTreeSet::from([1, 2]));
+    assert_eq!(
+      stored.log_id(),
+      &Some(create_log_id(1, 1, 1)),
+      "the applied membership must record the log id it came from"
+    );
 
     // nodes table was rebuilt from the membership (learners included)
     let nodes_now = sm.get_nodes()?;
@@ -1117,6 +1133,11 @@ mod tests {
     let recovered = sm2.get_last_membership()?;
     let recovered_voters: BTreeSet<_> = recovered.membership().voter_ids().collect();
     assert_eq!(recovered_voters, BTreeSet::from([1, 2]));
+    assert_eq!(
+      recovered.log_id(),
+      &Some(create_log_id(1, 1, 1)),
+      "the membership log id must survive a reopen"
+    );
 
     let recovered_nodes = sm2.get_nodes()?;
     assert_eq!(recovered_nodes.len(), 3);
@@ -1215,6 +1236,11 @@ mod tests {
     let recovered = sm2.get_last_membership()?;
     let recovered_voters: BTreeSet<_> = recovered.membership().voter_ids().collect();
     assert_eq!(recovered_voters, BTreeSet::from([1, 2]));
+    assert_eq!(
+      recovered.log_id(),
+      &None,
+      "the membership is stored exactly as the snapshot meta carries it"
+    );
     assert_eq!(sm2.get_nodes()?.len(), 2);
 
     Ok(())
