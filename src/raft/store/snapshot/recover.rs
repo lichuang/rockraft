@@ -66,18 +66,22 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
 /// Recovery Process:
 ///   1. Decompress snapshot data using zstd
 ///   2. Read entries in format: [key_len][key][value_len][value]
-///   3. First batch carries a `delete_range` over the whole KV column family
-///      plus the first chunk of snapshot entries, so the switch from old
-///      state to snapshot state is atomic — a crash before that batch
-///      commits leaves the old state intact, a crash after it leaves the
-///      snapshot state, and no half-cleared state is ever observable
-///   4. Subsequent batches only append snapshot entries
-///   5. Write any remaining entries in final batch
+///   3. Accumulate the whole snapshot -- the `delete_range` that clears the KV
+///      column family plus every restored entry -- into one `WriteBatch`
+///   4. Commit that batch once
+///
+/// Atomicity:
+///   A single `WriteBatch` is the only way RocksDB offers to switch the column
+///   family from one state to another without an intermediate state being
+///   observable. Committing in chunks would mean the `delete_range` lands
+///   first: a decode error or a crash after that commit leaves the node with
+///   part of the snapshot and no way to tell, and a restart would replay logs
+///   on top of it. The trade-off is memory: the batch holds the whole snapshot
+///   until it is committed.
 ///
 /// Performance:
-///   - Batch writing reduces database I/O operations
+///   - A single commit keeps the write path short
 ///   - Compression reduces disk I/O for snapshot files
-///   - Streaming approach minimizes memory usage
 fn do_recover_snapshot_sync(db: &Arc<DB>, snapshot_file: std::fs::File) -> Result<(), io::Error> {
   let cf_handle = db.cf_handle(SM_DATA_FAMILY).ok_or_else(|| {
     io::Error::new(
@@ -90,10 +94,11 @@ fn do_recover_snapshot_sync(db: &Arc<DB>, snapshot_file: std::fs::File) -> Resul
     zstd::Decoder::new(snapshot_file).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
 
   let mut batch = rocksdb::WriteBatch::default();
-  // Drop every pre-existing key in the KV column family atomically together
-  // with the first chunk of snapshot entries, so the target node ends up
-  // holding exactly the snapshot state — no stale keys from previously
-  // applied logs or older snapshots can survive the install.
+  // Drop every pre-existing key in the KV column family in the same batch as
+  // the restored entries, so the target node ends up holding exactly the
+  // snapshot state — no stale keys from previously applied logs or older
+  // snapshots can survive the install, and a failure before the commit leaves
+  // the old state untouched.
   // Bounds: empty begin = smallest key; a 64-byte 0xFF end covers every
   // realistic key (only a key of 64+ consecutive 0xFF bytes would exceed it).
   let empty_key: Vec<u8> = Vec::new();
@@ -121,17 +126,12 @@ fn do_recover_snapshot_sync(db: &Arc<DB>, snapshot_file: std::fs::File) -> Resul
 
     batch.put_cf(&cf_handle, key, value);
     count += 1;
-
-    if count.is_multiple_of(1000) {
-      db.write(batch).map_err(io::Error::other)?;
-      batch = rocksdb::WriteBatch::default();
-      info!("[metadata] Recovered {} entries so far...", count);
-    }
   }
 
-  if !batch.is_empty() {
-    db.write(batch).map_err(io::Error::other)?;
-  }
+  // One commit for the whole snapshot: the clear and the restore are one
+  // atomic switch, so a truncated or corrupt transfer never leaves a
+  // half-restored state behind.
+  db.write(batch).map_err(io::Error::other)?;
 
   info!("Successfully recovered {} entries from snapshot", count);
 
@@ -698,6 +698,74 @@ mod tests {
 
     let result = do_recover_snapshot_for_test(&db, snapshot).await;
     assert!(result.is_err(), "Expected error for corrupted key length");
+  }
+
+  /// A large snapshot that fails to decode must leave the target database
+  /// exactly as it was.
+  ///
+  /// Committing the clear plus the entries in chunks would make the first
+  /// commit wipe the column family and restore only the entries decoded so
+  /// far; the error then surfaces after the damage is done, and a restart
+  /// replays logs on top of a half-restored state. The payload below is larger
+  /// than the old 1000-entry commit boundary on purpose: it holds 3000 valid
+  /// entries followed by a length prefix no file can satisfy, so the failure
+  /// lands after the old code would have committed twice.
+  #[tokio::test]
+  async fn test_recover_snapshot_decode_error_leaves_db_untouched() {
+    let db = create_test_db();
+    let cf_handle = db.cf_handle(SM_DATA_FAMILY).unwrap();
+
+    db.put_cf(&cf_handle, b"existing-key", b"existing-value")
+      .unwrap();
+    db.put_cf(&cf_handle, b"existing-key-2", b"existing-value-2")
+      .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("corrupt-large.snapshot");
+
+    {
+      let file = std::fs::File::create(&snapshot_file_path).unwrap();
+      let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+      for i in 0..3000 {
+        let key = format!("key-{}", i);
+        let value = format!("value-{}", i);
+        encoder
+          .write_all(&(key.len() as u32).to_le_bytes())
+          .unwrap();
+        encoder.write_all(key.as_bytes()).unwrap();
+        encoder
+          .write_all(&(value.len() as u32).to_le_bytes())
+          .unwrap();
+        encoder.write_all(value.as_bytes()).unwrap();
+      }
+      // No key of this length can follow: the decoder fails here, after the
+      // 3000 entries above.
+      encoder.write_all(&0xFFFF_FFFFu32.to_le_bytes()).unwrap();
+      encoder.finish().unwrap();
+    }
+
+    let snapshot_meta = SnapshotMeta {
+      last_log_id: None,
+      last_membership: StoredMembership::new(None, Membership::default()),
+      snapshot_id: "corrupt-large-snapshot".to_string(),
+    };
+
+    let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
+    let snapshot = Snapshot {
+      meta: snapshot_meta,
+      snapshot: file,
+    };
+
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
+    assert!(result.is_err(), "a corrupt snapshot must not install");
+
+    assert_eq!(
+      count_db_entries(&db),
+      2,
+      "the old state must survive intact"
+    );
+    let value = db.get_cf(&cf_handle, b"existing-key").unwrap().unwrap();
+    assert_eq!(String::from_utf8(value).unwrap(), "existing-value");
   }
 
   #[tokio::test]
