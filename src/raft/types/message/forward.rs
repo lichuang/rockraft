@@ -66,6 +66,28 @@ pub enum RequestPayload {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ForwardRequest {
   pub body: RequestPayload,
+  /// How many nodes this request has already been forwarded through.
+  ///
+  /// Two nodes that disagree about who the leader is can otherwise bounce one
+  /// request between them indefinitely: every hop starts its own retry budget,
+  /// so the client-visible latency is bounded by nothing.
+  #[serde(default)]
+  pub hops: u32,
+}
+
+impl ForwardRequest {
+  /// Start a request at the origin node.
+  pub fn new(body: RequestPayload) -> Self {
+    Self { body, hops: 0 }
+  }
+
+  /// The same request one hop further along.
+  pub fn next_hop(&self) -> Self {
+    Self {
+      body: self.body.clone(),
+      hops: self.hops + 1,
+    }
+  }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

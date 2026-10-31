@@ -27,6 +27,19 @@ const RETRY_MAX_INTERVAL: Duration = Duration::from_secs(1);
 /// worst case was 20 attempts x 2s leader probe + backoff (~90s), which held
 /// client connections and amplified election-period pile-ups.
 const RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(5);
+/// Maximum number of nodes a forwarded request may pass through.
+///
+/// Forwarding is only a shortcut to the leader: after a couple of hops the
+/// node the request originated from is better off re-resolving leadership than
+/// letting two nodes that disagree bounce the request forever (every hop
+/// starts a fresh retry budget, so nothing else bounds it).
+const MAX_FORWARD_HOPS: u32 = 3;
+
+/// Whether a forwarded request has used up the hops it is allowed to take.
+fn hop_budget_exhausted(hops: u32) -> bool {
+  hops >= MAX_FORWARD_HOPS
+}
+
 /// When no leader is known, wait this long for one before reporting
 /// `NoLeader` and letting the retry loop back off. Previously every probe
 /// waited up to 2s, making each failed attempt cost 2s on top of the backoff.
@@ -111,6 +124,7 @@ impl RaftNode {
   pub(crate) async fn execute_or_forward(
     &self,
     payload: RequestPayload,
+    hops: u32,
   ) -> Result<ForwardResponse> {
     let deadline = tokio::time::Instant::now() + RETRY_TOTAL_BUDGET;
     for attempt in 0..MAX_RETRIES {
@@ -129,6 +143,7 @@ impl RaftNode {
                 leader_id,
                 ForwardRequest {
                   body: payload.clone(),
+                  hops: hops + 1,
                 },
               )
               .await
@@ -153,6 +168,7 @@ impl RaftNode {
               leader_id,
               ForwardRequest {
                 body: payload.clone(),
+                hops: hops + 1,
               },
             )
             .await
@@ -197,7 +213,18 @@ impl RaftNode {
   /// multi-hop redirects resolve on this node.
   pub async fn handle_forward_request(&self, request: ForwardRequest) -> Result<ForwardResponse> {
     debug!("recv forward req: {:?}", request);
-    self.execute_or_forward(request.body).await
+
+    if hop_budget_exhausted(request.hops) {
+      // Another hop would only extend a loop: report a retryable error so the
+      // origin re-resolves leadership instead.
+      debug!(
+        "forwarded request exceeded {} hops, returning it to the caller",
+        MAX_FORWARD_HOPS
+      );
+      return Err(Error::retryable_with_reason(RetryReason::LeaderTransition));
+    }
+
+    self.execute_or_forward(request.body, request.hops).await
   }
 
   // -- Private helpers --
@@ -294,5 +321,48 @@ impl RaftNode {
         Ok(ForwardResponse::GetMembers(result))
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::raft::types::GetKVReq;
+  use crate::raft::types::{decode, encode};
+
+  fn a_request() -> ForwardRequest {
+    ForwardRequest::new(RequestPayload::GetKV(GetKVReq {
+      key: "k".to_string(),
+    }))
+  }
+
+  #[test]
+  fn test_next_hop_counts_and_keeps_the_body() {
+    let origin = a_request();
+    assert_eq!(origin.hops, 0);
+
+    let hop1 = origin.next_hop();
+    assert_eq!(hop1.hops, 1);
+    assert_eq!(hop1.body, origin.body);
+
+    assert_eq!(origin.next_hop().next_hop().hops, 2);
+  }
+
+  #[test]
+  fn test_hop_budget_is_finite() {
+    assert!(!hop_budget_exhausted(0));
+    assert!(!hop_budget_exhausted(MAX_FORWARD_HOPS - 1));
+    assert!(
+      hop_budget_exhausted(MAX_FORWARD_HOPS),
+      "a request that used up its budget must not be forwarded again"
+    );
+    assert!(hop_budget_exhausted(MAX_FORWARD_HOPS + 1));
+  }
+
+  #[test]
+  fn test_hops_survive_the_wire_codec() {
+    let req = a_request().next_hop().next_hop();
+    let decoded: ForwardRequest = decode(&encode(&req).unwrap()).unwrap();
+    assert_eq!(decoded, req);
   }
 }
