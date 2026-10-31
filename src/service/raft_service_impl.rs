@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::SeekFrom;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,10 +39,49 @@ impl<T, E: std::fmt::Display> IntoStatus<T> for Result<T, E> {
 
 /// State for receiving a snapshot chunk
 struct StreamingSnapshot {
+  /// Where the chunks are assembled; removed once the install is over.
+  path: PathBuf,
   data: tokio::fs::File,
   created_at: Instant,
   /// Total bytes accepted so far; equals the next expected offset.
   received: u64,
+}
+
+/// Turn a fully received snapshot file into something `install_snapshot` can
+/// read.
+///
+/// The chunks were written at explicit offsets, so the handle's cursor sits at
+/// the end of the file while `install_snapshot` reads from the current
+/// position: rewinding is what makes the data visible to the zstd decoder.
+/// The length check catches a transfer whose last chunk was lost or replayed.
+async fn prepare_for_install(streaming: &mut StreamingSnapshot) -> Result<(), Status> {
+  streaming
+    .data
+    .flush()
+    .await
+    .map_internal("Failed to flush snapshot data")?;
+
+  let len = streaming
+    .data
+    .metadata()
+    .await
+    .map_internal("Failed to stat snapshot file")?
+    .len();
+
+  if len != streaming.received {
+    return Err(Status::invalid_argument(format!(
+      "Snapshot file holds {} bytes but {} were streamed",
+      len, streaming.received
+    )));
+  }
+
+  streaming
+    .data
+    .seek(SeekFrom::Start(0))
+    .await
+    .map_internal("Failed to rewind snapshot file")?;
+
+  Ok(())
 }
 
 pub struct RaftServiceImpl {
@@ -239,7 +279,15 @@ impl RaftService for RaftServiceImpl {
 
 impl RaftServiceImpl {
   fn evict_stale(&self, snapshots: &mut HashMap<String, StreamingSnapshot>) {
-    snapshots.retain(|_, s| s.created_at.elapsed() < STALE_SNAPSHOT_TIMEOUT);
+    snapshots.retain(|_, s| {
+      let fresh = s.created_at.elapsed() < STALE_SNAPSHOT_TIMEOUT;
+      if !fresh {
+        // Best effort: an abandoned transfer must not leave a partial file
+        // behind in the snapshot directory.
+        let _ = std::fs::remove_file(&s.path);
+      }
+      fresh
+    });
   }
 
   async fn ensure_streaming_entry(
@@ -260,6 +308,10 @@ impl RaftServiceImpl {
       )));
     }
 
+    let path = self
+      .node
+      .state_machine()
+      .snapshot_temp_file_path(snapshot_id);
     let std_file = self
       .node
       .state_machine()
@@ -269,6 +321,7 @@ impl RaftServiceImpl {
     snapshots.insert(
       snapshot_id.to_string(),
       StreamingSnapshot {
+        path,
         data: tokio::fs::File::from_std(std_file),
         created_at: Instant::now(),
         received: 0,
@@ -320,24 +373,97 @@ impl RaftServiceImpl {
     &self,
     vote: openraft::Vote<TypeConfig>,
     snapshot_meta: SnapshotMeta,
-    streaming: StreamingSnapshot,
+    mut streaming: StreamingSnapshot,
   ) -> Result<SnapshotResponse<TypeConfig>, Status> {
-    let mut file = streaming.data;
-    file
-      .shutdown()
-      .await
-      .map_internal("Failed to shutdown file")?;
+    prepare_for_install(&mut streaming).await?;
 
+    let StreamingSnapshot { path, data, .. } = streaming;
     let snapshot = Snapshot {
       meta: snapshot_meta,
-      snapshot: file,
+      snapshot: data,
     };
 
-    self
-      .node
-      .raft()
-      .install_full_snapshot(vote, snapshot)
-      .await
-      .map_internal("InstallFullSnapshot failed")
+    let res = self.node.raft().install_full_snapshot(vote, snapshot).await;
+
+    // The assembled file has served its purpose either way: a failed install
+    // is retried from offset 0, which recreates it.
+    let _ = tokio::fs::remove_file(&path).await;
+
+    res.map_err(|e| Status::internal(format!("InstallFullSnapshot failed: {}", e)))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use tokio::io::AsyncReadExt;
+
+  /// The receive path writes every chunk at its own offset, so the handle ends
+  /// up at EOF, while `install_snapshot` reads from the current position:
+  /// without the rewind the decoder sees an empty file and "recovers" nothing.
+  #[tokio::test]
+  async fn test_prepare_for_install_rewinds_the_streamed_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("streamed_incomplete");
+
+    // Same open options as `RocksStateMachine::create_snapshot_temp_file`:
+    // the handle is written through and then read back by the installer.
+    let std_file = std::fs::OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create(true)
+      .truncate(true)
+      .open(&path)
+      .unwrap();
+    let mut file = tokio::fs::File::from_std(std_file);
+
+    let payload: Vec<u8> = (0..=200u8).collect();
+    let mut offset = 0u64;
+    for chunk in payload.chunks(7) {
+      file.seek(SeekFrom::Start(offset)).await.unwrap();
+      file.write_all(chunk).await.unwrap();
+      offset += chunk.len() as u64;
+    }
+
+    let mut streaming = StreamingSnapshot {
+      path,
+      data: file,
+      created_at: Instant::now(),
+      received: offset,
+    };
+
+    prepare_for_install(&mut streaming).await.unwrap();
+
+    let mut got = Vec::new();
+    streaming.data.read_to_end(&mut got).await.unwrap();
+    assert_eq!(got, payload, "the installer must read from offset 0");
+  }
+
+  /// A transfer whose last chunk never arrived must not be installed: the
+  /// partial file would truncate the node's state to the bytes that did.
+  #[tokio::test]
+  async fn test_prepare_for_install_rejects_a_short_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("short_incomplete");
+
+    let std_file = std::fs::OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create(true)
+      .truncate(true)
+      .open(&path)
+      .unwrap();
+    let mut file = tokio::fs::File::from_std(std_file);
+    file.write_all(b"0123456789").await.unwrap();
+
+    let mut streaming = StreamingSnapshot {
+      path,
+      data: file,
+      created_at: Instant::now(),
+      received: 11,
+    };
+
+    let err = prepare_for_install(&mut streaming).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
   }
 }

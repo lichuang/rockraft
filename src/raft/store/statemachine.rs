@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io;
 use std::io::Error;
 use std::path::PathBuf;
@@ -109,12 +110,29 @@ impl Clone for RocksStateMachine {
 }
 
 impl RocksStateMachine {
+  /// Path of the file a streamed-in snapshot is assembled into.
+  ///
+  /// Kept separate from [`Self::create_snapshot_temp_file`] so the receiving
+  /// service can delete the file once the snapshot has been installed.
+  pub fn snapshot_temp_file_path(&self, snapshot_id: &str) -> PathBuf {
+    self
+      .snapshot_dir
+      .join(format!("{}_incomplete", snapshot_id))
+  }
+
+  /// Create the file a streamed-in snapshot is assembled into.
+  ///
+  /// Opened **read+write**: the receiving service writes the chunks through
+  /// this handle and then hands the very same handle to `install_snapshot`,
+  /// which reads it back. A write-only handle makes that read fail with
+  /// `EBADF`.
   pub fn create_snapshot_temp_file(&self, snapshot_id: &str) -> Result<File, io::Error> {
-    File::create(
-      self
-        .snapshot_dir
-        .join(format!("{}_incomplete", snapshot_id)),
-    )
+    OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create(true)
+      .truncate(true)
+      .open(self.snapshot_temp_file_path(snapshot_id))
   }
 
   fn lock_sys_data(&self) -> Result<std::sync::MutexGuard<'_, SysData>, io::Error> {
@@ -131,6 +149,9 @@ impl RocksStateMachine {
       .ok_or_else(|| Error::other("column family `_sm_data` not found"))?;
 
     let snapshot_dir = data_dir.join("snapshot");
+    // A node that has never built a snapshot still receives one, and the
+    // receive path assembles the transfer into this directory.
+    tokio::fs::create_dir_all(&snapshot_dir).await?;
     let sys_data = Self::recover_sys_data(&db)?;
 
     Ok(Self {
@@ -707,6 +728,9 @@ mod tests {
   use openraft::EntryPayload;
   use openraft::Membership;
   use openraft::storage::EntryResponder;
+  use tokio::io::AsyncReadExt;
+  use tokio::io::AsyncSeekExt;
+  use tokio::io::AsyncWriteExt;
 
   use crate::raft::types::TypeConfig;
 
@@ -1227,6 +1251,51 @@ mod tests {
     assert_eq!(recovered_node3.node_id, 3);
     assert_eq!(recovered_node3.endpoint.addr(), "127.0.0.1");
     assert_eq!(recovered_node3.endpoint.port(), 9093);
+
+    Ok(())
+  }
+
+  /// The snapshot-receive path assembles a transfer in a temp file and hands
+  /// that same handle to `install_snapshot`, which reads it back. The handle
+  /// must therefore be opened read+write, and its directory must exist even on
+  /// a node that has never built a snapshot itself.
+  #[tokio::test]
+  async fn test_snapshot_temp_file_is_readable_on_a_fresh_node() -> Result<(), io::Error> {
+    // A kept temp dir: the receive path has to create files in it, so it must
+    // outlive the constructor that produced the state machine.
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+    let sm = RocksStateMachine::new(engine.db().clone(), temp_data_dir)
+      .await
+      .unwrap();
+
+    let id = "streamed";
+    let path = sm.snapshot_temp_file_path(id);
+    assert!(!path.exists(), "fresh node must not have the temp file yet");
+
+    let std_file = sm.create_snapshot_temp_file(id)?;
+    let mut file = tokio::fs::File::from_std(std_file);
+
+    let payload = b"snapshot-bytes";
+    let mut offset = 0u64;
+    for chunk in payload.chunks(4) {
+      file.seek(std::io::SeekFrom::Start(offset)).await?;
+      file.write_all(chunk).await?;
+      offset += chunk.len() as u64;
+    }
+
+    file.seek(std::io::SeekFrom::Start(0)).await?;
+    let mut got = Vec::new();
+    file.read_to_end(&mut got).await?;
+    assert_eq!(got, payload, "the handle must be readable, not write-only");
+
+    assert_eq!(path, sm.snapshot_temp_file_path(id));
+    assert!(path.exists());
 
     Ok(())
   }
