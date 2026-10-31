@@ -209,10 +209,20 @@ fn do_recover_snapshot_sync(
   // snapshots can survive the install, and a failure before the commit leaves
   // the old state untouched.
   // Bounds: empty begin = smallest key; a 64-byte 0xFF end covers every
-  // realistic key (only a key of 64+ consecutive 0xFF bytes would exceed it).
+  // realistic key. The range end is exclusive, so keys at or beyond it -- any
+  // key of 64+ consecutive 0xFF bytes -- are deleted one by one below. Without
+  // that, the "exact copy of the snapshot" guarantee would have a hole.
   let empty_key: Vec<u8> = Vec::new();
   let max_key = vec![0xFF; 64];
   batch.delete_range_cf(&cf_handle, &empty_key, &max_key);
+  let beyond_range = db.iterator_cf(
+    &cf_handle,
+    rocksdb::IteratorMode::From(&max_key, rocksdb::Direction::Forward),
+  );
+  for item in beyond_range {
+    let (key, _value) = item.map_err(io::Error::other)?;
+    batch.delete_cf(&cf_handle, key);
+  }
 
   let mut count = 0u64;
   let mut bytes = 0u64;
@@ -790,6 +800,49 @@ mod tests {
 
     let value = db.get_cf(&cf_handle, b"fresh-key").unwrap().unwrap();
     assert_eq!(String::from_utf8(value).unwrap(), "fresh-value");
+  }
+
+  /// The wipe must cover the whole column family, including keys that sort at
+  /// or beyond the `delete_range` end. The range end is exclusive, so a key of
+  /// 64+ leading `0xFF` bytes used to survive an install that claims to leave
+  /// an exact copy of the snapshot.
+  #[tokio::test]
+  async fn test_recover_snapshot_clears_keys_past_the_range_end() {
+    let db = create_test_db();
+    let cf_handle = db.cf_handle(SM_DATA_FAMILY).unwrap();
+
+    let at_end = vec![0xFFu8; 64];
+    let past_end = vec![0xFFu8; 80];
+    db.put_cf(&cf_handle, &at_end, b"stale-1").unwrap();
+    db.put_cf(&cf_handle, &past_end, b"stale-2").unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("range-end.snapshot");
+    create_test_snapshot_file(snapshot_file_path.to_str().unwrap(), 1).await;
+
+    let snapshot_meta = SnapshotMeta {
+      last_log_id: None,
+      last_membership: StoredMembership::new(None, Membership::default()),
+      snapshot_id: "range-end-snapshot".to_string(),
+    };
+
+    let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
+    let snapshot = Snapshot {
+      meta: snapshot_meta,
+      snapshot: file,
+    };
+
+    do_recover_snapshot_for_test(&db, snapshot).await.unwrap();
+
+    assert!(
+      db.get_cf(&cf_handle, &at_end).unwrap().is_none(),
+      "a key equal to the range end must be cleared"
+    );
+    assert!(
+      db.get_cf(&cf_handle, &past_end).unwrap().is_none(),
+      "a key past the range end must be cleared"
+    );
+    assert_eq!(count_db_entries(&db), 1, "only the snapshot entry remains");
   }
 
   #[tokio::test]
