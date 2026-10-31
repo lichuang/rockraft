@@ -193,11 +193,11 @@ pub async fn build_snapshot(
   // This is a best-effort operation that runs asynchronously
   let snapshot_dir_owned = snapshot_dir.to_path_buf();
   let snapshot_id_clone = snapshot_id.clone();
-  let own_seq = seq;
+  let own_id = snapshot_id.clone();
   spawn(async move {
     // Attempt to remove old snapshots (keep only the latest one)
     // Errors are logged but don't fail the snapshot build operation
-    if let Err(e) = vacuum_snapshot_files(snapshot_dir_owned, snapshot_id_clone, own_seq) {
+    if let Err(e) = vacuum_snapshot_files(snapshot_dir_owned, snapshot_id_clone, own_id) {
       error!("Fail to cleanup old snapshot files: {}", e);
     }
   });
@@ -215,6 +215,18 @@ pub async fn build_snapshot(
   })
 }
 
+/// Ordering key of a snapshot id: `(timestamp, sequence)`.
+///
+/// `build_snapshot` formats ids as `{leader_id}-{index}-{timestamp}-{seq}` (or
+/// `0-0-{timestamp}-{seq}`); the leader id is the only part that may itself
+/// contain `-`, so the two numbers are taken from the right.
+fn snapshot_id_order(snapshot_id: &str) -> Option<(u64, u64)> {
+  let mut parts = snapshot_id.rsplitn(3, '-');
+  let seq = parts.next()?.parse::<u64>().ok()?;
+  let timestamp = parts.next()?.parse::<u64>().ok()?;
+  Some((timestamp, seq))
+}
+
 /// Clean up old snapshot files, keeping only the latest one
 ///
 /// Iterates the snapshot directory and removes every snapshot directory that
@@ -225,9 +237,8 @@ pub async fn build_snapshot(
 /// Arguments:
 ///   snapshot_dir: Directory containing all snapshots
 ///   fallback_id: The snapshot ID this vacuum was scheduled for
-///   own_seq: This build's embedded sequence; directories with a strictly
-///            larger trailing sequence belong to newer, possibly in-flight
-///            builds and are never removed
+///   own_id: This build's snapshot ID; a directory that sorts after it belongs
+///           to a newer, possibly in-flight build and is never removed
 ///
 /// Returns:
 ///   Result<(), io::Error>: Ok(()) on success or partial failure
@@ -236,16 +247,21 @@ pub async fn build_snapshot(
 ///   - Runs in the background after this build's data/meta files and the
 ///     `last_snapshot_id` pointer are durably updated.
 ///   - The pointer may have already moved to a newer build; the pointer is
-///     re-read at vacuum time, and the trailing sequence guard protects that
-///     build's directory even before its pointer save lands.
+///     re-read at vacuum time, and the ordering guard protects that build's
+///     directory even before its pointer save lands.
+///   - The comparison is on `(timestamp, sequence)`, not the sequence alone:
+///     the sequence is a process-wide counter that restarts at 0 with every
+///     process, so comparing it across a restart would protect every directory
+///     written by any earlier run and leak them forever.
 ///   - Deleting a directory that a concurrent reader still holds open is
 ///     safe on POSIX: unlink removes the name, and open file handles keep
 ///     working until closed, so an in-flight snapshot transfer is unaffected.
 fn vacuum_snapshot_files(
   snapshot_dir: PathBuf,
   fallback_id: String,
-  own_seq: u64,
+  own_id: String,
 ) -> Result<(), io::Error> {
+  let own_order = snapshot_id_order(&own_id);
   if !snapshot_dir.is_dir() {
     return Ok(());
   }
@@ -273,8 +289,8 @@ fn vacuum_snapshot_files(
 
     // Never touch directories from builds newer than this vacuum's own
     // build: their pointer save may still be in flight.
-    if let Some(dir_seq) = name.rsplit('-').next().and_then(|s| s.parse::<u64>().ok())
-      && dir_seq > own_seq
+    if let (Some(dir_order), Some(own_order)) = (snapshot_id_order(&name), own_order)
+      && dir_order > own_order
     {
       continue;
     }
@@ -288,8 +304,8 @@ fn vacuum_snapshot_files(
       );
     } else {
       info!(
-        "Removed stale snapshot directory '{}': it is neither the current snapshot pointer '{}' nor newer than this vacuum build (seq {})",
-        name, protected, own_seq
+        "Removed stale snapshot directory '{}': it is neither the current snapshot pointer '{}' nor newer than the build that scheduled this vacuum ('{}')",
+        name, protected, own_id
       );
     }
   }
@@ -820,7 +836,12 @@ mod vacuum_tests {
     let snapshot_dir = temp.path().join("snapshots");
     make_snapshot_layout(&snapshot_dir, &["snap-1", "snap-2", "snap-3"], "snap-3").await;
 
-    vacuum_snapshot_files(snapshot_dir.clone(), "snap-3".to_string(), 3).unwrap();
+    vacuum_snapshot_files(
+      snapshot_dir.clone(),
+      "snap-3".to_string(),
+      "snap-3".to_string(),
+    )
+    .unwrap();
 
     let remaining: Vec<_> = std::fs::read_dir(&snapshot_dir)
       .unwrap()
@@ -840,11 +861,48 @@ mod vacuum_tests {
     assert!(!snapshot_id_dir(&snapshot_dir, "snap-2").exists());
   }
 
+  /// The sequence in a snapshot id is a process-wide counter that restarts at
+  /// 0 on every process start, so it must not be compared across restarts:
+  /// a directory left behind by a previous run (timestamp 100, seq 5) is older
+  /// than this run's build (timestamp 200, seq 0) even though its sequence is
+  /// larger. Comparing sequences alone leaves it on disk forever.
+  #[tokio::test]
+  async fn test_vacuum_removes_stale_snapshots_from_an_earlier_process() {
+    let temp = tempdir().unwrap();
+    let snapshot_dir = temp.path().join("snapshots");
+
+    let own_id = "T1-N1-1-200-0";
+    let concurrent = "T1-N1-1-200-1"; // same millisecond, newer sequence
+    let stale = "T1-N1-1-100-5"; // previous process, higher sequence
+
+    make_snapshot_layout(&snapshot_dir, &[stale, own_id, concurrent], own_id).await;
+
+    vacuum_snapshot_files(snapshot_dir.clone(), own_id.to_string(), own_id.to_string()).unwrap();
+
+    assert!(
+      snapshot_id_dir(&snapshot_dir, own_id).exists(),
+      "the build that scheduled this vacuum stays"
+    );
+    assert!(
+      snapshot_id_dir(&snapshot_dir, concurrent).exists(),
+      "a newer build keeps its directory even before its pointer save lands"
+    );
+    assert!(
+      !snapshot_id_dir(&snapshot_dir, stale).exists(),
+      "a leftover from an earlier process must not be protected by its sequence"
+    );
+  }
+
   #[tokio::test]
   async fn test_vacuum_on_missing_directory_is_noop() {
     let temp = tempdir().unwrap();
     let snapshot_dir = temp.path().join("nonexistent");
-    vacuum_snapshot_files(snapshot_dir.clone(), "snap-x".to_string(), 0).unwrap();
+    vacuum_snapshot_files(
+      snapshot_dir.clone(),
+      "snap-x".to_string(),
+      "snap-x".to_string(),
+    )
+    .unwrap();
     assert!(!snapshot_dir.exists());
   }
 }
