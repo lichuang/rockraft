@@ -26,11 +26,10 @@ impl UpsertKV {
     }
   }
 
-  pub fn update(key: impl ToString, value: &[u8]) -> Self {
-    Self {
-      key: key.to_string(),
-      value: Operation::Update(value.to_vec()),
-    }
+  /// Alias of [`Self::insert`], kept for callers that spell the command
+  /// "update".
+  pub fn update(key: &str, value: &[u8]) -> Self {
+    Self::insert(key, value)
   }
 
   pub fn delete(key: impl ToString) -> Self {

@@ -17,7 +17,8 @@
 //!
 //! ## Features
 //!
-//! - ✅ **Strong Consistency** - All nodes maintain consistent state through Raft consensus
+//! - ✅ **Strong Consistency** - All nodes maintain consistent state through Raft consensus;
+//!   reads are **not** linearizable by default, see [`config::ReadConsistency`]
 //! - ✅ **Fault Tolerance** - Automatic leader election and failover
 //! - ✅ **High Performance** - RocksDB storage with efficient serialization (postcard)
 //! - ✅ **Easy Setup** - Simple configuration and cluster initialization
@@ -52,6 +53,14 @@
 //!     todo!("Load your configuration")
 //! }
 //! ```
+//!
+//! ## Read Consistency
+//!
+//! Writes are always linearizable. Reads are served by the leader's applied
+//! state by default, which can miss a just-committed write and can go stale if
+//! the leader was deposed without knowing. `Config::raft.read_consistency`
+//! selects the trade-off per node: `leader_applied` (default), `local_applied`,
+//! `lease_read`, or `read_index` (unconditionally linearizable).
 //!
 //! ## Module Overview
 //!
