@@ -368,7 +368,7 @@ mod tests {
   ///
   /// * `snapshot_dir` - The base snapshot directory path
   /// * `snapshot_id` - The snapshot ID to use
-  async fn create_test_snapshot(snapshot_dir: &PathBuf, snapshot_id: &str) {
+  async fn create_test_snapshot(snapshot_dir: &Path, snapshot_id: &str) {
     // Create last_snapshot_id file
     let last_snapshot_id_file = snapshot_last_snapshot_id_file(snapshot_dir);
     tokio::fs::write(&last_snapshot_id_file, snapshot_id)

@@ -308,7 +308,7 @@ mod tests {
       let actual_value = target_db
         .get_cf(&cf_handle_target, key.as_bytes())
         .unwrap()
-        .expect(format!("Entry {} should exist", key).as_str());
+        .unwrap_or_else(|| panic!("Entry {} should exist", key));
       assert_eq!(
         String::from_utf8(actual_value).unwrap(),
         expected_value,
@@ -389,7 +389,7 @@ mod tests {
       let actual_value = target_db
         .get_cf(&cf_handle_target, key.as_slice())
         .unwrap()
-        .expect(format!("Binary entry should exist: {:?}", key).as_str());
+        .unwrap_or_else(|| panic!("Binary entry should exist: {:?}", key));
       assert_eq!(
         actual_value, *expected_value,
         "Binary data mismatch for key {:?}",

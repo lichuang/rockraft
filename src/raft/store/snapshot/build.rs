@@ -422,13 +422,7 @@ mod tests {
       Membership::default(),
     );
 
-    let result = build_snapshot(
-      &db,
-      &snapshot_dir,
-      last_applied_log_id.clone(),
-      last_membership,
-    )
-    .await;
+    let result = build_snapshot(&db, &snapshot_dir, last_applied_log_id, last_membership).await;
 
     assert!(result.is_ok());
 
@@ -693,7 +687,7 @@ mod tests {
     let result = build_snapshot(
       &db,
       &snapshot_dir,
-      last_applied_log_id.clone(),
+      last_applied_log_id,
       last_membership.clone(),
     )
     .await;
