@@ -289,39 +289,6 @@ impl RocksStateMachine {
     Ok(StoredMembership::new(None, membership))
   }
 
-  /// Persist and cache the membership from an applied `EntryPayload::Membership`
-  /// entry, and rebuild the nodes table from it.
-  ///
-  /// The nodes table is derived from the membership's node map (voters and
-  /// learners alike) so that both views stay consistent with the membership
-  /// history applied through the raft log.
-  fn set_last_membership(&self, membership: StoredMembership) -> Result<(), io::Error> {
-    let mut sys_data = self.lock_sys_data()?;
-
-    let nodes: BTreeMap<NodeId, Node> = membership
-      .membership()
-      .nodes()
-      .map(|(id, node)| (*id, node.clone()))
-      .collect();
-
-    let data = encode(&membership).map_err(read_logs_err)?;
-    self
-      .db
-      .put_cf(&self.cf_sm_meta(), LAST_MEMBERSHIP_KEY, data)
-      .map_err(read_logs_err)?;
-
-    let nodes_data = encode(&nodes).map_err(read_logs_err)?;
-    self
-      .db
-      .put_cf(&self.cf_sm_meta(), NODES_KEY, nodes_data)
-      .map_err(read_logs_err)?;
-
-    sys_data.last_membership = Some(membership);
-    sys_data.nodes = nodes;
-
-    Ok(())
-  }
-
   /// Get a value from the KV store by key
   pub fn get_kv(&self, key: &str) -> Result<Option<Vec<u8>>, io::Error> {
     self
@@ -357,6 +324,9 @@ impl RocksStateMachine {
     Ok(results)
   }
 
+  /// Test helper: write the apply position on its own. Production code goes
+  /// through `apply()`, which carries it in the batch with the data.
+  #[cfg(test)]
   fn set_last_applied_log_id(&self, log_id: Option<LogId>) -> Result<(), io::Error> {
     let mut sys_data = self.lock_sys_data()?;
 
@@ -402,20 +372,6 @@ impl RocksStateMachine {
     Ok(())
   }
 
-  fn remove_node(&self, node_id: NodeId) -> Result<(), io::Error> {
-    let mut sys_data = self.lock_sys_data()?;
-
-    sys_data.nodes.remove(&node_id);
-
-    let data = encode(&sys_data.nodes).map_err(read_logs_err)?;
-    self
-      .db
-      .put_cf(&self.cf_sm_meta(), NODES_KEY, data)
-      .map_err(read_logs_err)?;
-
-    Ok(())
-  }
-
   fn stage_upsert_kv(
     &self,
     kv: UpsertKV,
@@ -437,17 +393,21 @@ impl RocksStateMachine {
   }
 
   /// Dispatch a command to its dedicated handler.
+  ///
+  /// KV writes are buffered in `batch`; metadata (nodes, membership) is
+  /// buffered in `sys_data`, which `apply()` writes into that same batch.
   fn apply_cmd(
     &self,
     cmd: Cmd,
     batch: &mut rocksdb::WriteBatch,
     pending: &mut PendingWrites,
+    sys_data: &mut SysData,
   ) -> Result<AppliedState, io::Error> {
     match cmd {
       Cmd::UpsertKV(kv) => self.apply_upsert_kv(kv, batch, pending),
       Cmd::BatchUpsertKV { entries } => self.apply_batch_upsert_kv(entries, batch, pending),
-      Cmd::AddNode { node, .. } => self.apply_add_node(&node),
-      Cmd::RemoveNode { node_id } => self.apply_remove_node(node_id),
+      Cmd::AddNode { node, .. } => self.apply_add_node(&node, sys_data),
+      Cmd::RemoveNode { node_id } => self.apply_remove_node(node_id, sys_data),
       Cmd::Txn { req } => self.apply_txn(req, batch, pending),
     }
   }
@@ -474,19 +434,21 @@ impl RocksStateMachine {
     Ok(AppliedState::None)
   }
 
-  fn apply_add_node(&self, node: &Node) -> Result<AppliedState, io::Error> {
-    let node_id = node.node_id;
+  fn apply_add_node(&self, node: &Node, sys_data: &mut SysData) -> Result<AppliedState, io::Error> {
     info!(
       "Applying AddNode command for node {} in state machine",
-      node_id
+      node.node_id
     );
-    self.add_node(node.clone())?;
-    info!("AddNode command applied successfully for node {}", node_id);
+    sys_data.nodes.insert(node.node_id, node.clone());
     Ok(AppliedState::None)
   }
 
-  fn apply_remove_node(&self, node_id: NodeId) -> Result<AppliedState, io::Error> {
-    self.remove_node(node_id)?;
+  fn apply_remove_node(
+    &self,
+    node_id: NodeId,
+    sys_data: &mut SysData,
+  ) -> Result<AppliedState, io::Error> {
+    sys_data.nodes.remove(&node_id);
     Ok(AppliedState::None)
   }
 
@@ -497,14 +459,29 @@ impl RocksStateMachine {
   /// memberships by it (`StoredMembership`), uses it to decide which membership
   /// is committed, and carries it into every `SnapshotMeta`. Storing `None`
   /// makes the applied membership compare as older than any real one.
+  ///
+  /// The result is staged in `sys_data` and written by `apply()` with the
+  /// batch, like every other metadata change.
   fn apply_membership(
     &self,
     log_id: LogId,
     membership: Membership<TypeConfig>,
+    sys_data: &mut SysData,
   ) -> Result<(), io::Error> {
     let stored = StoredMembership::new(Some(log_id), membership);
     info!("applying membership: {:?}", stored);
-    self.set_last_membership(stored)
+
+    // The nodes table is derived from the membership's node map (voters and
+    // learners alike) so that both views stay consistent with the membership
+    // history applied through the raft log.
+    sys_data.nodes = stored
+      .membership()
+      .nodes()
+      .map(|(id, node)| (*id, node.clone()))
+      .collect();
+    sys_data.last_membership = Some(stored);
+
+    Ok(())
   }
 
   fn apply_txn(
@@ -670,6 +647,11 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     let mut last_applied_log_id = None;
     let mut responses = Vec::new();
     let mut pending_writes = PendingWrites::new();
+    // Metadata this batch changes, staged in memory: the rafts node table and
+    // the applied membership. `apply()` writes them into the same WriteBatch as
+    // the KV data and publishes them to `sys_data` only after that write
+    // succeeds, so neither can ever run ahead of the data they describe.
+    let mut sys_data = self.lock_sys_data()?.clone();
 
     while let Some((entry, responder)) = entries.try_next().await? {
       let log_id = entry.log_id;
@@ -677,9 +659,11 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
 
       let response = match entry.payload {
         EntryPayload::Blank => AppliedState::None,
-        EntryPayload::Normal(req) => self.apply_cmd(req.cmd, &mut batch, &mut pending_writes)?,
+        EntryPayload::Normal(req) => {
+          self.apply_cmd(req.cmd, &mut batch, &mut pending_writes, &mut sys_data)?
+        }
         EntryPayload::Membership(membership) => {
-          self.apply_membership(log_id, membership)?;
+          self.apply_membership(log_id, membership, &mut sys_data)?;
           AppliedState::None
         }
       };
@@ -692,19 +676,39 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     // Persist the apply progress into the SAME WriteBatch as the data, so a
     // crash can never leave data applied without the matching progress record
     // (which would re-apply committed entries on restart and replay Txn
-    // responses with wrong prev_values).
+    // responses with wrong prev_values). The metadata the batch changed goes
+    // in with it, for the same reason.
     if let Some(last_applied_log_id) = last_applied_log_id {
       let data = encode(&last_applied_log_id).map_err(read_logs_err)?;
       batch.put_cf(&self.cf_sm_meta(), LAST_APPLIED_LOG_KEY, data);
+
+      let committed = self.lock_sys_data()?.clone();
+      if sys_data.nodes != committed.nodes {
+        let data = encode(&sys_data.nodes).map_err(read_logs_err)?;
+        batch.put_cf(&self.cf_sm_meta(), NODES_KEY, data);
+      }
+      if let Some(membership) = &sys_data.last_membership
+        && sys_data.last_membership != committed.last_membership
+      {
+        // Stored on its own, without the `Option` wrapper `recover_sys_data()`
+        // expects to find in the column family.
+        let data = encode(membership).map_err(read_logs_err)?;
+        batch.put_cf(&self.cf_sm_meta(), LAST_MEMBERSHIP_KEY, data);
+      }
+
+      sys_data.last_applied = Some(last_applied_log_id);
     }
 
-    // Atomic write of all data + apply progress
+    let applied = last_applied_log_id.is_some();
+
+    // Atomic write of all data + apply progress + metadata
     self.db.write(batch).map_err(read_logs_err)?;
 
-    // In-memory cache updates only after a successful write; skip entirely
-    // for an empty batch (last_applied_log_id is None) — DB state unchanged.
-    if let Some(last_applied_log_id) = last_applied_log_id {
-      self.set_last_applied_log_id(Some(last_applied_log_id))?;
+    // Publish to the in-memory cache only after a successful write; skip
+    // entirely for an empty batch (last_applied_log_id is None) — DB state
+    // unchanged.
+    if applied {
+      *self.lock_sys_data()? = sys_data;
     }
 
     // Only send responses after successful write
@@ -918,7 +922,7 @@ mod tests {
     sm1.add_node(node2)?;
 
     // Create a new state machine instance from the same database
-    let sm2 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
+    let mut sm2 = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
       .await
       .unwrap();
 
@@ -942,8 +946,12 @@ mod tests {
     assert_eq!(recovered_node2.endpoint.port(), 8082);
     drop(sys_data);
 
-    // Remove a node
-    sm2.remove_node(1)?;
+    // Remove a node through the apply path, which is the only writer now
+    apply_entries(
+      &mut sm2,
+      vec![create_apply_entry(50, Cmd::RemoveNode { node_id: 1 })],
+    )
+    .await;
 
     // Create another instance and verify
     let sm3 = RocksStateMachine::new(engine.db().clone(), temp_data_dir)
@@ -1371,6 +1379,56 @@ mod tests {
     Ok(())
   }
 
+  /// `Cmd::AddNode` used to write the node table straight to RocksDB, ahead of
+  /// the WriteBatch that carries the rest of the entry. It is staged now and
+  /// written with the batch, so reopening after the batch sees it alongside the
+  /// data the same batch applied.
+  #[tokio::test]
+  async fn test_apply_add_node_is_persisted_with_the_batch() -> Result<(), io::Error> {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+    let mut sm = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    let node = Node {
+      node_id: 7,
+      endpoint: Endpoint::new("127.0.0.1", 7007),
+    };
+    apply_entries(
+      &mut sm,
+      vec![
+        create_apply_entry(
+          1,
+          Cmd::AddNode {
+            node: node.clone(),
+            overriding: true,
+          },
+        ),
+        create_apply_entry(2, Cmd::UpsertKV(UpsertKV::insert("k", b"v"))),
+      ],
+    )
+    .await;
+
+    assert_eq!(sm.get_nodes()?.get(&7), Some(&node));
+
+    drop(sm);
+    let sm2 = RocksStateMachine::new(engine.db().clone(), temp_data_dir).await?;
+    assert_eq!(
+      sm2.get_nodes()?.get(&7),
+      Some(&node),
+      "the node table must land with the batch that applied it"
+    );
+    assert_eq!(sm2.get_kv("k")?, Some(b"v".to_vec()));
+    assert!(sm2.get_last_applied_log_id()?.is_some());
+
+    Ok(())
+  }
   #[tokio::test]
   async fn test_scan_prefix_basic() -> Result<(), io::Error> {
     let sm = create_test_state_machine().await;
