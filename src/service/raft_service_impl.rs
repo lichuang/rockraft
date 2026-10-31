@@ -291,18 +291,18 @@ impl RaftServiceImpl {
   /// across the wire.
   fn error_reply(err: &Error) -> pb::RaftReply {
     let api_err = ApiError::from_error(err);
-    match encode(&api_err) {
-      Ok(data) => pb::RaftReply {
-        data: Vec::new(),
-        error: data,
-      },
-      Err(e) => {
-        tracing::error!("Failed to serialize ApiError: {}", e);
-        pb::RaftReply {
-          data: Vec::new(),
-          error: format!("internal error: {}", err).into(),
-        }
-      }
+    let data = encode(&api_err).unwrap_or_else(|e| {
+      // Serializing a small enum of strings and an `Option<u64>` does not fail
+      // in practice. If it ever did, the reply still has to stay in the wire
+      // format every client decodes -- a human-readable string here would only
+      // trade the original error for "Failed to deserialize error response".
+      tracing::error!("Failed to serialize ApiError: {}", e);
+      encode(&ApiError::Internal("internal error".to_string())).unwrap_or_default()
+    });
+
+    pb::RaftReply {
+      data: Vec::new(),
+      error: data,
     }
   }
 }
@@ -820,5 +820,30 @@ mod tests {
     assert!(!path.exists(), "the assembled file must be removed");
 
     node.shutdown().await.unwrap();
+  }
+
+  /// `RaftReply.error` carries a postcard-encoded `ApiError`; every client
+  /// decodes it that way, so the server must never put anything else in there.
+  #[test]
+  fn test_error_reply_is_a_decodable_api_error() {
+    let reply = RaftServiceImpl::error_reply(&Error::internal("boom"));
+    assert!(reply.data.is_empty());
+
+    let decoded: ApiError = decode(&reply.error).expect("error must decode as ApiError");
+    assert_eq!(
+      decoded,
+      ApiError::Internal("internal error: boom".to_string())
+    );
+  }
+
+  /// A redirect keeps its leader id across the wire, which is what lets a
+  /// client forward the request instead of failing it.
+  #[test]
+  fn test_error_reply_keeps_the_redirect_target() {
+    let reply = RaftServiceImpl::error_reply(&Error::forward_to_leader(Some(7)));
+
+    let decoded: ApiError = decode(&reply.error).expect("error must decode as ApiError");
+    assert_eq!(decoded, ApiError::ForwardToLeader { leader_id: Some(7) });
+    assert_eq!(Error::from(decoded).forward_leader_id(), Some(7));
   }
 }
