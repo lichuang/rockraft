@@ -158,6 +158,32 @@ impl Clone for RocksStateMachine {
   }
 }
 
+/// Reject a snapshot id that cannot be used as a file name component.
+///
+/// The id arrives from a remote peer inside an `InstallSnapshot` request and
+/// ends up in a path, so `..`, separators or an absolute path would place the
+/// assembled file outside the snapshot directory. Ids produced by
+/// `build_snapshot` are `{leader_id}-{index}-{timestamp}-{seq}`, i.e. ASCII
+/// alphanumerics, `-`, `_` and `.`.
+fn check_snapshot_id(snapshot_id: &str) -> Result<(), io::Error> {
+  let valid = !snapshot_id.is_empty()
+    && snapshot_id.len() <= 255
+    && snapshot_id != "."
+    && snapshot_id != ".."
+    && snapshot_id
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+
+  if valid {
+    Ok(())
+  } else {
+    Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      format!("invalid snapshot id: {:?}", snapshot_id),
+    ))
+  }
+}
+
 impl RocksStateMachine {
   /// Path of the file a streamed-in snapshot is assembled into.
   ///
@@ -179,6 +205,7 @@ impl RocksStateMachine {
   /// which reads it back. A write-only handle makes that read fail with
   /// `EBADF`.
   pub fn create_snapshot_temp_file(&self, snapshot_id: &str) -> Result<File, io::Error> {
+    check_snapshot_id(snapshot_id)?;
     OpenOptions::new()
       .read(true)
       .write(true)
@@ -1563,6 +1590,55 @@ mod tests {
     );
     assert_eq!(sm2.get_kv("k")?, Some(b"v".to_vec()));
     assert!(sm2.get_last_applied_log_id()?.is_some());
+
+    Ok(())
+  }
+
+  /// The snapshot id comes from the peer that streams the snapshot and is used
+  /// as a file name; anything that could step out of the snapshot directory
+  /// must be rejected before it reaches the filesystem.
+  #[test]
+  fn test_check_snapshot_id_rejects_path_escapes() {
+    for bad in [
+      "",
+      ".",
+      "..",
+      "../escape",
+      "a/b",
+      "/etc/passwd",
+      "a\\b",
+      "id with space",
+      "id_with_newline\n",
+    ] {
+      assert!(
+        check_snapshot_id(bad).is_err(),
+        "snapshot id {:?} must be rejected",
+        bad
+      );
+    }
+
+    for good in [
+      "T3-N5-100-1234567890-1",
+      "0-0-1700000000000-7",
+      "snapshot_001",
+      "a.b",
+    ] {
+      assert!(
+        check_snapshot_id(good).is_ok(),
+        "snapshot id {:?} must be accepted",
+        good
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn test_create_snapshot_temp_file_rejects_escaping_id() -> Result<(), io::Error> {
+    let sm = create_test_state_machine().await;
+
+    let err = sm
+      .create_snapshot_temp_file("../../../etc/passwd")
+      .expect_err("an escaping id must not reach the filesystem");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 
     Ok(())
   }
