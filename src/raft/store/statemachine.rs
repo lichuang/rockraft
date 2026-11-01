@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io;
 use std::io::Error;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -22,6 +24,7 @@ use openraft::storage::RaftStateMachine;
 use rocksdb::BoundColumnFamily;
 use tracing::debug;
 use tracing::info;
+use tracing::warn;
 
 use rocksdb::DB;
 
@@ -98,6 +101,42 @@ fn evaluate_condition(expected: &TxnOp, actual: Option<&[u8]>) -> bool {
   }
 }
 
+/// Remove `*_incomplete` files left behind by a previous process.
+///
+/// The receive path tracks in-flight transfers only in memory, so a file that
+/// is still on disk at startup belongs to a transfer that can never resume.
+/// Sweeping it here keeps restarts from leaking snapshot-sized files forever
+/// (stale eviction only knows about transfers of this process).
+async fn remove_leftover_incomplete_files(snapshot_dir: &Path) -> io::Result<()> {
+  let mut entries = tokio::fs::read_dir(snapshot_dir).await?;
+
+  while let Some(entry) = entries.next_entry().await? {
+    if !entry.file_type().await?.is_file() {
+      continue;
+    }
+
+    let name = entry.file_name();
+    if !name.to_string_lossy().ends_with("_incomplete") {
+      continue;
+    }
+
+    let path = entry.path();
+    match tokio::fs::remove_file(&path).await {
+      Ok(()) => info!(
+        "Removed leftover snapshot file '{}': a streaming transfer from a previous process can never resume after restart",
+        path.display()
+      ),
+      Err(e) => warn!(
+        "Failed to remove leftover incomplete snapshot file '{}': {}",
+        path.display(),
+        e
+      ),
+    }
+  }
+
+  Ok(())
+}
+
 impl Clone for RocksStateMachine {
   fn clone(&self) -> Self {
     Self {
@@ -109,12 +148,32 @@ impl Clone for RocksStateMachine {
 }
 
 impl RocksStateMachine {
+  /// Path of the file a streamed-in snapshot is assembled into.
+  ///
+  /// Kept separate from [`Self::create_snapshot_temp_file`] so the receiving
+  /// service can delete the file once the snapshot has been installed.
+  ///
+  /// Crate-private: the on-disk naming of an in-flight transfer is an
+  /// implementation detail of the snapshot receive path, not public API.
+  pub(crate) fn snapshot_temp_file_path(&self, snapshot_id: &str) -> PathBuf {
+    self
+      .snapshot_dir
+      .join(format!("{}_incomplete", snapshot_id))
+  }
+
+  /// Create the file a streamed-in snapshot is assembled into.
+  ///
+  /// Opened **read+write**: the receiving service writes the chunks through
+  /// this handle and then hands the very same handle to `install_snapshot`,
+  /// which reads it back. A write-only handle makes that read fail with
+  /// `EBADF`.
   pub fn create_snapshot_temp_file(&self, snapshot_id: &str) -> Result<File, io::Error> {
-    File::create(
-      self
-        .snapshot_dir
-        .join(format!("{}_incomplete", snapshot_id)),
-    )
+    OpenOptions::new()
+      .read(true)
+      .write(true)
+      .create(true)
+      .truncate(true)
+      .open(self.snapshot_temp_file_path(snapshot_id))
   }
 
   fn lock_sys_data(&self) -> Result<std::sync::MutexGuard<'_, SysData>, io::Error> {
@@ -131,6 +190,13 @@ impl RocksStateMachine {
       .ok_or_else(|| Error::other("column family `_sm_data` not found"))?;
 
     let snapshot_dir = data_dir.join("snapshot");
+    // A node that has never built a snapshot still receives one, and the
+    // receive path assembles the transfer into this directory.
+    tokio::fs::create_dir_all(&snapshot_dir).await?;
+    // In-flight transfers live only in the gRPC service's in-memory map, so
+    // any `_incomplete` file still here belongs to a transfer that can never
+    // resume after this restart.
+    remove_leftover_incomplete_files(&snapshot_dir).await?;
     let sys_data = Self::recover_sys_data(&db)?;
 
     Ok(Self {
@@ -707,6 +773,9 @@ mod tests {
   use openraft::EntryPayload;
   use openraft::Membership;
   use openraft::storage::EntryResponder;
+  use tokio::io::AsyncReadExt;
+  use tokio::io::AsyncSeekExt;
+  use tokio::io::AsyncWriteExt;
 
   use crate::raft::types::TypeConfig;
 
@@ -1231,6 +1300,51 @@ mod tests {
     Ok(())
   }
 
+  /// The snapshot-receive path assembles a transfer in a temp file and hands
+  /// that same handle to `install_snapshot`, which reads it back. The handle
+  /// must therefore be opened read+write, and its directory must exist even on
+  /// a node that has never built a snapshot itself.
+  #[tokio::test]
+  async fn test_snapshot_temp_file_is_readable_on_a_fresh_node() -> Result<(), io::Error> {
+    // A kept temp dir: the receive path has to create files in it, so it must
+    // outlive the constructor that produced the state machine.
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+    let sm = RocksStateMachine::new(engine.db().clone(), temp_data_dir)
+      .await
+      .unwrap();
+
+    let id = "streamed";
+    let path = sm.snapshot_temp_file_path(id);
+    assert!(!path.exists(), "fresh node must not have the temp file yet");
+
+    let std_file = sm.create_snapshot_temp_file(id)?;
+    let mut file = tokio::fs::File::from_std(std_file);
+
+    let payload = b"snapshot-bytes";
+    let mut offset = 0u64;
+    for chunk in payload.chunks(4) {
+      file.seek(std::io::SeekFrom::Start(offset)).await?;
+      file.write_all(chunk).await?;
+      offset += chunk.len() as u64;
+    }
+
+    file.seek(std::io::SeekFrom::Start(0)).await?;
+    let mut got = Vec::new();
+    file.read_to_end(&mut got).await?;
+    assert_eq!(got, payload, "the handle must be readable, not write-only");
+
+    assert_eq!(path, sm.snapshot_temp_file_path(id));
+    assert!(path.exists());
+
+    Ok(())
+  }
+
   #[tokio::test]
   async fn test_scan_prefix_basic() -> Result<(), io::Error> {
     let sm = create_test_state_machine().await;
@@ -1368,6 +1482,37 @@ mod tests {
     );
     assert_eq!(map.get(b"config:port".as_slice()), Some(&b"8080".to_vec()));
     assert_eq!(map.get(b"config:timeout".as_slice()), Some(&b"30".to_vec()));
+
+    Ok(())
+  }
+
+  /// A restart must sweep `*_incomplete` files: the receive map is in-memory,
+  /// so a file left by a previous process can never be resumed or evicted.
+  #[tokio::test]
+  async fn test_new_removes_leftover_incomplete_snapshot_files() -> Result<(), io::Error> {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+
+    let snapshot_dir = temp_data_dir.join("snapshot");
+    std::fs::create_dir_all(&snapshot_dir).unwrap();
+
+    let leftover = snapshot_dir.join("leftover_incomplete");
+    let kept = snapshot_dir.join("keep.txt");
+    let built = snapshot_dir.join("1-1-123-0");
+    std::fs::write(&leftover, b"partial").unwrap();
+    std::fs::write(&kept, b"keep").unwrap();
+    std::fs::create_dir_all(&built).unwrap();
+
+    let _ = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone()).await?;
+
+    assert!(!leftover.exists(), "a leftover transfer file must be swept");
+    assert!(kept.exists(), "unrelated files must be kept");
+    assert!(built.exists(), "built snapshot directories must be kept");
 
     Ok(())
   }
