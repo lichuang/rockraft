@@ -287,7 +287,10 @@ fn vacuum_snapshot_files(
         e
       );
     } else {
-      info!("Vacuumed old snapshot directory {}", path.display());
+      info!(
+        "Removed stale snapshot directory '{}': it is neither the current snapshot pointer '{}' nor newer than this vacuum build (seq {})",
+        name, protected, own_seq
+      );
     }
   }
 
