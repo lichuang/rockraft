@@ -163,6 +163,18 @@ impl<'a> LeaderHandler<'a> {
       .any(|id| id == node_id)
   }
 
+  /// Whether `node_id` is still part of the membership, as a voter or a learner.
+  fn is_member(&self, node_id: NodeId) -> bool {
+    self
+      .raft()
+      .metrics()
+      .borrow_watched()
+      .membership_config
+      .membership()
+      .nodes()
+      .any(|(id, _)| *id == node_id)
+  }
+
   pub async fn add_node(&self, req: JoinRequest) -> Result<()> {
     let node_id = req.node_id;
     info!("Handling join request for node {}", node_id);
@@ -230,7 +242,8 @@ impl<'a> LeaderHandler<'a> {
 
   /// Remove a node from the cluster (leader-only)
   ///
-  /// Demotes to learner first, then removes from membership.
+  /// Drops the node from both the rafts membership and the node table the
+  /// cluster reports through `get_members`.
   /// Safe to call even if node is already not in cluster (idempotent).
   ///
   /// # Leader Requirement
@@ -238,7 +251,7 @@ impl<'a> LeaderHandler<'a> {
   pub async fn remove_node(&self, req: LeaveRequest) -> Result<()> {
     let node_id = req.node_id;
 
-    if !self.is_voter(node_id) {
+    if !self.is_member(node_id) {
       return Ok(());
     }
 
@@ -250,13 +263,27 @@ impl<'a> LeaderHandler<'a> {
       .await
       .map_err(|e| preserve_redirect(e, "Failed to leave node"))?;
 
-    // Change membership to remove the node
-    let mut remove_voters: BTreeSet<u64> = BTreeSet::new();
-    remove_voters.insert(node_id);
+    // Drop the node from the membership.
+    //
+    // `retain` decides whether a removed voter lives on as a learner. A leave
+    // has to mean gone: a retained learner keeps receiving replication and
+    // snapshots, and -- because the node table is rebuilt from the membership's
+    // nodes, learners included -- it also reappears in `get_members` right after
+    // the `Cmd::RemoveNode` above removed it.
+    let mut removed: BTreeSet<u64> = BTreeSet::new();
+    removed.insert(node_id);
+
+    let change = if self.is_voter(node_id) {
+      ChangeMembers::RemoveVoters(removed)
+    } else {
+      // A learner left over from an earlier removal: `RemoveVoters` would not
+      // touch it.
+      ChangeMembers::RemoveNodes(removed)
+    };
 
     self
       .raft()
-      .change_membership(remove_voters, true)
+      .change_membership(change, false)
       .await
       .map_err(|e| map_client_write_err(e, "Failed to leave node"))?;
 

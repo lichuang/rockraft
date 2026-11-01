@@ -2548,6 +2548,144 @@ class TestSnapshot:
             node4_conf_path.unlink(missing_ok=True)
 
 
+class TestLeave:
+    """Test that leaving removes the node from the cluster entirely.
+
+    Regression test for `remove_node` using `retain = true`: the removed node
+    stayed in the membership as a learner, kept receiving replication and
+    snapshots, and reappeared in `/members` as soon as the membership entry was
+    applied, because the node table is rebuilt from the membership nodes
+    (learners included).
+    """
+
+    NODE_NAME = "node4"
+    NODE_ID = 4
+    HTTP_PORT = 8004
+    RAFT_PORT = 7004
+    DATA_DIR = Path("/tmp/rockraft_cluster/node4")
+
+    def _write_node_config(self) -> Path:
+        conf_path = BASE_DIR / "conf" / f"{self.NODE_NAME}.toml"
+        conf_path.write_text(
+            f"node_id = {self.NODE_ID}\n"
+            f'http_addr = "127.0.0.1:{self.HTTP_PORT}"\n'
+            "\n"
+            "[raft]\n"
+            f'address = "127.0.0.1:{self.RAFT_PORT}"\n'
+            'advertise_host = "localhost"\n'
+            'join = ["localhost:7001"]\n'
+            "\n"
+            "[rocksdb]\n"
+            f'data_path = "{self.DATA_DIR}"\n'
+            "max_open_files = 10000\n"
+            "\n"
+            "[log]\n"
+            f'file = "/tmp/rockraft_cluster/logs/{self.NODE_NAME}.log"\n'
+            'level = "info"\n'
+        )
+        return conf_path
+
+    @staticmethod
+    def _member_ids(cluster: ClusterClient, port: int) -> set:
+        result = cluster.query_members(port)
+        return {int(node_id) for node_id in result.get("members", {})}
+
+    def _wait_for_members(self, cluster: ClusterClient, expected: set, timeout: float = 30.0) -> None:
+        """Wait until every remaining node reports exactly `expected` members."""
+        deadline = time.time() + timeout
+        observed = {}
+        while time.time() < deadline:
+            for port in HTTP_PORTS:
+                try:
+                    observed[port] = self._member_ids(cluster, port)
+                except Exception as e:
+                    observed[port] = f"error: {e}"
+            if all(observed.get(port) == expected for port in HTTP_PORTS):
+                return
+            time.sleep(0.5)
+        raise AssertionError(f"members did not converge to {expected}: {observed}")
+
+    def _wait_for_membership_config_without(
+        self, cluster: ClusterClient, node_id: int, timeout: float = 30.0
+    ) -> None:
+        """Wait until no node's committed membership lists `node_id` at all.
+
+        This covers voters *and* learners: `retain = true` left the removed
+        node in the membership's node map, which is exactly what kept it
+        receiving replication and made `/members` list it again.
+        """
+        deadline = time.time() + timeout
+        observed = {}
+        while time.time() < deadline:
+            all_clean = True
+            for port in HTTP_PORTS:
+                try:
+                    membership = cluster.get_metrics(port)["membership"]["membership"]
+                except Exception as e:
+                    observed[port] = f"error: {e}"
+                    all_clean = False
+                    continue
+                voters = {int(n) for config in membership.get("configs", []) for n in config}
+                nodes = {int(n) for n in membership.get("nodes", {})}
+                observed[port] = {"voters": voters, "nodes": nodes}
+                if node_id in voters or node_id in nodes:
+                    all_clean = False
+            if all_clean:
+                return
+            time.sleep(0.5)
+        raise AssertionError(
+            f"node {node_id} is still in the membership config: {observed}"
+        )
+
+    def test_leave_removes_the_node_from_membership(self, cluster: ClusterClient):
+        """A leaving node must disappear from `/members` and the membership."""
+        import shutil
+
+        conf_path = self._write_node_config()
+        data_dir = self.DATA_DIR
+        shutil.rmtree(data_dir, ignore_errors=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        node_started = False
+        try:
+            cluster.start_node(self.NODE_NAME)
+            node_started = True
+
+            result = cluster.join_node(
+                HTTP_PORTS[0], self.NODE_ID, f"127.0.0.1:{self.RAFT_PORT}"
+            )
+            assert result.get("success") is True, f"join failed: {result}"
+            self._wait_for_members(cluster, {1, 2, 3, 4})
+
+            result = cluster.leave_node(HTTP_PORTS[0], self.NODE_ID)
+            assert result.get("success") is True, f"leave failed: {result}"
+
+            # The leave is committed when it returns. Stop the removed node so
+            # a zombie process cannot campaign against the remaining nodes while
+            # the assertions below run.
+            cluster.stop_node(self.NODE_NAME)
+            node_started = False
+
+            # The regression: with retain=true the node survived as a learner
+            # and /members kept listing it.
+            self._wait_for_members(cluster, {1, 2, 3})
+            self._wait_for_membership_config_without(cluster, self.NODE_ID)
+
+            # The remaining cluster must still have a quorum and accept writes.
+            result = cluster.set_value(HTTP_PORTS[0], "leave_regression_key", "ok")
+            assert result.get("success") is True, f"write after leave failed: {result}"
+
+            # Leaving an already removed node is a no-op, not an error.
+            result = cluster.leave_node(HTTP_PORTS[0], self.NODE_ID)
+            assert result.get("success") is True, f"second leave failed: {result}"
+            self._wait_for_members(cluster, {1, 2, 3})
+        finally:
+            if node_started:
+                cluster.stop_node(self.NODE_NAME)
+            conf_path.unlink(missing_ok=True)
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+
 def main():
     """Main entry point for direct execution."""
     pytest.main([__file__, "-v"])
