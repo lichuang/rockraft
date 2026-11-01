@@ -267,9 +267,15 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
   async fn truncate_after(&mut self, log_id: Option<LogIdOf<TypeConfig>>) -> Result<(), io::Error> {
     tracing::debug!("truncate_after: [{:?}, +oo)", log_id);
 
-    // If log_id is None, truncate everything
+    // openraft defines this as truncating the logs **after** `log_id`, exclusive:
+    // the entry at `log_id.index()` itself must survive. openraft never re-reads
+    // an entry once it has accepted it, so deleting the anchor leaves a hole in
+    // the log that surfaces only as a silently missing committed entry in the
+    // state machine.
+    //
+    // If log_id is None, truncate everything.
     let from = match log_id {
-      Some(ref id) => id_to_bin(id.index()),
+      Some(ref id) => id_to_bin(id.index() + 1),
       None => id_to_bin(0),
     };
     let to = id_to_bin(u64::MAX);
@@ -359,8 +365,14 @@ mod tests {
     log_store
       .truncate_after(Some(create_log_id(1, 1, 11)))
       .await?;
-    assert_eq!(log_store.try_get_log_entries(1..=15).await?.len(), 10);
-    assert_eq!(log_store.try_get_log_entries(11..=15).await?.len(), 0);
+    assert_eq!(log_store.try_get_log_entries(1..=15).await?.len(), 11);
+    assert_eq!(log_store.try_get_log_entries(11..=15).await?.len(), 1);
+    assert_eq!(
+      log_store.try_get_log_entries(11..=15).await?[0]
+        .log_id
+        .index,
+      11
+    );
 
     log_store.purge(create_log_id(1, 1, 5)).await?;
     assert_eq!(log_store.get_last_purged_log_id()?.unwrap().index, 5);
@@ -374,6 +386,47 @@ mod tests {
     assert_eq!(final_logs.len(), 8);
     assert_eq!(final_logs[0].log_id.leader_id.term, 1);
     assert_eq!(final_logs[5].log_id.leader_id.term, 2);
+
+    Ok(())
+  }
+
+  /// openraft defines `truncate_after(last_log_id)` as deleting the logs
+  /// `(last_log_id, +oo)` and keeping `last_log_id` itself
+  /// (`storage/v2/raft_log_storage.rs`, "Truncate logs after `last_log_id`,
+  /// exclusive").
+  ///
+  /// This is not a cosmetic detail. Openraft truncates a follower's log to the
+  /// last entry it shares with the leader and then appends from the next index.
+  /// Deleting the shared anchor as well leaves a hole that openraft never
+  /// revisits -- it keeps no per-entry liveness check, it trusts `last_log_id`
+  /// -- so the follower ends up missing a committed entry and can later commit
+  /// on top of that state.
+  #[tokio::test]
+  async fn test_truncate_after_keeps_the_anchor_entry() -> Result<(), io::Error> {
+    let mut log_store = create_test_log_store();
+
+    let entries: Vec<_> = (1..=10).map(|i| create_entry(1, 1, i)).collect();
+    append_entries(&mut log_store, entries).await?;
+
+    log_store
+      .truncate_after(Some(create_log_id(1, 1, 5)))
+      .await?;
+
+    let kept: Vec<u64> = log_store
+      .try_get_log_entries(0..=10)
+      .await?
+      .iter()
+      .map(|e| e.log_id.index)
+      .collect();
+    assert_eq!(kept, vec![1, 2, 3, 4, 5], "the anchor entry must survive");
+    assert_eq!(
+      log_store.get_log_state().await?.last_log_id,
+      Some(create_log_id(1, 1, 5)),
+      "the log must not report an index it no longer has"
+    );
+
+    log_store.truncate_after(None).await?;
+    assert_eq!(log_store.try_get_log_entries(0..=10).await?.len(), 0);
 
     Ok(())
   }
