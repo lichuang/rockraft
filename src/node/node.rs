@@ -109,7 +109,12 @@ impl RaftNode {
     )?);
 
     let data_dir = PathBuf::from(&config.rocksdb.data_path);
-    let (log_store, state_machine) = store::create_stores(&engine, data_dir).await?;
+    // A log entry has to fit the gRPC message cap to be replicated at all, so
+    // the same cap (doubled for headroom) bounds what a snapshot may contain:
+    // anything above it could be written here but never installed on a peer.
+    let max_snapshot_entry_bytes = config.raft.grpc_max_message_size().saturating_mul(2);
+    let (log_store, state_machine) =
+      store::create_stores(&engine, data_dir, max_snapshot_entry_bytes).await?;
 
     let client_pool = Arc::new(ClientPool::new_with_config(
       options.client_pool_size,

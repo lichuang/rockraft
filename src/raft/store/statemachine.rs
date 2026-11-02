@@ -33,6 +33,7 @@ use super::keys::LAST_MEMBERSHIP_KEY;
 use super::keys::NODES_KEY;
 use super::keys::SM_DATA_FAMILY;
 use super::keys::SM_META_FAMILY;
+use super::snapshot::DEFAULT_SNAPSHOT_ENTRY_LIMIT;
 use super::snapshot::build_snapshot;
 use super::snapshot::get_current_snapshot;
 use crate::raft::store::snapshot::recover_snapshot;
@@ -73,6 +74,10 @@ pub struct RocksStateMachine {
   // path used by `init_cluster` runs before raft starts applying entries and
   // writes the node table immediately.
   sys_data: Arc<Mutex<SysData>>,
+  /// Largest key or value a snapshot entry may claim, derived from the node's
+  /// gRPC message cap: an entry this node accepted for replication must also
+  /// be installable from a snapshot.
+  max_snapshot_entry_bytes: usize,
 }
 
 /// Writes buffered in the current apply batch but not yet committed.
@@ -147,6 +152,7 @@ impl Clone for RocksStateMachine {
       db: self.db.clone(),
       snapshot_dir: self.snapshot_dir.clone(),
       sys_data: self.sys_data.clone(),
+      max_snapshot_entry_bytes: self.max_snapshot_entry_bytes,
     }
   }
 }
@@ -188,6 +194,20 @@ impl RocksStateMachine {
   }
 
   pub async fn new(db: Arc<DB>, data_dir: PathBuf) -> Result<RocksStateMachine, Error> {
+    Self::new_with_snapshot_entry_limit(db, data_dir, DEFAULT_SNAPSHOT_ENTRY_LIMIT).await
+  }
+
+  /// Create a state machine that accepts snapshot entries up to
+  /// `max_snapshot_entry_bytes` per key or value.
+  ///
+  /// [`Self::new`] uses [`DEFAULT_SNAPSHOT_ENTRY_LIMIT`]; a node derives the
+  /// limit from its own `grpc_max_message_size`, because an entry larger than
+  /// this bound can be replicated but never installed.
+  pub(crate) async fn new_with_snapshot_entry_limit(
+    db: Arc<DB>,
+    data_dir: PathBuf,
+    max_snapshot_entry_bytes: usize,
+  ) -> Result<RocksStateMachine, Error> {
     db.cf_handle(SM_META_FAMILY)
       .ok_or_else(|| Error::other("column family `_sm_meta` not found"))?;
     db.cf_handle(SM_DATA_FAMILY)
@@ -207,6 +227,7 @@ impl RocksStateMachine {
       db,
       snapshot_dir,
       sys_data: Arc::new(Mutex::new(sys_data)),
+      max_snapshot_entry_bytes,
     })
   }
 
@@ -589,7 +610,12 @@ impl RocksStateMachine {
       .map(|(id, node)| (*id, node.clone()))
       .collect();
 
-    let mut sys_data = self.lock_sys_data()?;
+    // A poisoned lock means a previous holder panicked; the data is still
+    // sound, and turning that into a storage error would stop the raft core.
+    let mut sys_data = self
+      .sys_data
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
     sys_data.last_applied = meta.last_log_id;
     sys_data.last_membership = Some(meta.last_membership.clone());
     sys_data.nodes = nodes;
@@ -726,6 +752,7 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
         meta: meta.clone(),
         snapshot,
       },
+      self.max_snapshot_entry_bytes,
     )
     .await?;
 
@@ -1381,6 +1408,60 @@ mod tests {
     assert_eq!(recovered_node3.node_id, 3);
     assert_eq!(recovered_node3.endpoint.addr(), "127.0.0.1");
     assert_eq!(recovered_node3.endpoint.port(), 9093);
+
+    Ok(())
+  }
+
+  /// The entry bound is a property of the node, not a constant: a state
+  /// machine created with a small limit must refuse a snapshot the default
+  /// limit would have accepted.
+  #[tokio::test]
+  async fn test_install_snapshot_honours_the_entry_limit() -> Result<(), io::Error> {
+    use std::io::Write as _;
+
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+    let mut sm = RocksStateMachine::new_with_snapshot_entry_limit(
+      engine.db().clone(),
+      temp_data_dir.clone(),
+      4,
+    )
+    .await
+    .unwrap();
+
+    let payload = {
+      let mut out = Vec::new();
+      let mut encoder = zstd::Encoder::new(&mut out, 3).unwrap();
+      encoder.write_all(&1u32.to_le_bytes()).unwrap();
+      encoder.write_all(b"k").unwrap();
+      // a five-byte value: one byte past this state machine's limit
+      encoder.write_all(&5u32.to_le_bytes()).unwrap();
+      encoder.write_all(b"abcde").unwrap();
+      encoder.finish().unwrap();
+      out
+    };
+
+    let path = temp_data_dir.join("limited.snapshot");
+    std::fs::write(&path, payload)?;
+
+    let meta = SnapshotMeta {
+      last_log_id: None,
+      last_membership: StoredMembership::default(),
+      snapshot_id: "limited".to_string(),
+    };
+    let file = tokio::fs::File::open(&path).await.unwrap();
+    let err = sm.install_snapshot(&meta, file).await.unwrap_err();
+
+    assert!(
+      err.to_string().contains("exceeds the 4 byte limit"),
+      "the install must use the state machine's own limit, got: {}",
+      err
+    );
 
     Ok(())
   }

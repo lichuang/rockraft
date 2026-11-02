@@ -3,6 +3,7 @@ mod recover;
 mod util;
 
 pub use build::build_snapshot;
+pub(crate) use recover::DEFAULT_SNAPSHOT_ENTRY_LIMIT;
 pub use recover::recover_snapshot;
 pub use util::get_current_snapshot;
 
@@ -98,7 +99,7 @@ mod tests {
     assert_eq!(count, 0, "Target database should be empty initially");
 
     // Step 4: Recover snapshot to target database
-    recover_snapshot(&target_db, snapshot)
+    recover_snapshot(&target_db, snapshot, DEFAULT_SNAPSHOT_ENTRY_LIMIT)
       .await
       .expect("Failed to recover snapshot");
 
@@ -205,7 +206,7 @@ mod tests {
       .expect("column family not found");
 
     // Step 4: Recover empty snapshot
-    recover_snapshot(&target_db, snapshot)
+    recover_snapshot(&target_db, snapshot, DEFAULT_SNAPSHOT_ENTRY_LIMIT)
       .await
       .expect("Failed to recover empty snapshot");
 
@@ -282,7 +283,7 @@ mod tests {
       .cf_handle(SM_DATA_FAMILY)
       .expect("column family not found");
 
-    recover_snapshot(&target_db, snapshot)
+    recover_snapshot(&target_db, snapshot, DEFAULT_SNAPSHOT_ENTRY_LIMIT)
       .await
       .expect("Failed to recover large snapshot");
 
@@ -379,7 +380,7 @@ mod tests {
       .cf_handle(SM_DATA_FAMILY)
       .expect("column family not found");
 
-    recover_snapshot(&target_db, snapshot)
+    recover_snapshot(&target_db, snapshot, DEFAULT_SNAPSHOT_ENTRY_LIMIT)
       .await
       .expect("Failed to recover snapshot with binary data");
 

@@ -21,38 +21,45 @@ use crate::raft::types::SnapshotMeta;
 use crate::raft::types::encode;
 use crate::raft::types::read_logs_err;
 
-/// Upper bound for one snapshot entry (its key or its value).
+/// Default upper bound for one snapshot entry (its key or its value).
 ///
 /// The length prefix is a `u32` read from a stream that may be corrupt: without
 /// a bound, one bad prefix asks for a multi-gigabyte allocation and can abort
 /// the receiving node. A raft log entry has to fit the gRPC message cap to be
-/// replicated at all, so twice the default cap leaves headroom for a
-/// legitimate entry while refusing an absurd one. Raise this if a deployment
-/// configures a larger `grpc_max_message_size`.
-const MAX_SNAPSHOT_ENTRY_BYTES: usize = DEFAULT_GRPC_MAX_MESSAGE_SIZE * 2;
-
-/// Read an entry key or value, refusing implausible lengths before allocating.
+/// replicated at all, so twice the cap leaves headroom for a legitimate entry
+/// while refusing an absurd one.
 ///
-/// `scratch` is a caller-owned read buffer, so no per-entry allocation is
-/// needed. It must be initialized once; `read_exact` overwrites exactly the
-/// prefix used for each entry, so it does not need to be cleared between
-/// entries.
-fn read_entry_bytes(
+/// This is the value used by [`RocksStateMachine::new`]; the node itself passes
+/// the limit derived from its own `grpc_max_message_size`, because an entry
+/// this node accepted for replication must also be installable from a snapshot.
+pub(crate) const DEFAULT_SNAPSHOT_ENTRY_LIMIT: usize = DEFAULT_GRPC_MAX_MESSAGE_SIZE * 2;
+
+/// Read an entry key or value into `out`, refusing implausible lengths before
+/// allocating.
+///
+/// `scratch` is a caller-owned read buffer and `out` is a caller-owned
+/// destination, so the decode loop allocates nothing after its first iteration:
+/// `WriteBatch::put_cf` copies the bytes before the next entry is read, which
+/// makes reusing both buffers safe. `read_exact` overwrites exactly the prefix
+/// it uses, so neither needs to be cleared between entries.
+fn read_entry_into(
   decoder: &mut impl Read,
   len: usize,
+  limit: usize,
   scratch: &mut [u8],
-) -> io::Result<Vec<u8>> {
-  if len > MAX_SNAPSHOT_ENTRY_BYTES {
+  out: &mut Vec<u8>,
+) -> io::Result<()> {
+  if len > limit {
     return Err(io::Error::new(
       ErrorKind::InvalidData,
       format!(
         "snapshot entry length {} exceeds the {} byte limit",
-        len, MAX_SNAPSHOT_ENTRY_BYTES
+        len, limit
       ),
     ));
   }
 
-  let mut out = Vec::new();
+  out.clear();
   out.try_reserve_exact(len).map_err(|e| {
     io::Error::new(
       ErrorKind::InvalidData,
@@ -72,7 +79,7 @@ fn read_entry_bytes(
     remaining -= n;
   }
 
-  Ok(out)
+  Ok(())
 }
 
 /// Recover the state machine from a snapshot, blocking until it completes.
@@ -89,7 +96,11 @@ fn read_entry_bytes(
 /// Returns:
 ///   Result<(), io::Error>: Ok(()) once the snapshot state and its metadata are
 ///   committed to the DB in one atomic batch
-pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io::Error> {
+pub async fn recover_snapshot(
+  db: &Arc<DB>,
+  snapshot: Snapshot,
+  max_entry_bytes: usize,
+) -> Result<(), io::Error> {
   let snapshot_id = snapshot.meta.snapshot_id.clone();
   let meta = snapshot.meta.clone();
 
@@ -103,7 +114,7 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
   // async runtime but await its completion before returning.
   spawn_blocking(move || {
     let snapshot_file = futures::executor::block_on(snapshot.snapshot.into_std());
-    do_recover_snapshot_sync(&db_clone, snapshot_file, &meta)
+    do_recover_snapshot_sync(&db_clone, snapshot_file, &meta, max_entry_bytes)
   })
   .await
   .map_err(|e| io::Error::other(format!("Snapshot recovery task failed: {}", e)))??;
@@ -158,6 +169,7 @@ fn do_recover_snapshot_sync(
   db: &Arc<DB>,
   snapshot_file: std::fs::File,
   meta: &SnapshotMeta,
+  max_entry_bytes: usize,
 ) -> Result<(), io::Error> {
   let cf_handle = db.cf_handle(SM_DATA_FAMILY).ok_or_else(|| {
     io::Error::new(
@@ -187,11 +199,15 @@ fn do_recover_snapshot_sync(
   let max_key = vec![0xFF; 64];
   batch.delete_range_cf(&cf_handle, &empty_key, &max_key);
   let mut count = 0u64;
+  let mut bytes = 0u64;
+  let started = std::time::Instant::now();
   let mut len_buf = [0u8; 4];
-  // Prepared once for the whole snapshot and reused by every entry. It is
-  // zero-initialized here; `read_exact` overwrites the prefix it uses, so it
-  // does not need to be cleared between entries.
-  let mut scratch = [0u8; 64 * 1024];
+  // Allocated once and reused by every entry: `put_cf` copies the bytes into
+  // the batch before the next entry is decoded, and `read_exact` overwrites
+  // only the prefix it uses, so nothing has to be cleared between entries.
+  let mut scratch = vec![0u8; 64 * 1024];
+  let mut key_buf = Vec::new();
+  let mut value_buf = Vec::new();
 
   loop {
     match decoder.read_exact(&mut len_buf) {
@@ -200,14 +216,27 @@ fn do_recover_snapshot_sync(
       Err(e) => return Err(e),
     }
     let key_len = u32::from_le_bytes(len_buf) as usize;
-    let key = read_entry_bytes(&mut decoder, key_len, &mut scratch)?;
+    read_entry_into(
+      &mut decoder,
+      key_len,
+      max_entry_bytes,
+      &mut scratch,
+      &mut key_buf,
+    )?;
 
     decoder.read_exact(&mut len_buf)?;
     let value_len = u32::from_le_bytes(len_buf) as usize;
-    let value = read_entry_bytes(&mut decoder, value_len, &mut scratch)?;
+    read_entry_into(
+      &mut decoder,
+      value_len,
+      max_entry_bytes,
+      &mut scratch,
+      &mut value_buf,
+    )?;
 
-    batch.put_cf(&cf_handle, key, value);
+    batch.put_cf(&cf_handle, &key_buf, &value_buf);
     count += 1;
+    bytes += (key_len + value_len) as u64;
   }
 
   // The metadata `applied_state()` reports goes into the same batch as the KV
@@ -239,7 +268,12 @@ fn do_recover_snapshot_sync(
   // leaves a half-restored state behind.
   db.write(batch).map_err(io::Error::other)?;
 
-  info!("Successfully recovered {} entries from snapshot", count);
+  info!(
+    "Recovered {} entries ({} bytes) from snapshot in {:?}",
+    count,
+    bytes,
+    started.elapsed()
+  );
 
   Ok(())
 }
@@ -343,7 +377,7 @@ mod tests {
   async fn do_recover_snapshot_for_test(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io::Error> {
     let meta = snapshot.meta.clone();
     let snapshot_file = snapshot.snapshot.into_std().await;
-    do_recover_snapshot_sync(db, snapshot_file, &meta)
+    do_recover_snapshot_sync(db, snapshot_file, &meta, DEFAULT_SNAPSHOT_ENTRY_LIMIT)
   }
 
   /// Test Point: Basic snapshot recovery functionality
@@ -536,7 +570,7 @@ mod tests {
     };
 
     // recover_snapshot awaits recovery completion; data is available immediately
-    let result = recover_snapshot(&db, snapshot).await;
+    let result = recover_snapshot(&db, snapshot, DEFAULT_SNAPSHOT_ENTRY_LIMIT).await;
     assert!(result.is_ok());
 
     // Verify the correct number of entries were recovered (5)
@@ -912,25 +946,43 @@ mod tests {
     );
   }
 
-  /// `read_entry_bytes` reuses the caller's scratch buffer. A longer entry
-  /// followed by a shorter one must not leak any of the previous bytes: on
-  /// success `read_exact` fills exactly the prefix that is then copied, so no
-  /// per-call clear is needed.
+  /// `read_entry_into` reuses the caller's buffers. A longer entry followed by
+  /// a shorter one must not leak any of the previous bytes: on success
+  /// `read_exact` fills exactly the prefix that is then copied, so no per-call
+  /// clear is needed.
   #[test]
-  fn test_read_entry_bytes_does_not_leak_stale_scratch_data() {
+  fn test_read_entry_into_does_not_leak_stale_buffer_data() {
     use std::io::Cursor;
 
-    // Simulate a scratch left over from a previous, longer entry.
+    // Simulate buffers left over from a previous, longer entry.
     let mut scratch = [0xAAu8; 128];
+    let mut out = b"0123456789".to_vec();
 
     let mut first = Cursor::new(b"first-value".to_vec());
-    let got = read_entry_bytes(&mut first, 11, &mut scratch).unwrap();
-    assert_eq!(got, b"first-value");
+    read_entry_into(&mut first, 11, 1024, &mut scratch, &mut out).unwrap();
+    assert_eq!(out, b"first-value");
 
-    // Only these two bytes may be copied; the 0xAA tail must not leak.
+    // Only these two bytes may be copied; the previous tail must not leak.
     let mut second = Cursor::new(b"xy".to_vec());
-    let got = read_entry_bytes(&mut second, 2, &mut scratch).unwrap();
-    assert_eq!(got, b"xy");
+    read_entry_into(&mut second, 2, 1024, &mut scratch, &mut out).unwrap();
+    assert_eq!(out, b"xy");
+  }
+
+  /// The bound comes from the caller, so a node that raised its gRPC message
+  /// cap can install entries the default limit would refuse.
+  #[test]
+  fn test_read_entry_into_honours_the_caller_limit() {
+    use std::io::Cursor;
+
+    let mut scratch = [0u8; 16];
+    let mut out = Vec::new();
+
+    let mut data = Cursor::new(b"abcde".to_vec());
+    read_entry_into(&mut data, 5, 4, &mut scratch, &mut out).unwrap_err();
+
+    let mut data = Cursor::new(b"abcde".to_vec());
+    read_entry_into(&mut data, 5, 5, &mut scratch, &mut out).unwrap();
+    assert_eq!(out, b"abcde");
   }
 
   /// A length prefix that claims an implausible entry size is rejected before
@@ -948,7 +1000,7 @@ mod tests {
     {
       let file = std::fs::File::create(&snapshot_file_path).unwrap();
       let mut encoder = zstd::Encoder::new(file, 3).unwrap();
-      let too_big = (MAX_SNAPSHOT_ENTRY_BYTES + 1) as u32;
+      let too_big = (DEFAULT_SNAPSHOT_ENTRY_LIMIT + 1) as u32;
       encoder.write_all(&too_big.to_le_bytes()).unwrap();
       encoder.finish().unwrap();
     }
