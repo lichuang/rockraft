@@ -57,17 +57,21 @@ use crate::raft::types::read_logs_err;
 pub struct RocksStateMachine {
   db: Arc<DB>,
   snapshot_dir: PathBuf,
-  // In-memory write-through cache of small metadata (nodes, last_applied_log_id)
-  // that is also persisted to RocksDB (SM_META column family).
+  // In-memory cache of small state-machine metadata (nodes, last_applied,
+  // last_membership), also persisted to the SM_META column family.
   //
   // Why not read from RocksDB directly?
-  // - apply() processes a stream of log entries; cached `nodes` and `last_applied`
-  //   must be visible to subsequent entries within the same batch before the
-  //   WriteBatch is committed.
+  // - apply() processes a stream of log entries; the metadata must be visible
+  //   to later entries within the same batch before the WriteBatch is
+  //   committed.
   // - Avoids repeated RocksDB meta-CF lookups on every applied entry.
   //
-  // Invariant: every mutation (add_node, set_last_applied_log_id) updates both
-  // this cache *and* RocksDB atomically.
+  // apply() stages metadata changes on a working copy and writes them into the
+  // same WriteBatch as the KV data; this cache is replaced only after that
+  // write succeeds, so neither the cache nor RocksDB can run ahead of the data
+  // they describe. `add_node` is the one deliberate exception: the bootstrap
+  // path used by `init_cluster` runs before raft starts applying entries and
+  // writes the node table immediately.
   sys_data: Arc<Mutex<SysData>>,
 }
 
@@ -358,6 +362,12 @@ impl RocksStateMachine {
     Ok(self.lock_sys_data()?.nodes.contains_key(&node_id))
   }
 
+  /// Insert a node into the node table immediately.
+  ///
+  /// This is the bootstrap path used by `init_cluster` before `raft.initialize()`,
+  /// and the only metadata write that bypasses `apply()` and its `WriteBatch`.
+  /// Membership changes that arrive through the raft log go through
+  /// `Cmd::AddNode` / `EntryPayload::Membership` and are staged by `apply()`.
   pub fn add_node(&self, node: Node) -> Result<(), io::Error> {
     let mut sys_data = self.lock_sys_data()?;
 
@@ -1149,6 +1159,76 @@ mod tests {
 
     let recovered_nodes = sm2.get_nodes()?;
     assert_eq!(recovered_nodes.len(), 3);
+
+    Ok(())
+  }
+
+  /// Re-applying the same membership at a new log id must still be persisted:
+  /// `StoredMembership`'s equality includes its log id, so the staged
+  /// `LAST_MEMBERSHIP_KEY` write is not skipped as a no-op.
+  #[tokio::test]
+  async fn test_membership_log_id_updates_on_reapply_and_survives_reopen() -> Result<(), io::Error>
+  {
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+    let mut sm = RocksStateMachine::new(engine.db().clone(), temp_data_dir.clone())
+      .await
+      .unwrap();
+
+    let mut voters = BTreeSet::new();
+    voters.insert(1);
+    voters.insert(2);
+    let mut nodes = BTreeMap::new();
+    for node_id in 1..=2u64 {
+      nodes.insert(
+        node_id,
+        Node {
+          node_id,
+          endpoint: Endpoint::new("127.0.0.1", 7000 + node_id as u32),
+        },
+      );
+    }
+    let membership = Membership::new(vec![voters], nodes).unwrap();
+
+    let first_log_id = create_log_id(1, 1, 10);
+    let second_log_id = create_log_id(2, 2, 20);
+
+    for log_id in [first_log_id, second_log_id] {
+      let entries = vec![(
+        Entry {
+          log_id,
+          payload: EntryPayload::Membership(membership.clone()),
+        },
+        None,
+      )];
+      sm.apply(stream::iter(entries.into_iter().map(Ok)))
+        .await
+        .unwrap();
+
+      let stored = sm.get_last_membership()?;
+      assert_eq!(
+        stored.log_id(),
+        &Some(log_id),
+        "the live membership must follow the entry it was applied from"
+      );
+    }
+
+    // Reopen: the second log id is the one staged into SM_META. If the staged
+    // write compared only membership content, it would have been skipped as a
+    // no-op and this would still hold the first log id.
+    drop(sm);
+    let sm2 = RocksStateMachine::new(engine.db().clone(), temp_data_dir).await?;
+    let recovered = sm2.get_last_membership()?;
+    assert_eq!(
+      recovered.log_id(),
+      &Some(second_log_id),
+      "re-applying the same membership at a new log id must update the stored position"
+    );
 
     Ok(())
   }
