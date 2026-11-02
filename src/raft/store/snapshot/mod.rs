@@ -18,6 +18,7 @@ mod tests {
   use tempfile::tempdir;
 
   use crate::raft::store::keys::SM_DATA_FAMILY;
+  use crate::raft::store::keys::SM_META_FAMILY;
 
   /// Integration test: Build and recover snapshot with data
   ///
@@ -478,7 +479,7 @@ mod tests {
     let mut opts = rocksdb::Options::default();
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);
-    let db = DB::open_cf(&opts, temp_dir.path(), vec![SM_DATA_FAMILY]).unwrap();
+    let db = DB::open_cf(&opts, temp_dir.path(), vec![SM_DATA_FAMILY, SM_META_FAMILY]).unwrap();
 
     std::mem::forget(temp_dir);
     Arc::new(db)
@@ -497,7 +498,7 @@ mod tests {
     let mut opts = rocksdb::Options::default();
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);
-    let db = DB::open_cf(&opts, temp_dir.path(), vec![SM_DATA_FAMILY]).unwrap();
+    let db = DB::open_cf(&opts, temp_dir.path(), vec![SM_DATA_FAMILY, SM_META_FAMILY]).unwrap();
 
     std::mem::forget(temp_dir);
     Arc::new(db)

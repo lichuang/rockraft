@@ -572,49 +572,23 @@ impl RocksStateMachine {
     Ok(self.get_kv(key)?.map(Bytes::from))
   }
 
-  /// Write the snapshot's apply progress and membership into _sm_meta and
-  /// the in-memory sys_data cache.
+  /// Publish the snapshot's apply progress and membership into the in-memory
+  /// cache.
   ///
-  /// The membership overwrites any previously stored entry unconditionally:
-  /// the snapshot represents a state strictly newer than or equal to the
-  /// local one (openraft only installs snapshots that advance the position).
-  fn sync_snapshot_meta(&self, meta: &SnapshotMeta) -> Result<(), io::Error> {
-    let cf_meta = self.cf_sm_meta();
-
-    if let Some(last_log_id) = &meta.last_log_id {
-      let last_applied_data = encode(last_log_id).map_err(read_logs_err)?;
-      self
-        .db
-        .put_cf(&cf_meta, LAST_APPLIED_LOG_KEY, last_applied_data)
-        .map_err(read_logs_err)?;
-    } else {
-      self
-        .db
-        .delete_cf(&cf_meta, LAST_APPLIED_LOG_KEY)
-        .map_err(read_logs_err)?;
-    }
-
-    let membership_data = encode(&meta.last_membership).map_err(read_logs_err)?;
-    self
-      .db
-      .put_cf(&cf_meta, LAST_MEMBERSHIP_KEY, membership_data)
-      .map_err(read_logs_err)?;
-
-    // Rebuild the nodes table from the snapshot membership so both views
-    // agree (same invariant as applying a Membership log entry).
+  /// The database copy is written by `recover_snapshot` in the same
+  /// `WriteBatch` as the KV data, so a crash can never leave `applied_state()`
+  /// describing a position the KV state has not reached (or vice versa). This
+  /// only updates the cache, after that batch has been committed.
+  fn publish_snapshot_meta(&self, meta: &SnapshotMeta) -> Result<(), io::Error> {
+    // Rebuild the nodes table from the snapshot membership so both views agree
+    // (same invariant as applying a Membership log entry).
     let nodes: BTreeMap<NodeId, Node> = meta
       .last_membership
       .membership()
       .nodes()
       .map(|(id, node)| (*id, node.clone()))
       .collect();
-    let nodes_data = encode(&nodes).map_err(read_logs_err)?;
-    self
-      .db
-      .put_cf(&cf_meta, NODES_KEY, nodes_data)
-      .map_err(read_logs_err)?;
 
-    // In-memory cache updates only after a successful write
     let mut sys_data = self.lock_sys_data()?;
     sys_data.last_applied = meta.last_log_id;
     sys_data.last_membership = Some(meta.last_membership.clone());
@@ -755,12 +729,9 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     )
     .await?;
 
-    // After the KV data is restored, sync the apply progress and membership
-    // recorded in the snapshot meta into _sm_meta/sys_data. applied_state()
-    // and get_last_membership() read from there on restart — without this
-    // sync they would report a pre-snapshot position and membership while
-    // the KV state is already at the snapshot position.
-    self.sync_snapshot_meta(meta)
+    // `recover_snapshot` committed the KV data and _sm_meta together; publish
+    // the same values to the in-memory cache so live reads agree with the DB.
+    self.publish_snapshot_meta(meta)
   }
 
   async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot>, io::Error> {

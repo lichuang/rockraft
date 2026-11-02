@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::io::{self};
@@ -7,8 +8,72 @@ use rocksdb::DB;
 use tokio::task::spawn_blocking;
 use tracing::info;
 
+use crate::config::DEFAULT_GRPC_MAX_MESSAGE_SIZE;
+use crate::raft::store::keys::LAST_APPLIED_LOG_KEY;
+use crate::raft::store::keys::LAST_MEMBERSHIP_KEY;
+use crate::raft::store::keys::NODES_KEY;
 use crate::raft::store::keys::SM_DATA_FAMILY;
+use crate::raft::store::keys::SM_META_FAMILY;
+use crate::raft::types::Node;
+use crate::raft::types::NodeId;
 use crate::raft::types::Snapshot;
+use crate::raft::types::SnapshotMeta;
+use crate::raft::types::encode;
+use crate::raft::types::read_logs_err;
+
+/// Upper bound for one snapshot entry (its key or its value).
+///
+/// The length prefix is a `u32` read from a stream that may be corrupt: without
+/// a bound, one bad prefix asks for a multi-gigabyte allocation and can abort
+/// the receiving node. A raft log entry has to fit the gRPC message cap to be
+/// replicated at all, so twice the default cap leaves headroom for a
+/// legitimate entry while refusing an absurd one. Raise this if a deployment
+/// configures a larger `grpc_max_message_size`.
+const MAX_SNAPSHOT_ENTRY_BYTES: usize = DEFAULT_GRPC_MAX_MESSAGE_SIZE * 2;
+
+/// Read an entry key or value, refusing implausible lengths before allocating.
+///
+/// `scratch` is a caller-owned read buffer, so no per-entry allocation is
+/// needed. It must be initialized once; `read_exact` overwrites exactly the
+/// prefix used for each entry, so it does not need to be cleared between
+/// entries.
+fn read_entry_bytes(
+  decoder: &mut impl Read,
+  len: usize,
+  scratch: &mut [u8],
+) -> io::Result<Vec<u8>> {
+  if len > MAX_SNAPSHOT_ENTRY_BYTES {
+    return Err(io::Error::new(
+      ErrorKind::InvalidData,
+      format!(
+        "snapshot entry length {} exceeds the {} byte limit",
+        len, MAX_SNAPSHOT_ENTRY_BYTES
+      ),
+    ));
+  }
+
+  let mut out = Vec::new();
+  out.try_reserve_exact(len).map_err(|e| {
+    io::Error::new(
+      ErrorKind::InvalidData,
+      format!("cannot allocate {} bytes for a snapshot entry: {}", len, e),
+    )
+  })?;
+
+  // Fill the output in bounded steps: a corrupt length with little data behind
+  // it fails on the first short read, having touched only this chunk. Reading
+  // through the reusable scratch buffer means the destination is written once
+  // (by `extend_from_slice`) instead of being zero-filled and then overwritten.
+  let mut remaining = len;
+  while remaining > 0 {
+    let n = remaining.min(scratch.len());
+    decoder.read_exact(&mut scratch[..n])?;
+    out.extend_from_slice(&scratch[..n]);
+    remaining -= n;
+  }
+
+  Ok(out)
+}
 
 /// Recover the state machine from a snapshot, blocking until it completes.
 ///
@@ -22,9 +87,11 @@ use crate::raft::types::Snapshot;
 ///   snapshot: The snapshot containing data to recover
 ///
 /// Returns:
-///   Result<(), io::Error>: Ok(()) once all entries are written to the DB
+///   Result<(), io::Error>: Ok(()) once the snapshot state and its metadata are
+///   committed to the DB in one atomic batch
 pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io::Error> {
   let snapshot_id = snapshot.meta.snapshot_id.clone();
+  let meta = snapshot.meta.clone();
 
   info!(
     "Starting to recover from snapshot, snapshot_id={}",
@@ -36,7 +103,7 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
   // async runtime but await its completion before returning.
   spawn_blocking(move || {
     let snapshot_file = futures::executor::block_on(snapshot.snapshot.into_std());
-    do_recover_snapshot_sync(&db_clone, snapshot_file)
+    do_recover_snapshot_sync(&db_clone, snapshot_file, &meta)
   })
   .await
   .map_err(|e| io::Error::other(format!("Snapshot recovery task failed: {}", e)))??;
@@ -54,11 +121,13 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
 /// This function handles the core recovery logic:
 /// - Reads and decompresses snapshot data
 /// - Clears the KV column family, then restores snapshot key-value pairs
-/// - Uses WriteBatch for efficient bulk writes (every 1000 entries)
+/// - Stages the clear, every restored entry, and the snapshot metadata
+///   (apply progress, membership, nodes) into a single `WriteBatch`
 ///
 /// Arguments:
 ///   db: Reference to the RocksDB instance for data recovery
-///   snapshot: The snapshot containing compressed data to recover
+///   snapshot_file: The decompressed snapshot payload
+///   meta: Metadata of the snapshot being installed
 ///
 /// Returns:
 ///   Result<(), io::Error>: Ok(()) on success, error on failure
@@ -67,7 +136,8 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
 ///   1. Decompress snapshot data using zstd
 ///   2. Read entries in format: [key_len][key][value_len][value]
 ///   3. Accumulate the whole snapshot -- the `delete_range` that clears the KV
-///      column family plus every restored entry -- into one `WriteBatch`
+///      column family, every restored entry, and the metadata `applied_state()`
+///      reports -- into one `WriteBatch`
 ///   4. Commit that batch once
 ///
 /// Atomicity:
@@ -76,17 +146,29 @@ pub async fn recover_snapshot(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io
 ///   observable. Committing in chunks would mean the `delete_range` lands
 ///   first: a decode error or a crash after that commit leaves the node with
 ///   part of the snapshot and no way to tell, and a restart would replay logs
-///   on top of it. The trade-off is memory: the batch holds the whole snapshot
-///   until it is committed.
+///   on top of it. The metadata goes into the same batch for the same reason:
+///   `applied_state()` must never describe a position the KV data has not
+///   reached (or vice versa). The trade-off is memory: the batch holds the
+///   whole snapshot until it is committed.
 ///
 /// Performance:
 ///   - A single commit keeps the write path short
 ///   - Compression reduces disk I/O for snapshot files
-fn do_recover_snapshot_sync(db: &Arc<DB>, snapshot_file: std::fs::File) -> Result<(), io::Error> {
+fn do_recover_snapshot_sync(
+  db: &Arc<DB>,
+  snapshot_file: std::fs::File,
+  meta: &SnapshotMeta,
+) -> Result<(), io::Error> {
   let cf_handle = db.cf_handle(SM_DATA_FAMILY).ok_or_else(|| {
     io::Error::new(
       ErrorKind::NotFound,
       format!("Column family {} not found", SM_DATA_FAMILY),
+    )
+  })?;
+  let cf_meta = db.cf_handle(SM_META_FAMILY).ok_or_else(|| {
+    io::Error::new(
+      ErrorKind::NotFound,
+      format!("Column family {} not found", SM_META_FAMILY),
     )
   })?;
 
@@ -106,6 +188,10 @@ fn do_recover_snapshot_sync(db: &Arc<DB>, snapshot_file: std::fs::File) -> Resul
   batch.delete_range_cf(&cf_handle, &empty_key, &max_key);
   let mut count = 0u64;
   let mut len_buf = [0u8; 4];
+  // Prepared once for the whole snapshot and reused by every entry. It is
+  // zero-initialized here; `read_exact` overwrites the prefix it uses, so it
+  // does not need to be cleared between entries.
+  let mut scratch = [0u8; 64 * 1024];
 
   loop {
     match decoder.read_exact(&mut len_buf) {
@@ -114,23 +200,43 @@ fn do_recover_snapshot_sync(db: &Arc<DB>, snapshot_file: std::fs::File) -> Resul
       Err(e) => return Err(e),
     }
     let key_len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut key = vec![0u8; key_len];
-    decoder.read_exact(&mut key)?;
+    let key = read_entry_bytes(&mut decoder, key_len, &mut scratch)?;
 
     decoder.read_exact(&mut len_buf)?;
     let value_len = u32::from_le_bytes(len_buf) as usize;
-
-    let mut value = vec![0u8; value_len];
-    decoder.read_exact(&mut value)?;
+    let value = read_entry_bytes(&mut decoder, value_len, &mut scratch)?;
 
     batch.put_cf(&cf_handle, key, value);
     count += 1;
   }
 
-  // One commit for the whole snapshot: the clear and the restore are one
-  // atomic switch, so a truncated or corrupt transfer never leaves a
-  // half-restored state behind.
+  // The metadata `applied_state()` reports goes into the same batch as the KV
+  // data: a crash must not be able to install one without the other.
+  match &meta.last_log_id {
+    Some(last_log_id) => {
+      let data = encode(last_log_id).map_err(read_logs_err)?;
+      batch.put_cf(&cf_meta, LAST_APPLIED_LOG_KEY, data);
+    }
+    None => batch.delete_cf(&cf_meta, LAST_APPLIED_LOG_KEY),
+  }
+
+  let membership_data = encode(&meta.last_membership).map_err(read_logs_err)?;
+  batch.put_cf(&cf_meta, LAST_MEMBERSHIP_KEY, membership_data);
+
+  // Rebuild the nodes table from the snapshot membership so both views agree
+  // (same invariant as applying a Membership log entry).
+  let nodes: BTreeMap<NodeId, Node> = meta
+    .last_membership
+    .membership()
+    .nodes()
+    .map(|(id, node)| (*id, node.clone()))
+    .collect();
+  let nodes_data = encode(&nodes).map_err(read_logs_err)?;
+  batch.put_cf(&cf_meta, NODES_KEY, nodes_data);
+
+  // One commit for the whole snapshot: the clear, the restore and the
+  // metadata are one atomic switch, so a truncated or corrupt transfer never
+  // leaves a half-restored state behind.
   db.write(batch).map_err(io::Error::other)?;
 
   info!("Successfully recovered {} entries from snapshot", count);
@@ -141,6 +247,10 @@ fn do_recover_snapshot_sync(db: &Arc<DB>, snapshot_file: std::fs::File) -> Resul
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::raft::types::LogId;
+  use crate::raft::types::TypeConfig;
+  use crate::raft::types::decode;
+  use crate::utils::test::create_log_id;
   use openraft::Membership;
   use openraft::SnapshotMeta;
   use openraft::StoredMembership;
@@ -160,7 +270,7 @@ mod tests {
     let mut opts = rocksdb::Options::default();
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);
-    let db = DB::open_cf(&opts, temp_dir.path(), vec![SM_DATA_FAMILY]).unwrap();
+    let db = DB::open_cf(&opts, temp_dir.path(), vec![SM_DATA_FAMILY, SM_META_FAMILY]).unwrap();
 
     std::mem::forget(temp_dir);
     Arc::new(db)
@@ -231,8 +341,9 @@ mod tests {
 
   /// Test-only wrapper: converts the tokio File and runs the synchronous recovery.
   async fn do_recover_snapshot_for_test(db: &Arc<DB>, snapshot: Snapshot) -> Result<(), io::Error> {
+    let meta = snapshot.meta.clone();
     let snapshot_file = snapshot.snapshot.into_std().await;
-    do_recover_snapshot_sync(db, snapshot_file)
+    do_recover_snapshot_sync(db, snapshot_file, &meta)
   }
 
   /// Test Point: Basic snapshot recovery functionality
@@ -720,6 +831,26 @@ mod tests {
     db.put_cf(&cf_handle, b"existing-key-2", b"existing-value-2")
       .unwrap();
 
+    // Old state-machine metadata: it is staged into the same atomic batch as
+    // the KV data, so a failed install must leave it untouched too.
+    let cf_meta = db.cf_handle(SM_META_FAMILY).unwrap();
+    let old_log_id = create_log_id(1, 1, 1);
+    let old_membership = StoredMembership::new(Some(old_log_id), Membership::default());
+    db.put_cf(&cf_meta, LAST_APPLIED_LOG_KEY, encode(&old_log_id).unwrap())
+      .unwrap();
+    db.put_cf(
+      &cf_meta,
+      LAST_MEMBERSHIP_KEY,
+      encode(&old_membership).unwrap(),
+    )
+    .unwrap();
+    db.put_cf(
+      &cf_meta,
+      NODES_KEY,
+      encode(&BTreeMap::<NodeId, Node>::new()).unwrap(),
+    )
+    .unwrap();
+
     let temp_dir = tempdir().unwrap();
     let snapshot_file_path = temp_dir.path().join("corrupt-large.snapshot");
 
@@ -738,9 +869,9 @@ mod tests {
           .unwrap();
         encoder.write_all(value.as_bytes()).unwrap();
       }
-      // No key of this length can follow: the decoder fails here, after the
-      // 3000 entries above.
-      encoder.write_all(&0xFFFF_FFFFu32.to_le_bytes()).unwrap();
+      // Longer than the four remaining bytes: the decoder fails here, after
+      // the 3000 entries above, without asking for an absurd allocation.
+      encoder.write_all(&1024u32.to_le_bytes()).unwrap();
       encoder.finish().unwrap();
     }
 
@@ -766,6 +897,78 @@ mod tests {
     );
     let value = db.get_cf(&cf_handle, b"existing-key").unwrap().unwrap();
     assert_eq!(String::from_utf8(value).unwrap(), "existing-value");
+
+    let stored_log_id: LogId =
+      decode(&db.get_cf(&cf_meta, LAST_APPLIED_LOG_KEY).unwrap().unwrap()).unwrap();
+    assert_eq!(
+      stored_log_id, old_log_id,
+      "the old apply position must survive a failed install"
+    );
+    let stored_membership: StoredMembership<TypeConfig> =
+      decode(&db.get_cf(&cf_meta, LAST_MEMBERSHIP_KEY).unwrap().unwrap()).unwrap();
+    assert_eq!(
+      stored_membership, old_membership,
+      "the old membership must survive a failed install"
+    );
+  }
+
+  /// `read_entry_bytes` reuses the caller's scratch buffer. A longer entry
+  /// followed by a shorter one must not leak any of the previous bytes: on
+  /// success `read_exact` fills exactly the prefix that is then copied, so no
+  /// per-call clear is needed.
+  #[test]
+  fn test_read_entry_bytes_does_not_leak_stale_scratch_data() {
+    use std::io::Cursor;
+
+    // Simulate a scratch left over from a previous, longer entry.
+    let mut scratch = [0xAAu8; 128];
+
+    let mut first = Cursor::new(b"first-value".to_vec());
+    let got = read_entry_bytes(&mut first, 11, &mut scratch).unwrap();
+    assert_eq!(got, b"first-value");
+
+    // Only these two bytes may be copied; the 0xAA tail must not leak.
+    let mut second = Cursor::new(b"xy".to_vec());
+    let got = read_entry_bytes(&mut second, 2, &mut scratch).unwrap();
+    assert_eq!(got, b"xy");
+  }
+
+  /// A length prefix that claims an implausible entry size is rejected before
+  /// allocating, leaving the database untouched.
+  #[tokio::test]
+  async fn test_recover_snapshot_rejects_oversized_entry() {
+    let db = create_test_db();
+    let cf_handle = db.cf_handle(SM_DATA_FAMILY).unwrap();
+    db.put_cf(&cf_handle, b"existing-key", b"existing-value")
+      .unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("oversized.snapshot");
+
+    {
+      let file = std::fs::File::create(&snapshot_file_path).unwrap();
+      let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+      let too_big = (MAX_SNAPSHOT_ENTRY_BYTES + 1) as u32;
+      encoder.write_all(&too_big.to_le_bytes()).unwrap();
+      encoder.finish().unwrap();
+    }
+
+    let snapshot = Snapshot {
+      meta: SnapshotMeta {
+        last_log_id: None,
+        last_membership: StoredMembership::new(None, Membership::default()),
+        snapshot_id: "oversized-entry-snapshot".to_string(),
+      },
+      snapshot: tokio::fs::File::open(&snapshot_file_path).await.unwrap(),
+    };
+
+    let result = do_recover_snapshot_for_test(&db, snapshot).await;
+    assert!(result.is_err(), "an oversized entry must be rejected");
+    assert_eq!(
+      count_db_entries(&db),
+      1,
+      "the old state must survive the rejected install"
+    );
   }
 
   #[tokio::test]
