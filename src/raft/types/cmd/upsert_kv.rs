@@ -28,7 +28,7 @@ impl UpsertKV {
 
   /// Alias of [`Self::insert`], kept for callers that spell the command
   /// "update".
-  pub fn update(key: &str, value: &[u8]) -> Self {
+  pub fn update(key: impl ToString, value: &[u8]) -> Self {
     Self::insert(key, value)
   }
 
