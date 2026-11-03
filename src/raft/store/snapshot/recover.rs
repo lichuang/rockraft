@@ -845,6 +845,54 @@ mod tests {
     assert_eq!(count_db_entries(&db), 1, "only the snapshot entry remains");
   }
 
+  /// The sweep must run before the snapshot entries are restored: when the
+  /// snapshot itself holds a key at or past the `delete_range` end, installing
+  /// it must replace the stale value instead of deleting the fresh one.
+  #[tokio::test]
+  async fn test_recover_snapshot_restores_a_key_past_the_range_end() {
+    let db = create_test_db();
+    let cf_handle = db.cf_handle(SM_DATA_FAMILY).unwrap();
+
+    let tail = vec![0xFFu8; 80];
+    db.put_cf(&cf_handle, &tail, b"stale-value").unwrap();
+
+    let temp_dir = tempdir().unwrap();
+    let snapshot_file_path = temp_dir.path().join("tail-key.snapshot");
+
+    {
+      let file = std::fs::File::create(&snapshot_file_path).unwrap();
+      let mut encoder = zstd::Encoder::new(file, 3).unwrap();
+      let value = b"snapshot-value";
+      encoder
+        .write_all(&(tail.len() as u32).to_le_bytes())
+        .unwrap();
+      encoder.write_all(&tail).unwrap();
+      encoder
+        .write_all(&(value.len() as u32).to_le_bytes())
+        .unwrap();
+      encoder.write_all(value).unwrap();
+      encoder.finish().unwrap();
+    }
+
+    let snapshot = Snapshot {
+      meta: SnapshotMeta {
+        last_log_id: None,
+        last_membership: StoredMembership::new(None, Membership::default()),
+        snapshot_id: "tail-key-snapshot".to_string(),
+      },
+      snapshot: tokio::fs::File::open(&snapshot_file_path).await.unwrap(),
+    };
+
+    do_recover_snapshot_for_test(&db, snapshot).await.unwrap();
+
+    assert_eq!(
+      db.get_cf(&cf_handle, &tail).unwrap(),
+      Some(b"snapshot-value".to_vec()),
+      "the sweep must run before the snapshot entries are restored"
+    );
+    assert_eq!(count_db_entries(&db), 1, "only the snapshot entry remains");
+  }
+
   #[tokio::test]
   async fn test_recover_snapshot_truncated_during_transfer() {
     let db = create_test_db();
