@@ -194,7 +194,7 @@ let node = Node { ... };
 
 ## Examples
 
-### Cluster Example (`examples/cluster/`)
+### Cluster Example (`example/`)
 - Full-featured HTTP API example with axum
 - HTTP endpoints:
   - `GET /get?key=<key>` - Get value by key
@@ -209,7 +209,7 @@ let node = Node { ... };
 - `POST /leave` - Remove node from cluster
   - `GET /health` - Health check
   - `GET /metrics` - Cluster metrics
-- Run tests: `./run_tests.sh` (requires Python and pytest)
+- Run tests: `cd example && ./run_tests.sh` (requires Python and pytest)
 
 ### Example Integration Requirements
 
@@ -226,7 +226,7 @@ let node = Node { ... };
    - Create test classes (e.g., `Test<FeatureName>`) with comprehensive test cases
    - Test both success and error scenarios
    - Test consistency across all nodes in the cluster
-   - Run the full test suite with `./run_tests.sh` to ensure no regressions
+   - Run the full test suite with `cd example && ./run_tests.sh` to ensure no regressions
 
 3. **Update documentation** in `example/README.md`:
    - Document the new endpoints with request/response examples

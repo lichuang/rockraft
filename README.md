@@ -55,8 +55,8 @@ This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENS
 
 ## Contact & Support
 
-- **GitHub Issues**: [Report bugs or request features](https://github.com/yourusername/rockraft/issues)
-- **Discussions**: [Ask questions and share ideas](https://github.com/yourusername/rockraft/discussions)
+- **GitHub Issues**: [Report bugs or request features](https://github.com/lichuang/rockraft/issues)
+- **Discussions**: [Ask questions and share ideas](https://github.com/lichuang/rockraft/discussions)
 - **Documentation**: [API Reference](https://docs.rs/rockraft)
 
 ## See Also

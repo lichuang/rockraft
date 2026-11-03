@@ -8,6 +8,7 @@ use rocksdb::DB;
 use tokio::task::spawn_blocking;
 use tracing::info;
 
+#[cfg(test)]
 use crate::config::DEFAULT_GRPC_MAX_MESSAGE_SIZE;
 use crate::raft::store::keys::LAST_APPLIED_LOG_KEY;
 use crate::raft::store::keys::LAST_MEMBERSHIP_KEY;
@@ -29,9 +30,11 @@ use crate::raft::types::read_logs_err;
 /// replicated at all, so twice the cap leaves headroom for a legitimate entry
 /// while refusing an absurd one.
 ///
-/// This is the value used by [`RocksStateMachine::new`]; the node itself passes
-/// the limit derived from its own `grpc_max_message_size`, because an entry
-/// this node accepted for replication must also be installable from a snapshot.
+/// This is the default used by the crate's test constructor; the node itself
+/// passes the limit derived from its own `grpc_max_message_size`, because an
+/// entry this node accepted for replication must also be installable from a
+/// snapshot.
+#[cfg(test)]
 pub(crate) const DEFAULT_SNAPSHOT_ENTRY_LIMIT: usize = DEFAULT_GRPC_MAX_MESSAGE_SIZE * 2;
 
 /// Read an entry key or value into `out`, refusing implausible lengths before

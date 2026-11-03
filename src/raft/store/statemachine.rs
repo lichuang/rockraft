@@ -33,6 +33,7 @@ use super::keys::LAST_MEMBERSHIP_KEY;
 use super::keys::NODES_KEY;
 use super::keys::SM_DATA_FAMILY;
 use super::keys::SM_META_FAMILY;
+#[cfg(test)]
 use super::snapshot::DEFAULT_SNAPSHOT_ENTRY_LIMIT;
 use super::snapshot::build_snapshot;
 use super::snapshot::get_current_snapshot;
@@ -193,16 +194,17 @@ impl RocksStateMachine {
       .map_err(|e| Error::other(format!("Mutex lock failed: {}", e)))
   }
 
-  pub async fn new(db: Arc<DB>, data_dir: PathBuf) -> Result<RocksStateMachine, Error> {
+  #[cfg(test)]
+  pub(crate) async fn new(db: Arc<DB>, data_dir: PathBuf) -> Result<RocksStateMachine, Error> {
     Self::new_with_snapshot_entry_limit(db, data_dir, DEFAULT_SNAPSHOT_ENTRY_LIMIT).await
   }
 
   /// Create a state machine that accepts snapshot entries up to
   /// `max_snapshot_entry_bytes` per key or value.
   ///
-  /// [`Self::new`] uses [`DEFAULT_SNAPSHOT_ENTRY_LIMIT`]; a node derives the
-  /// limit from its own `grpc_max_message_size`, because an entry larger than
-  /// this bound can be replicated but never installed.
+  /// The test-only `new` constructor uses the crate default; a node derives
+  /// the limit from its own `grpc_max_message_size`, because an entry larger
+  /// than this bound can be replicated but never installed.
   pub(crate) async fn new_with_snapshot_entry_limit(
     db: Arc<DB>,
     data_dir: PathBuf,

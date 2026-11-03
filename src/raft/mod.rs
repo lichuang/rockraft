@@ -14,3 +14,7 @@ pub(crate) mod protobuf {
 pub(crate) mod network;
 pub(crate) mod store;
 pub mod types;
+
+// `RaftNode::state_machine()` returns this type, so it has to be nameable from
+// outside the crate even though the rest of `store` stays internal.
+pub use store::RocksStateMachine;

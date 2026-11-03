@@ -170,9 +170,9 @@ impl RaftNode {
 
   /// Delete a key from the KV store
   ///
-  /// Returns `AppliedState` with `value: None` confirming the deletion.
-  /// This is a convenience method equivalent to writing a
-  /// `Cmd::UpsertKV(UpsertKV::delete(key))` log entry.
+  /// Returns the applied state of the deletion (`AppliedState::None` for a KV
+  /// command) once the log entry is committed. This is a convenience method
+  /// equivalent to writing a `Cmd::UpsertKV(UpsertKV::delete(key))` log entry.
   pub async fn delete(&self, key: impl ToString) -> Result<AppliedState> {
     debug!("delete key: {}", key.to_string());
     let entry = LogEntry::new(Cmd::UpsertKV(UpsertKV::delete(key)));

@@ -32,7 +32,7 @@ This example shows:
 ## Project Structure
 
 ```
-examples/
+example/
 ├── Cargo.toml              # Project dependencies
 ├── start.sh                # Cluster management script
 ├── conf/                   # Configuration files
