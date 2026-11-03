@@ -68,6 +68,20 @@ pub struct ForwardRequest {
   pub body: RequestPayload,
 }
 
+impl ForwardRequest {
+  /// Serialize the request into the gRPC envelope, carrying the hop count
+  /// alongside the postcard body.
+  ///
+  /// The hop count lives in the protobuf envelope (`RaftRequest.hops`) rather
+  /// than in this struct: an older node ignores unknown proto fields and can
+  /// still decode `data`, whereas a new field in the postcard body would make
+  /// the payload undecodable for it.
+  pub(crate) fn into_grpc_request(self, hops: u32) -> Result<tonic::Request<pb::RaftRequest>> {
+    let data = encode(&self)?;
+    Ok(tonic::Request::new(pb::RaftRequest { data, hops }))
+  }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ForwardResponse {
   Join(()),
@@ -181,13 +195,5 @@ impl ForwardResponse {
         other.variant_name()
       ))),
     }
-  }
-}
-
-impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {
-  fn into_request(self) -> tonic::Request<pb::RaftRequest> {
-    let data = encode(&self).expect("fail to serialize ForwardRequest");
-    let req = pb::RaftRequest { data };
-    tonic::Request::new(req)
   }
 }

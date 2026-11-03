@@ -316,7 +316,10 @@ impl RaftService for RaftServiceImpl {
     let req = request.into_inner();
     let forward_req: ForwardRequest =
       decode(&req.data).map_internal("Failed to deserialize forward request")?;
-    let response = self.node.handle_forward_request(forward_req).await;
+    let response = self
+      .node
+      .handle_forward_request(forward_req, req.hops)
+      .await;
     let reply = Self::result_to_raft_reply(response);
     Ok(Response::new(reply))
   }

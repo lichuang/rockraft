@@ -239,7 +239,8 @@ impl RaftNode {
       body: RequestPayload::Join(join_req),
     };
 
-    let reply = self.send_forward_request(addr, req).await?;
+    // A join request originates here; it has not been forwarded yet.
+    let reply = self.send_forward_request(addr, req, 0).await?;
 
     if reply.error.is_empty() {
       Ok(())

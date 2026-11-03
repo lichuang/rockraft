@@ -163,7 +163,7 @@ impl RaftNode {
   pub async fn write(&self, entry: LogEntry) -> Result<AppliedState> {
     debug!("write log entry: {:?}", entry);
     self
-      .execute_or_forward(RequestPayload::Write(entry))
+      .execute_or_forward(RequestPayload::Write(entry), 0)
       .await?
       .into_write()
   }
@@ -197,7 +197,7 @@ impl RaftNode {
   pub async fn batch_write(&self, req: BatchWriteReq) -> Result<BatchWriteReply> {
     debug!("batch write: {:?}", req);
     self
-      .execute_or_forward(RequestPayload::BatchWrite(req))
+      .execute_or_forward(RequestPayload::BatchWrite(req), 0)
       .await?
       .into_batch_write()
   }
@@ -221,7 +221,7 @@ impl RaftNode {
   pub async fn txn(&self, req: TxnReq) -> Result<TxnReply> {
     debug!("transaction: {:?}", req);
     self
-      .execute_or_forward(RequestPayload::Txn(req))
+      .execute_or_forward(RequestPayload::Txn(req), 0)
       .await?
       .into_txn()
   }
@@ -267,7 +267,7 @@ impl RaftNode {
         .map_err(|e| Error::internal(format!("local read kv: {}", e)));
     }
     self
-      .execute_or_forward(RequestPayload::GetKV(req))
+      .execute_or_forward(RequestPayload::GetKV(req), 0)
       .await?
       .into_get_kv()
   }
@@ -284,7 +284,7 @@ impl RaftNode {
         .map_err(|e| Error::internal(format!("local scan_prefix: {}", e)));
     }
     self
-      .execute_or_forward(RequestPayload::ScanPrefix(req))
+      .execute_or_forward(RequestPayload::ScanPrefix(req), 0)
       .await?
       .into_scan_prefix()
   }
@@ -295,7 +295,7 @@ impl RaftNode {
   pub async fn add_node(&self, req: JoinRequest) -> Result<()> {
     debug!("join node: {:?}", req);
     self
-      .execute_or_forward(RequestPayload::Join(req))
+      .execute_or_forward(RequestPayload::Join(req), 0)
       .await?
       .into_join()
   }
@@ -304,7 +304,7 @@ impl RaftNode {
   pub async fn remove_node(&self, req: LeaveRequest) -> Result<()> {
     debug!("leave node: {:?}", req);
     self
-      .execute_or_forward(RequestPayload::Leave(req))
+      .execute_or_forward(RequestPayload::Leave(req), 0)
       .await?
       .into_leave()
   }
@@ -317,7 +317,7 @@ impl RaftNode {
   pub async fn get_members(&self, req: GetMembersReq) -> Result<GetMembersReply> {
     debug!("get members: {:?}", req);
     self
-      .execute_or_forward(RequestPayload::GetMembers(req))
+      .execute_or_forward(RequestPayload::GetMembers(req), 0)
       .await?
       .into_get_members()
   }
