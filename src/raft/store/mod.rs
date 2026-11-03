@@ -48,9 +48,12 @@ pub(crate) fn create_storage_engine(
 pub(crate) async fn create_stores(
   engine: &RocksDBEngine,
   data_dir: PathBuf,
+  max_snapshot_entry_bytes: usize,
 ) -> Result<(RocksLogStore<TypeConfig>, RocksStateMachine)> {
   let db = engine.db().clone();
   let log_store = RocksLogStore::create(db.clone())?;
-  let state_machine = RocksStateMachine::new(db, data_dir).await?;
+  let state_machine =
+    RocksStateMachine::new_with_snapshot_entry_limit(db, data_dir, max_snapshot_entry_bytes)
+      .await?;
   Ok((log_store, state_machine))
 }
