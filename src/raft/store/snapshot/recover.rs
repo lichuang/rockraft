@@ -127,7 +127,11 @@ pub async fn recover_snapshot(
   Ok(())
 }
 
-/// Internal function: Perform the actual snapshot recovery
+/// Internal function: perform the actual snapshot recovery synchronously.
+///
+/// This is blocking work (zstd decode plus a RocksDB bulk write): the async
+/// `recover_snapshot` runs it inside `spawn_blocking` and awaits the result, so
+/// the state machine holds the snapshot contents when the call returns.
 ///
 /// This function handles the core recovery logic:
 /// - Reads and decompresses snapshot data
@@ -162,6 +166,13 @@ pub async fn recover_snapshot(
 ///   reached (or vice versa). The trade-off is memory: the batch holds the
 ///   whole snapshot until it is committed.
 ///
+/// Format caveat:
+///   The entry loop treats a clean EOF as the end of the snapshot, so a payload
+///   truncated exactly on an entry boundary installs silently instead of
+///   failing. The format does not validate itself: a truncated transfer is
+///   caught earlier by the receiving path's streamed byte-count check, which
+///   compares the assembled file length against the bytes the sender announced.
+///
 /// Performance:
 ///   - A single commit keeps the write path short
 ///   - Compression reduces disk I/O for snapshot files
@@ -188,6 +199,7 @@ fn do_recover_snapshot_sync(
     zstd::Decoder::new(snapshot_file).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
 
   let mut batch = rocksdb::WriteBatch::default();
+
   // Drop every pre-existing key in the KV column family in the same batch as
   // the restored entries, so the target node ends up holding exactly the
   // snapshot state — no stale keys from previously applied logs or older
@@ -198,10 +210,12 @@ fn do_recover_snapshot_sync(
   let empty_key: Vec<u8> = Vec::new();
   let max_key = vec![0xFF; 64];
   batch.delete_range_cf(&cf_handle, &empty_key, &max_key);
+
   let mut count = 0u64;
   let mut bytes = 0u64;
   let started = std::time::Instant::now();
   let mut len_buf = [0u8; 4];
+
   // Allocated once and reused by every entry: `put_cf` copies the bytes into
   // the batch before the next entry is decoded, and `read_exact` overwrites
   // only the prefix it uses, so nothing has to be cleared between entries.
