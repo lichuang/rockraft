@@ -466,7 +466,7 @@ impl RocksStateMachine {
     match cmd {
       Cmd::UpsertKV(kv) => self.apply_upsert_kv(kv, batch, pending),
       Cmd::BatchUpsertKV { entries } => self.apply_batch_upsert_kv(entries, batch, pending),
-      Cmd::AddNode { node, .. } => self.apply_add_node(&node, sys_data),
+      Cmd::AddNode { node, overriding } => self.apply_add_node(&node, overriding, sys_data),
       Cmd::RemoveNode { node_id } => self.apply_remove_node(node_id, sys_data),
       Cmd::Txn { req } => self.apply_txn(req, batch, pending),
     }
@@ -494,12 +494,24 @@ impl RocksStateMachine {
     Ok(AppliedState::None)
   }
 
-  fn apply_add_node(&self, node: &Node, sys_data: &mut SysData) -> Result<AppliedState, io::Error> {
+  fn apply_add_node(
+    &self,
+    node: &Node,
+    overriding: bool,
+    sys_data: &mut SysData,
+  ) -> Result<AppliedState, io::Error> {
+    let node_id = node.node_id;
     info!(
-      "Applying AddNode command for node {} in state machine",
-      node.node_id
+      "Applying AddNode command for node {} in state machine, overriding={}",
+      node_id, overriding
     );
-    sys_data.nodes.insert(node.node_id, node.clone());
+
+    // Checked against the staged table, not the committed one, so two commands
+    // in the same batch see each other.
+    if overriding || !sys_data.nodes.contains_key(&node_id) {
+      sys_data.nodes.insert(node_id, node.clone());
+    }
+
     Ok(AppliedState::None)
   }
 
@@ -1639,6 +1651,46 @@ mod tests {
       .create_snapshot_temp_file("../../../etc/passwd")
       .expect_err("an escaping id must not reach the filesystem");
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+    Ok(())
+  }
+
+  /// `Cmd::AddNode` carries an `overriding` flag: the join path sets it to
+  /// false so a stale `AddNode` replayed from the log cannot rewrite the
+  /// endpoint of a node that already registered.
+  #[tokio::test]
+  async fn test_apply_add_node_honours_overriding() -> Result<(), io::Error> {
+    let mut sm = create_test_state_machine().await;
+
+    let original = Node {
+      node_id: 3,
+      endpoint: Endpoint::new("127.0.0.1", 7003),
+    };
+    let replacement = Node {
+      node_id: 3,
+      endpoint: Endpoint::new("127.0.0.1", 9999),
+    };
+
+    let add = |index: u64, node: &Node, overriding: bool| {
+      create_apply_entry(
+        index,
+        Cmd::AddNode {
+          node: node.clone(),
+          overriding,
+        },
+      )
+    };
+
+    apply_entries(&mut sm, vec![add(1, &original, true)]).await;
+    assert_eq!(sm.get_nodes()?.get(&3), Some(&original));
+
+    // overriding = false keeps the record that is already there
+    apply_entries(&mut sm, vec![add(2, &replacement, false)]).await;
+    assert_eq!(sm.get_nodes()?.get(&3), Some(&original));
+
+    // overriding = true replaces it
+    apply_entries(&mut sm, vec![add(3, &replacement, true)]).await;
+    assert_eq!(sm.get_nodes()?.get(&3), Some(&replacement));
 
     Ok(())
   }

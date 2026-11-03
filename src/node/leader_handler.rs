@@ -139,8 +139,8 @@ impl<'a> LeaderHandler<'a> {
   /// This method **must** only be called when this node is the leader.
   /// Callers should use `RaftNode::assume_leader()` to verify leadership first.
   ///
-  /// # Timestamp
-  /// The `time_ms` field is automatically set to the current time before writing.
+  /// The entry is written as given: `time_ms` is not stamped, because nothing
+  /// consumes it and a leader-stamped clock must not drive `apply()`.
   pub async fn write(&self, entry: LogEntry) -> Result<AppliedState> {
     self.do_write(entry).await
   }
@@ -430,9 +430,7 @@ impl<'a> LeaderHandler<'a> {
   ///
   /// # Safety
   /// Caller must ensure this node is the leader. This method does not check.
-  async fn do_write(&self, mut entry: LogEntry) -> Result<AppliedState> {
-    entry.time_ms = Some(crate::utils::now_millis());
-
+  async fn do_write(&self, entry: LogEntry) -> Result<AppliedState> {
     let node_id = self.raft().node_id();
 
     match self.raft().client_write(entry).await {

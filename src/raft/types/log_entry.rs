@@ -6,11 +6,18 @@ use super::Cmd;
 /// A Raft log entry carrying a command and optional timestamp.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
-  /// The time in millisecond when this log is proposed by the leader.
+  /// The time in milliseconds when this log was proposed by the leader.
   ///
-  /// State machine depends on clock time to expire values.
-  /// The time to use has to be consistent on leader and followers.
-  /// Otherwise an `apply` results in different state on leader and followers.
+  /// Reserved and currently **not consumed by anything**: the TTL support that
+  /// needed it lives at the application layer. It stays in the type because
+  /// existing log entries in RocksDB were written with it -- removing the field
+  /// would make them undecodable -- and because a future feature may want a
+  /// leader-stamped time.
+  ///
+  /// It must stay identical on leader and followers, and must never drive a
+  /// decision in `apply()`: the value comes from the leader's clock, so using
+  /// it for expiry would make replicas diverge. `LeaderHandler::do_write` no
+  /// longer stamps it, so entries written now carry `None`.
   pub time_ms: Option<u64>,
 
   /// The action a client want to take.
