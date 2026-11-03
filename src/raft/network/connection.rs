@@ -92,6 +92,7 @@ impl NetworkConnection {
 
     let grpc_request = tonic::Request::new(RaftRequest {
       data: self.serialize_buf.clone(),
+      hops: 0,
     });
 
     let grpc_response = conn.forward(grpc_request).await?;

@@ -66,27 +66,19 @@ pub enum RequestPayload {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ForwardRequest {
   pub body: RequestPayload,
-  /// How many nodes this request has already been forwarded through.
-  ///
-  /// Two nodes that disagree about who the leader is can otherwise bounce one
-  /// request between them indefinitely: every hop starts its own retry budget,
-  /// so the client-visible latency is bounded by nothing.
-  #[serde(default)]
-  pub hops: u32,
 }
 
 impl ForwardRequest {
-  /// Start a request at the origin node.
-  pub fn new(body: RequestPayload) -> Self {
-    Self { body, hops: 0 }
-  }
-
-  /// The same request one hop further along.
-  pub fn next_hop(&self) -> Self {
-    Self {
-      body: self.body.clone(),
-      hops: self.hops + 1,
-    }
+  /// Serialize the request into the gRPC envelope, carrying the hop count
+  /// alongside the postcard body.
+  ///
+  /// The hop count lives in the protobuf envelope (`RaftRequest.hops`) rather
+  /// than in this struct: an older node ignores unknown proto fields and can
+  /// still decode `data`, whereas a new field in the postcard body would make
+  /// the payload undecodable for it.
+  pub(crate) fn into_grpc_request(self, hops: u32) -> Result<tonic::Request<pb::RaftRequest>> {
+    let data = encode(&self)?;
+    Ok(tonic::Request::new(pb::RaftRequest { data, hops }))
   }
 }
 
@@ -203,13 +195,5 @@ impl ForwardResponse {
         other.variant_name()
       ))),
     }
-  }
-}
-
-impl tonic::IntoRequest<pb::RaftRequest> for ForwardRequest {
-  fn into_request(self) -> tonic::Request<pb::RaftRequest> {
-    let data = encode(&self).expect("fail to serialize ForwardRequest");
-    let req = pb::RaftRequest { data };
-    tonic::Request::new(req)
   }
 }

@@ -143,8 +143,8 @@ impl RaftNode {
                 leader_id,
                 ForwardRequest {
                   body: payload.clone(),
-                  hops: hops + 1,
                 },
+                hops + 1,
               )
               .await
           }
@@ -168,8 +168,8 @@ impl RaftNode {
               leader_id,
               ForwardRequest {
                 body: payload.clone(),
-                hops: hops + 1,
               },
+              hops + 1,
             )
             .await
         }
@@ -209,12 +209,19 @@ impl RaftNode {
   /// Handle a forwarded request (gRPC entry point).
   ///
   /// This is the entry point for requests coming from other nodes via gRPC.
-  /// It runs the same execute-or-forward logic as local requests, so
-  /// multi-hop redirects resolve on this node.
-  pub async fn handle_forward_request(&self, request: ForwardRequest) -> Result<ForwardResponse> {
-    debug!("recv forward req: {:?}", request);
+  /// `hops` arrives in the `RaftRequest` envelope, not in the postcard body, so
+  /// a node running an older version can still decode the request.
+  ///
+  /// It runs the same execute-or-forward logic as local requests, so multi-hop
+  /// redirects resolve on this node.
+  pub async fn handle_forward_request(
+    &self,
+    request: ForwardRequest,
+    hops: u32,
+  ) -> Result<ForwardResponse> {
+    debug!("recv forward req: {:?} hops={}", request, hops);
 
-    if hop_budget_exhausted(request.hops) {
+    if hop_budget_exhausted(hops) {
       // Another hop would only extend a loop: report a retryable error so the
       // origin re-resolves leadership instead.
       debug!(
@@ -224,12 +231,17 @@ impl RaftNode {
       return Err(Error::retryable_with_reason(RetryReason::LeaderTransition));
     }
 
-    self.execute_or_forward(request.body, request.hops).await
+    self.execute_or_forward(request.body, hops).await
   }
 
   // -- Private helpers --
 
   /// Send a forward request to a gRPC endpoint via the shared connection pool.
+  ///
+  /// `hops` is placed in the `RaftRequest` protobuf envelope rather than the
+  /// postcard body, so an older peer that ignores unknown proto fields can
+  /// still decode `data`; it will not propagate the count, which only means the
+  /// bound is enforced among nodes that understand the field.
   ///
   /// Reuses pooled connections instead of dialing per request: forwarding is
   /// the hot entry path for non-leader nodes, and per-request channel setup
@@ -238,11 +250,12 @@ impl RaftNode {
     &self,
     addr: &str,
     request: ForwardRequest,
+    hops: u32,
   ) -> Result<RaftReply> {
     let mut raft_client = self.client_pool.raft_service_client(addr).await?;
 
     let response = raft_client
-      .forward(request)
+      .forward(request.into_grpc_request(hops)?)
       .await
       .map_err(|e| Error::internal(format!("Failed to forward request: {}", e)))?;
 
@@ -254,6 +267,7 @@ impl RaftNode {
     &self,
     leader_id: NodeId,
     request: ForwardRequest,
+    hops: u32,
   ) -> Result<ForwardResponse> {
     let membership = self
       .state_machine()
@@ -266,7 +280,9 @@ impl RaftNode {
       .ok_or_else(|| Error::internal("Leader id not found in membership"))?;
 
     let leader_addr = leader_node.endpoint.to_string();
-    let reply = self.send_forward_request(&leader_addr, request).await?;
+    let reply = self
+      .send_forward_request(&leader_addr, request, hops)
+      .await?;
 
     if reply.error.is_empty() {
       let forward_response: ForwardResponse = decode(&reply.data)
@@ -327,25 +343,17 @@ impl RaftNode {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::raft::protobuf as pb;
   use crate::raft::types::GetKVReq;
-  use crate::raft::types::{decode, encode};
+  use crate::raft::types::decode;
+  use prost::Message;
 
   fn a_request() -> ForwardRequest {
-    ForwardRequest::new(RequestPayload::GetKV(GetKVReq {
-      key: "k".to_string(),
-    }))
-  }
-
-  #[test]
-  fn test_next_hop_counts_and_keeps_the_body() {
-    let origin = a_request();
-    assert_eq!(origin.hops, 0);
-
-    let hop1 = origin.next_hop();
-    assert_eq!(hop1.hops, 1);
-    assert_eq!(hop1.body, origin.body);
-
-    assert_eq!(origin.next_hop().next_hop().hops, 2);
+    ForwardRequest {
+      body: RequestPayload::GetKV(GetKVReq {
+        key: "k".to_string(),
+      }),
+    }
   }
 
   #[test]
@@ -359,10 +367,31 @@ mod tests {
     assert!(hop_budget_exhausted(MAX_FORWARD_HOPS + 1));
   }
 
+  /// The hop count travels in the protobuf envelope, so the postcard body is
+  /// unchanged and an older peer can still decode it.
   #[test]
-  fn test_hops_survive_the_wire_codec() {
-    let req = a_request().next_hop().next_hop();
-    let decoded: ForwardRequest = decode(&encode(&req).unwrap()).unwrap();
-    assert_eq!(decoded, req);
+  fn test_hop_count_roundtrips_in_the_envelope() {
+    let request = a_request().into_grpc_request(2).unwrap().into_inner();
+    assert_eq!(request.hops, 2);
+    assert!(
+      decode::<ForwardRequest>(&request.data).is_ok(),
+      "the postcard body must stay decodable without the hop count"
+    );
+
+    let bytes = request.encode_to_vec();
+    let decoded = pb::RaftRequest::decode(&bytes[..]).unwrap();
+    assert_eq!(decoded.data, request.data);
+    assert_eq!(decoded.hops, 2);
+  }
+
+  /// An envelope written by a version that predates the field has no field 2;
+  /// prost decodes it with `hops = 0`, so old and new nodes keep communicating.
+  #[test]
+  fn test_old_envelope_decodes_with_zero_hops() {
+    // field 1 (`data`), wire type 2: tag 0x0A, length 1, value 0x01
+    let old_envelope = [0x0A, 0x01, 0x01];
+    let decoded = pb::RaftRequest::decode(&old_envelope[..]).unwrap();
+    assert_eq!(decoded.data, vec![1]);
+    assert_eq!(decoded.hops, 0);
   }
 }

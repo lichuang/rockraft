@@ -4,6 +4,12 @@ package raftpb;
 
 message RaftRequest {
   bytes data = 1;
+  // How many nodes this request has already been forwarded through.
+  //
+  // Carried in the gRPC envelope rather than the postcard body so a node
+  // running an older version, which ignores unknown proto fields, can still
+  // decode the request. An absent field decodes as 0.
+  uint32 hops = 2;
 }
 
 message RaftReply {

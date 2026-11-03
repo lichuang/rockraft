@@ -235,9 +235,12 @@ impl RaftNode {
       endpoint: config.raft.advertise_endpoint.clone(),
     };
 
-    let req = ForwardRequest::new(RequestPayload::Join(join_req));
+    let req = ForwardRequest {
+      body: RequestPayload::Join(join_req),
+    };
 
-    let reply = self.send_forward_request(addr, req).await?;
+    // A join request originates here; it has not been forwarded yet.
+    let reply = self.send_forward_request(addr, req, 0).await?;
 
     if reply.error.is_empty() {
       Ok(())
