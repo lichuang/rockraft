@@ -199,7 +199,7 @@ impl RaftNode {
   /// It runs the same execute-or-forward logic as local requests, so multi-hop
   /// redirects resolve on this node. The hop budget is spent when forwarding,
   /// so a node that can answer the request itself always does.
-  pub async fn handle_forward_request(
+  pub(crate) async fn handle_forward_request(
     &self,
     request: ForwardRequest,
     hops: u32,
