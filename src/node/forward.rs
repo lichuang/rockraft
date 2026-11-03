@@ -35,9 +35,13 @@ const RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(5);
 /// starts a fresh retry budget, so nothing else bounds it).
 const MAX_FORWARD_HOPS: u32 = 3;
 
-/// Whether a forwarded request has used up the hops it is allowed to take.
-fn hop_budget_exhausted(hops: u32) -> bool {
-  hops >= MAX_FORWARD_HOPS
+/// Whether a node that has seen `hops` hops may forward the request once more.
+///
+/// The budget limits *forwarding*, not *serving*: a request that arrives at the
+/// leader on its last hop is executed, because refusing it would reject work
+/// this node can do.
+fn may_forward(hops: u32) -> bool {
+  hops < MAX_FORWARD_HOPS
 }
 
 /// When no leader is known, wait this long for one before reporting
@@ -137,17 +141,7 @@ impl RaftNode {
       let result = match self.assume_leader().await {
         Ok(leader) => Self::dispatch_leader_handler(leader, payload.clone()).await,
         Err(forward_err) => match forward_err.leader_id {
-          Some(leader_id) => {
-            self
-              .forward_request_to_leader(
-                leader_id,
-                ForwardRequest {
-                  body: payload.clone(),
-                },
-                hops + 1,
-              )
-              .await
-          }
+          Some(leader_id) => self.forward_or_reject(leader_id, &payload, hops).await,
           None => Err(Error::retryable_with_reason(RetryReason::NoLeader)),
         },
       };
@@ -162,17 +156,7 @@ impl RaftNode {
       // by the time client_write() executed. Redirect directly to the
       // known leader instead of failing the request.
       let result = match err.forward_leader_id() {
-        Some(leader_id) => {
-          self
-            .forward_request_to_leader(
-              leader_id,
-              ForwardRequest {
-                body: payload.clone(),
-              },
-              hops + 1,
-            )
-            .await
-        }
+        Some(leader_id) => self.forward_or_reject(leader_id, &payload, hops).await,
         None => Err(err),
       };
 
@@ -213,24 +197,14 @@ impl RaftNode {
   /// a node running an older version can still decode the request.
   ///
   /// It runs the same execute-or-forward logic as local requests, so multi-hop
-  /// redirects resolve on this node.
+  /// redirects resolve on this node. The hop budget is spent when forwarding,
+  /// so a node that can answer the request itself always does.
   pub async fn handle_forward_request(
     &self,
     request: ForwardRequest,
     hops: u32,
   ) -> Result<ForwardResponse> {
     debug!("recv forward req: {:?} hops={}", request, hops);
-
-    if hop_budget_exhausted(hops) {
-      // Another hop would only extend a loop: report a retryable error so the
-      // origin re-resolves leadership instead.
-      debug!(
-        "forwarded request exceeded {} hops, returning it to the caller",
-        MAX_FORWARD_HOPS
-      );
-      return Err(Error::retryable_with_reason(RetryReason::LeaderTransition));
-    }
-
     self.execute_or_forward(request.body, hops).await
   }
 
@@ -260,6 +234,36 @@ impl RaftNode {
       .map_err(|e| Error::internal(format!("Failed to forward request: {}", e)))?;
 
     Ok(response.into_inner())
+  }
+
+  /// Forward to `leader_id`, or refuse if this request has already taken every
+  /// hop it is allowed.
+  ///
+  /// A request that is only forwarded extends a chain; the error is retryable
+  /// so the origin re-resolves leadership instead of the chain growing.
+  async fn forward_or_reject(
+    &self,
+    leader_id: NodeId,
+    payload: &RequestPayload,
+    hops: u32,
+  ) -> Result<ForwardResponse> {
+    if !may_forward(hops) {
+      debug!(
+        "forwarded request reached {} hops, not forwarding it again",
+        hops
+      );
+      return Err(Error::retryable_with_reason(RetryReason::LeaderTransition));
+    }
+
+    self
+      .forward_request_to_leader(
+        leader_id,
+        ForwardRequest {
+          body: payload.clone(),
+        },
+        hops + 1,
+      )
+      .await
   }
 
   /// Forward a request to a specific leader by node ID.
@@ -358,13 +362,14 @@ mod tests {
 
   #[test]
   fn test_hop_budget_is_finite() {
-    assert!(!hop_budget_exhausted(0));
-    assert!(!hop_budget_exhausted(MAX_FORWARD_HOPS - 1));
+    assert!(may_forward(0));
+    assert!(may_forward(MAX_FORWARD_HOPS - 1));
     assert!(
-      hop_budget_exhausted(MAX_FORWARD_HOPS),
+      !may_forward(MAX_FORWARD_HOPS),
       "a request that used up its budget must not be forwarded again"
     );
-    assert!(hop_budget_exhausted(MAX_FORWARD_HOPS + 1));
+    assert!(!may_forward(MAX_FORWARD_HOPS + 1));
+    assert!(!may_forward(u32::MAX));
   }
 
   /// The hop count travels in the protobuf envelope, so the postcard body is

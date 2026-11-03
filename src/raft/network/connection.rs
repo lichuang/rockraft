@@ -15,25 +15,20 @@ use openraft::storage::Snapshot;
 use openraft::type_config::alias::VoteOf;
 use std::future::Future;
 use std::io::Error;
-use std::io::ErrorKind;
 use std::io::SeekFrom;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 
-use crate::error::{ApiError, Result};
+use crate::error::Result;
 use crate::network::ClientPool;
 use crate::raft::protobuf::AppendReply;
 use crate::raft::protobuf::AppendRequest;
-use crate::raft::protobuf::RaftReply;
-use crate::raft::protobuf::RaftRequest;
 use crate::raft::protobuf::SnapshotReply;
 use crate::raft::protobuf::SnapshotRequest as PbSnapshotRequest;
 use crate::raft::protobuf::VoteReply;
 use crate::raft::protobuf::VoteRequest as PbVoteRequest;
-use crate::raft::types::ForwardRequest;
-use crate::raft::types::ForwardResponse;
 use crate::raft::types::Node;
 use crate::raft::types::TypeConfig;
 use crate::raft::types::decode;
@@ -77,34 +72,6 @@ impl NetworkConnection {
       addr,
       client_pool,
       serialize_buf: Vec::new(),
-    }
-  }
-
-  #[allow(dead_code)]
-  pub async fn forward(&mut self, req: ForwardRequest) -> Result<ForwardResponse> {
-    let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
-
-    self.serialize_buf.clear();
-
-    encode(&req)
-      .map(|data| self.serialize_buf.extend_from_slice(&data))
-      .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-
-    let grpc_request = tonic::Request::new(RaftRequest {
-      data: self.serialize_buf.clone(),
-      hops: 0,
-    });
-
-    let grpc_response = conn.forward(grpc_request).await?;
-
-    let reply: RaftReply = grpc_response.into_inner();
-
-    if !reply.error.is_empty() {
-      let error: ApiError = decode(&reply.error)?;
-      Err(error.into())
-    } else {
-      let result: ForwardResponse = decode(&reply.data)?;
-      Ok(result)
     }
   }
 
