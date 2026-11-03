@@ -13,7 +13,7 @@ This file provides guidance for agentic coding agents working on this codebase.
 - `cargo test --test <test_name>` - Run specific integration test
 - `cargo test <test_name>` - Run a single test function by name
 - `cargo clippy` - Run linter to catch common mistakes
-- `cargo clippy -- -D warnings` - Fail on clippy warnings
+- `cargo clippy --all-targets -- -D warnings` - Fail on clippy warnings, including test code
 - `cargo fmt` - Format all code using rustfmt
 - `cargo fmt --check` - Check formatting without modifying files
 
@@ -37,8 +37,8 @@ cargo fmt --all
 
 #### Clippy Check
 ```bash
-# Run clippy (treat warnings as errors)
-cargo clippy --all-features -- -D warnings
+# Run clippy (treat warnings as errors, including test code)
+cargo clippy --all-features --all-targets -- -D warnings
 ```
 
 **⚠️ IMPORTANT: After every code change, ensure both commands pass with ZERO errors and ZERO warnings!**

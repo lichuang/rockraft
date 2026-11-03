@@ -934,25 +934,28 @@ mod tests {
       .await
       .unwrap();
 
-    // Verify nodes are recovered
-    let sys_data = sm2
-      .sys_data
-      .lock()
-      .expect("Mutex lock should not be poisoned");
-    assert_eq!(sys_data.nodes.len(), 2);
-    assert!(sys_data.nodes.contains_key(&1));
-    assert!(sys_data.nodes.contains_key(&2));
+    // Verify nodes are recovered. The guard is scoped: holding it across the
+    // `await`s below trips `clippy::await_holding_lock` and, worse, blocks any
+    // other task that needs the metadata for the duration of the await.
+    {
+      let sys_data = sm2
+        .sys_data
+        .lock()
+        .expect("Mutex lock should not be poisoned");
+      assert_eq!(sys_data.nodes.len(), 2);
+      assert!(sys_data.nodes.contains_key(&1));
+      assert!(sys_data.nodes.contains_key(&2));
 
-    let recovered_node1 = sys_data.nodes.get(&1).unwrap();
-    assert_eq!(recovered_node1.node_id, 1);
-    assert_eq!(recovered_node1.endpoint.addr(), "127.0.0.1");
-    assert_eq!(recovered_node1.endpoint.port(), 8081);
+      let recovered_node1 = sys_data.nodes.get(&1).unwrap();
+      assert_eq!(recovered_node1.node_id, 1);
+      assert_eq!(recovered_node1.endpoint.addr(), "127.0.0.1");
+      assert_eq!(recovered_node1.endpoint.port(), 8081);
 
-    let recovered_node2 = sys_data.nodes.get(&2).unwrap();
-    assert_eq!(recovered_node2.node_id, 2);
-    assert_eq!(recovered_node2.endpoint.addr(), "127.0.0.1");
-    assert_eq!(recovered_node2.endpoint.port(), 8082);
-    drop(sys_data);
+      let recovered_node2 = sys_data.nodes.get(&2).unwrap();
+      assert_eq!(recovered_node2.node_id, 2);
+      assert_eq!(recovered_node2.endpoint.addr(), "127.0.0.1");
+      assert_eq!(recovered_node2.endpoint.port(), 8082);
+    }
 
     // Remove a node through the apply path, which is the only writer now
     apply_entries(
@@ -1645,16 +1648,16 @@ mod tests {
     // Insert binary data with prefixes
     let cf_data = sm.cf_sm_data();
     sm.db
-      .put_cf(&cf_data, &[0x01, 0x00, 0x01], b"data1")
+      .put_cf(&cf_data, [0x01, 0x00, 0x01], b"data1")
       .map_err(read_logs_err)?;
     sm.db
-      .put_cf(&cf_data, &[0x01, 0x00, 0x02], b"data2")
+      .put_cf(&cf_data, [0x01, 0x00, 0x02], b"data2")
       .map_err(read_logs_err)?;
     sm.db
-      .put_cf(&cf_data, &[0x01, 0x01, 0x01], b"data3")
+      .put_cf(&cf_data, [0x01, 0x01, 0x01], b"data3")
       .map_err(read_logs_err)?;
     sm.db
-      .put_cf(&cf_data, &[0x02, 0x00, 0x01], b"data4")
+      .put_cf(&cf_data, [0x02, 0x00, 0x01], b"data4")
       .map_err(read_logs_err)?;
 
     // Scan with prefix [0x01, 0x00]
