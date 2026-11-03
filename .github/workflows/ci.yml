@@ -1,0 +1,56 @@
+name: CI
+
+# Runs on every pull request and on every push to the default branch.
+#
+# The other workflows are not enough to gate a change: `daily-test.yml` runs on
+# a nightly cron, `release.yml` only on tags, and `chaos-test.yaml` only on
+# manual dispatch. Without this file a pull request gets no automated feedback
+# and a broken `main` is only noticed the next morning.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Format, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # `--all-targets` is deliberately left out: the test modules still carry
+      # clippy findings that the library target does not, so it would fail on
+      # unrelated code. Add it once those are cleaned up.
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --lib
