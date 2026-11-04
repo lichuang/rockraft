@@ -241,18 +241,25 @@ impl RaftLogStorage<TypeConfig> for RocksLogStore<TypeConfig> {
   where
     I: IntoIterator<Item = EntryOf<TypeConfig>> + Send,
   {
+    // One WriteBatch for the whole append: a batch is written atomically, so a
+    // crash can never leave a prefix of the entries durable while
+    // `get_log_state()` reports the shorter log, and one WAL append replaces
+    // one per entry.
+    let mut batch = rocksdb::WriteBatch::default();
+
     for entry in entries {
       let id = id_to_bin(entry.index());
-      self
-        .db
-        .put_cf(&self.cf_logs(), id, encode(&entry).map_err(read_logs_err)?)
-        .map_err(read_logs_err)?;
+      let data = encode(&entry).map_err(read_logs_err)?;
+      batch.put_cf(&self.cf_logs(), id, data);
+    }
+
+    // The write has to happen in this function, not in another task: openraft
+    // requires the entries to be readable as soon as `append` returns.
+    if !batch.is_empty() {
+      self.db.write(batch).map_err(read_logs_err)?;
     }
 
     // Make sure the logs are persisted to disk before invoking the callback.
-    //
-    // But the above `pub_cf()` must be called in this function, not in another task.
-    // Because when the function returns, it requires the log entries can be read.
     let db = self.db.clone();
     let handle = spawn_blocking(move || {
       let res = db.flush_wal(true).map_err(Error::other);
@@ -340,6 +347,7 @@ fn bin_to_id(buf: &[u8]) -> Result<u64, Error> {
 mod tests {
   use crate::utils::test::{append_entries, create_entry, create_log_id, create_test_log_store};
   use openraft::Vote;
+  use openraft::storage::IOFlushed;
 
   use super::*;
 
@@ -386,6 +394,37 @@ mod tests {
     assert_eq!(final_logs.len(), 8);
     assert_eq!(final_logs[0].log_id.leader_id.term, 1);
     assert_eq!(final_logs[5].log_id.leader_id.term, 2);
+
+    Ok(())
+  }
+
+  /// openraft's contract for `append`: the entries must be readable as soon as
+  /// it returns, and the call must be a no-op for an empty batch.
+  ///
+  /// The batch is written in one `WriteBatch`, so an append is either fully
+  /// there or absent -- never a prefix of it.
+  #[tokio::test]
+  async fn test_append_is_readable_on_return() -> Result<(), io::Error> {
+    let mut log_store = create_test_log_store();
+
+    let entries: Vec<_> = (1..=5).map(|i| create_entry(1, 1, i)).collect();
+    log_store.append(entries, IOFlushed::noop()).await?;
+
+    let read_back = log_store.try_get_log_entries(1..=5).await?;
+    assert_eq!(read_back.len(), 5);
+    assert_eq!(read_back[4].log_id.index, 5);
+    assert_eq!(
+      log_store
+        .get_log_state()
+        .await?
+        .last_log_id
+        .map(|l| l.index),
+      Some(5)
+    );
+
+    // An empty append writes nothing and still succeeds.
+    log_store.append(Vec::new(), IOFlushed::noop()).await?;
+    assert_eq!(log_store.try_get_log_entries(1..=5).await?.len(), 5);
 
     Ok(())
   }
