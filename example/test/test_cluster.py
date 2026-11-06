@@ -302,6 +302,23 @@ class ClusterClient:
                 pass
             time.sleep(0.5)
         raise RuntimeError(f"Node on port {port} failed to sync members after {max_retries} retries")
+
+    def wait_for_members(self, port: int, expected: set, max_retries: int = 60) -> None:
+        """Wait until a node's /members endpoint reports exactly `expected` IDs."""
+        last = None
+        for _ in range(max_retries):
+            try:
+                result = self.query_members(port)
+                if result.get("success"):
+                    last = {int(node_id) for node_id in result.get("members", {})}
+                    if last == expected:
+                        return
+            except Exception as e:
+                last = f"error: {e}"
+            time.sleep(0.5)
+        raise RuntimeError(
+            f"Node on port {port} did not report members {expected}; last={last}"
+        )
     
     def stop_node(self, node_name: str) -> None:
         """Stop a single node by name (e.g. 'node3') using its PID file."""
@@ -2532,6 +2549,11 @@ class TestSnapshot:
             assert health.get("node_id") == 4, (
                 f"Expected node_id 4 on port 8004, got {health.get('node_id')}"
             )
+
+            # The joiner learns the rest of the cluster from the membership
+            # entry the promotion writes; there is no per-member log replay on
+            # join any more, so it must still see every member.
+            cluster.wait_for_members(8004, {1, 2, 3, 4})
 
             for key, expected in test_data.items():
                 result = cluster.get_value(8004, key)
