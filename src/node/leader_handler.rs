@@ -147,8 +147,9 @@ impl<'a> LeaderHandler<'a> {
 
   /// Add a new node to the cluster (leader-only)
   ///
-  /// Adds the node as a learner first, then promotes to voter.
-  /// Syncs all existing nodes to the new node before promotion.
+  /// The joiner learns the rest of the cluster from the membership entry the
+  /// promotion writes: the state machine rebuilds its node table from the
+  /// membership's node map, so nothing has to be replayed per existing member.
   ///
   /// # Leader Requirement
   /// Must be called on the leader. Use `RaftNode::assume_leader()` first.
@@ -182,28 +183,6 @@ impl<'a> LeaderHandler<'a> {
     if self.is_voter(node_id) {
       info!("Node {} already in membership, skipping join", node_id);
       return Ok(());
-    }
-
-    let membership = self
-      .raft()
-      .metrics()
-      .borrow_watched()
-      .membership_config
-      .membership()
-      .clone();
-
-    // Sync all existing nodes to the log so the joining node learns about
-    // every cluster member via log replay.
-    for (id, node) in membership.nodes() {
-      info!("Syncing node {} to state machine", id);
-      let entry = LogEntry::new(Cmd::AddNode {
-        node: node.clone(),
-        overriding: true,
-      });
-      self
-        .write(entry)
-        .await
-        .map_err(|e| preserve_redirect(e, &format!("Failed to sync node {}", id)))?;
     }
 
     let node = Node {
