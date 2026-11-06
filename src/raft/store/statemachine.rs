@@ -71,9 +71,8 @@ pub struct RocksStateMachine {
   // apply() stages metadata changes on a working copy and writes them into the
   // same WriteBatch as the KV data; this cache is replaced only after that
   // write succeeds, so neither the cache nor RocksDB can run ahead of the data
-  // they describe. `add_node` is the one deliberate exception: the bootstrap
-  // path used by `init_cluster` runs before raft starts applying entries and
-  // writes the node table immediately.
+  // they describe. `add_node` is the one deliberate exception: it writes the
+  // table immediately, for callers that seed it outside the raft log.
   sys_data: Arc<Mutex<SysData>>,
   /// Largest key or value a snapshot entry may claim, derived from the node's
   /// gRPC message cap: an entry this node accepted for replication must also
@@ -414,10 +413,13 @@ impl RocksStateMachine {
 
   /// Insert a node into the node table immediately.
   ///
-  /// This is the bootstrap path used by `init_cluster` before `raft.initialize()`,
-  /// and the only metadata write that bypasses `apply()` and its `WriteBatch`.
-  /// Membership changes that arrive through the raft log go through
-  /// `Cmd::AddNode` / `EntryPayload::Membership` and are staged by `apply()`.
+  /// This is the only metadata write that bypasses `apply()` and its
+  /// `WriteBatch`, so it is meant for seeding the table outside the raft log
+  /// (tests, tools). Cluster bootstrap writes nothing here: `init_cluster`
+  /// relies on the membership entry `Raft::initialize()` writes, which
+  /// `apply_membership()` turns into this table. Membership changes that arrive
+  /// through the raft log go through `Cmd::AddNode` /
+  /// `EntryPayload::Membership` and are staged by `apply()`.
   pub fn add_node(&self, node: Node) -> Result<(), io::Error> {
     let mut sys_data = self.lock_sys_data()?;
 

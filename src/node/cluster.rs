@@ -134,13 +134,11 @@ impl RaftNode {
       return Err(Error::config("Node endpoint address cannot be empty"));
     }
 
-    info!("Adding node {} to state machine", node.node_id);
-    self.state_machine().add_node(node.clone()).map_err(|e| {
-      error!("Failed to add node: {}", e);
-      Error::internal(format!("Failed to add node: {}", e))
-    })?;
-    info!("Node {} added to state machine successfully", node.node_id);
-
+    // `initialize` writes the membership entry that carries this node, and the
+    // state machine rebuilds its node table from that entry. Writing the table
+    // here as well would leave a node behind if `initialize` failed, and
+    // `is_in_cluster()` -- which falls back to the node table -- would then
+    // report the node as a member of a cluster it never joined.
     let node_id = node.node_id;
     let mut nodes = BTreeMap::new();
     nodes.insert(node_id, node);
@@ -252,5 +250,123 @@ impl RaftNode {
       })?;
       Err(Error::from(api_error))
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::time::Duration;
+
+  use tempfile::tempdir;
+
+  use super::*;
+  use crate::config::Config;
+  use crate::config::RaftConfig;
+  use crate::config::ReadConsistency;
+  use crate::config::RocksdbConfig;
+  use crate::node::node::CreateOptions;
+  use crate::raft::types::Endpoint;
+
+  fn create_test_config(data_dir: &str, node_id: u64, addr: &str) -> Config {
+    let endpoint = Endpoint::parse(addr).expect("Invalid test address");
+    Config {
+      node_id,
+      raft: RaftConfig {
+        endpoint: endpoint.clone(),
+        advertise_endpoint: endpoint,
+        join: vec![],
+        heartbeat_interval: None,
+        election_timeout_min: None,
+        election_timeout_max: None,
+        grpc_max_message_size: None,
+        read_consistency: ReadConsistency::default(),
+      },
+      rocksdb: RocksdbConfig {
+        data_path: data_dir.to_string(),
+        max_open_files: 1024,
+        block_cache_size: None,
+        write_buffer_size: None,
+        max_write_buffer_number: None,
+      },
+    }
+  }
+
+  async fn create_node(data_dir: &str, node_id: u64, addr: &str) -> Result<Arc<RaftNode>> {
+    let config = create_test_config(data_dir, node_id, addr);
+    RaftNode::create(&config, &CreateOptions::default()).await
+  }
+
+  fn test_node(node_id: u64, addr: &str) -> Node {
+    Node {
+      node_id,
+      endpoint: Endpoint::parse(addr).expect("Invalid test address"),
+    }
+  }
+
+  /// A node table entry written before `Raft::initialize()` succeeds would
+  /// outlive a failed init: `is_in_cluster()` falls back to the table when no
+  /// membership entry has been applied, so the node would then report itself as
+  /// a member of a cluster it never joined and skip initialization next start.
+  #[tokio::test]
+  async fn test_init_cluster_leaves_the_node_table_untouched_when_initialize_fails() -> Result<()> {
+    let temp_dir = tempdir().unwrap().keep();
+    let data_path = temp_dir.into_os_string().into_string().unwrap();
+    let raft_node = create_node(&data_path, 1, "127.0.0.1:5001").await?;
+
+    // A stopped raft core makes `initialize` fail with a fatal error, the way a
+    // storage failure would; `NotAllowed` cannot be provoked directly because
+    // `init_cluster` always lists the local node.
+    raft_node.shutdown().await?;
+
+    let result = raft_node.init_cluster(test_node(1, "127.0.0.1:5001")).await;
+    assert!(
+      result.is_err(),
+      "initialize must fail once the raft core is gone"
+    );
+
+    assert!(
+      raft_node.state_machine().get_nodes()?.is_empty(),
+      "a failed init must not leave a node behind: the table is derived from the membership entry"
+    );
+    assert!(
+      !raft_node.is_in_cluster()?,
+      "a failed init must not make the node claim a membership it never got"
+    );
+
+    Ok(())
+  }
+
+  /// The table `init_cluster` used to write by hand is rebuilt from the
+  /// membership entry `initialize` writes, so dropping that write loses nothing.
+  #[tokio::test]
+  async fn test_init_cluster_derives_the_node_table_from_the_membership() -> Result<()> {
+    let temp_dir = tempdir().unwrap().keep();
+    let data_path = temp_dir.into_os_string().into_string().unwrap();
+    let raft_node = create_node(&data_path, 1, "127.0.0.1:5002").await?;
+
+    raft_node
+      .init_cluster(test_node(1, "127.0.0.1:5002"))
+      .await?;
+
+    // `initialize` waits for the entry to be flushed, not applied.
+    raft_node
+      .raft()
+      .wait(Some(Duration::from_secs(5)))
+      .applied_index_at_least(Some(0), "initial membership applied")
+      .await
+      .expect("the membership entry must be applied");
+
+    let nodes = raft_node.state_machine().get_nodes()?;
+    assert_eq!(nodes.len(), 1, "the membership entry carries the only node");
+    assert_eq!(
+      nodes.get(&1).map(|n| n.endpoint.to_string()),
+      Some("127.0.0.1:5002".to_string())
+    );
+    assert!(
+      raft_node.is_in_cluster()?,
+      "the initialized node is a voter of its own single-node cluster"
+    );
+
+    Ok(())
   }
 }
