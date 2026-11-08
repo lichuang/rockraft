@@ -9,8 +9,8 @@ A strongly consistent distributed key-value store library built on Raft consensu
 
 Rockraft is a Rust library that provides distributed consensus for data replication, ensuring high availability and fault tolerance for distributed systems. It combines the power of:
 
-- **OpenRaft** - A production-ready Raft consensus implementation
-- **RocksDB** - High-performance embedded database
+- [**OpenRaft**](https://github.com/databendlabs/openraft) - A production-ready Raft consensus implementation
+- [**RocksDB**](https://github.com/facebook/rocksdb) - High-performance embedded database
 
 ## Features
 
@@ -47,11 +47,6 @@ Lans; keep the default for general KV workloads.
 ## License
 
 This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [OpenRaft](https://github.com/databendlabs/openraft) - Raft consensus implementation
-- [RocksDB](https://github.com/facebook/rocksdb) - High-performance database
 
 ## Contact & Support
 
