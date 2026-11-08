@@ -470,6 +470,39 @@ class TestClusterMembers:
             
             assert result.get("success") is True, f"Expected success=true for node {NODES[i]}"
             assert "members" in result, f"Expected 'members' field for node {NODES[i]}"
+            assert "voters" in result, f"Expected 'voters' field for node {NODES[i]}"
+            assert "learners" in result, f"Expected 'learners' field for node {NODES[i]}"
+    
+    def test_members_voters_and_learners(self, cluster: ClusterClient):
+        """Test that voters and learners partition the members.
+        
+        Every member is either a voter or a learner: the two lists must not
+        overlap and must together cover the `members` map.
+        """
+        for i, port in enumerate(HTTP_PORTS):
+            result = cluster.query_members(port)
+            members = set(result.get("members", {}).keys())
+            voters = set(result.get("voters", []))
+            learners = set(result.get("learners", []))
+            
+            assert voters.isdisjoint(learners), (
+                f"Node {NODES[i]}: voters {voters} and learners {learners} overlap"
+            )
+            assert voters | learners == members, (
+                f"Node {NODES[i]}: voters {voters} + learners {learners} != members {members}"
+            )
+    
+    def test_members_voters_match_the_node_flag(self, cluster: ClusterClient):
+        """Test that the per-node `voter` flag agrees with the voters list."""
+        for i, port in enumerate(HTTP_PORTS):
+            result = cluster.query_members(port)
+            voters = set(result.get("voters", []))
+            
+            for node_id, node_info in result.get("members", {}).items():
+                assert node_info.get("voter") is (node_id in voters), (
+                    f"Node {NODES[i]}: member {node_id} reports voter="
+                    f"{node_info.get('voter')} but voters={sorted(voters)}"
+                )
     
     def test_members_ids(self, cluster: ClusterClient):
         """Test that members include expected node IDs."""
