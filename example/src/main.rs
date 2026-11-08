@@ -14,6 +14,7 @@ use rockraft::raft::types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::env;
 use std::error::Error;
@@ -620,6 +621,11 @@ async fn join_handler(
 }
 
 /// Handler for GET /members endpoint
+///
+/// `voters` names the nodes that vote, `learners` the members that only follow,
+/// and `members` carries every member's endpoint. The two sets together cover
+/// every member, so a node listed under `members` but not under `voters` is a
+/// learner.
 async fn members_handler(
   State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ErrorResponse> {
@@ -628,17 +634,22 @@ async fn members_handler(
   match state.raft_node.get_members(req).await {
     Ok(members) => {
       let members_json: BTreeMap<String, serde_json::Value> = members
-        .into_iter()
+        .nodes
+        .iter()
         .map(|(id, node)| {
           let node_json = serde_json::json!({
             "node_id": node.node_id,
             "endpoint": format!("{}", node.endpoint),
+            "voter": members.voters.contains(id),
           });
           (id.to_string(), node_json)
         })
         .collect();
+      let as_ids = |ids: &BTreeSet<u64>| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
       Ok(Json(serde_json::json!({
         "success": true,
+        "voters": as_ids(&members.voters),
+        "learners": as_ids(&members.learners()),
         "members": members_json,
       })))
     }

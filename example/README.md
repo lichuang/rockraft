@@ -257,6 +257,35 @@ curl -X POST http://localhost:8001/leave \
 }
 ```
 
+### GET /members
+
+Get the cluster membership as the leader has applied it. Followers forward the
+request, so every node answers with the same view.
+
+**Example:**
+```bash
+curl http://localhost:8001/members
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "voters": ["1", "2", "3"],
+  "learners": [],
+  "members": {
+    "1": {"node_id": 1, "endpoint": "127.0.0.1:7001", "voter": true},
+    "2": {"node_id": 2, "endpoint": "127.0.0.1:7002", "voter": true},
+    "3": {"node_id": 3, "endpoint": "127.0.0.1:7003", "voter": true}
+  }
+}
+```
+
+`members` holds every member with its endpoint, and `voters` / `learners` split
+that same set: a member missing from `voters` is a learner, which receives
+replication but does not vote. The two lists never overlap and always cover
+`members` exactly.
+
 ### GET /health
 
 Health check endpoint.

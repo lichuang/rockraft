@@ -367,14 +367,17 @@ impl<'a> LeaderHandler<'a> {
 
   /// Get cluster membership from the state machine
   ///
-  /// Returns the applied membership configuration (voters and learners).
-  /// Reached via the forward path: followers route GetMembers to the leader,
-  /// and the leader answers from its own applied state.
+  /// Returns the applied membership split into its voter set and its full node
+  /// map, so a caller can tell a learner from a voter. Reached via the forward
+  /// path: followers route GetMembers to the leader, and the leader answers
+  /// from its own applied state.
   pub async fn get_members(&self, _req: GetMembersReq) -> Result<GetMembersReply> {
-    map_err_log!(
-      self.node.state_machine().get_nodes(),
+    let stored = map_err_log!(
+      self.node.state_machine().get_last_membership(),
       "Failed to get members"
-    )
+    )?;
+
+    Ok(GetMembersReply::from_membership(stored.membership()))
   }
 
   /// Execute a conditional transaction (leader-only)
