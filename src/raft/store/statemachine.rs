@@ -804,18 +804,15 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     self.publish_snapshot_meta(meta)
   }
 
+  /// Return whichever snapshot the state machine holds.
+  ///
+  /// There is deliberately no `last_applied` check here: a snapshot the state
+  /// machine has since moved past is exactly what a lagging follower needs --
+  /// OpenRaft installs it, then replays the entries between the snapshot and
+  /// the leader's log. OpenRaft judges whether a snapshot is new enough by
+  /// comparing `meta.last_log_id` with the follower's progress.
   async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot>, io::Error> {
-    let data = get_current_snapshot(&self.snapshot_dir).await?;
-
-    if let Some(snapshot) = data
-      && let Some(id) = self.get_last_applied_log_id()?
-      && let Some(snapshot_id) = snapshot.meta.last_log_id
-      && snapshot_id >= id
-    {
-      return Ok(Some(snapshot));
-    }
-
-    Ok(None)
+    get_current_snapshot(&self.snapshot_dir).await
   }
 }
 
@@ -1507,6 +1504,57 @@ mod tests {
       err.to_string().contains("exceeds the 4 byte limit"),
       "the install must use the state machine's own limit, got: {}",
       err
+    );
+
+    Ok(())
+  }
+
+  /// A snapshot the state machine has already moved past is still the one a
+  /// lagging follower has to receive: OpenRaft installs it and replays the
+  /// entries between it and the leader's log. Reporting "no snapshot" until the
+  /// next scheduled build delays that follower's catch-up by a whole
+  /// `snapshot_policy`.
+  #[tokio::test]
+  async fn test_get_current_snapshot_survives_entries_applied_after_it() -> Result<(), io::Error> {
+    let mut sm = create_test_state_machine().await;
+
+    apply_entries(
+      &mut sm,
+      vec![create_apply_entry(
+        1,
+        Cmd::UpsertKV(UpsertKV::insert("key", b"v1")),
+      )],
+    )
+    .await;
+
+    let snapshot = sm.build_snapshot().await?;
+    let snapshot_log_id = snapshot.meta.last_log_id;
+    assert_eq!(
+      snapshot_log_id,
+      sm.get_last_applied_log_id()?,
+      "the snapshot must cover exactly the applied log"
+    );
+
+    apply_entries(
+      &mut sm,
+      vec![create_apply_entry(
+        2,
+        Cmd::UpsertKV(UpsertKV::insert("key", b"v2")),
+      )],
+    )
+    .await;
+    assert!(
+      sm.get_last_applied_log_id()? > snapshot_log_id,
+      "the state machine has to be past its snapshot for this test to mean anything"
+    );
+
+    let current = sm.get_current_snapshot().await?;
+    assert_eq!(
+      current
+        .expect("a snapshot older than last_applied is still the current snapshot")
+        .meta
+        .last_log_id,
+      snapshot_log_id
     );
 
     Ok(())
