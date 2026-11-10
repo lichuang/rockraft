@@ -8,6 +8,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
 
@@ -181,6 +183,19 @@ fn check_snapshot_id(snapshot_id: &str) -> Result<(), io::Error> {
       format!("invalid snapshot id: {:?}", snapshot_id),
     ))
   }
+}
+
+/// Name for a snapshot file created before its snapshot id is known.
+///
+/// Unique per call, so an abandoned transfer can never be mistaken for the
+/// next one, and `_incomplete`-suffixed, so the startup sweep reclaims it.
+fn receiving_snapshot_id() -> String {
+  let nanos = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|elapsed| elapsed.as_nanos())
+    .unwrap_or_default();
+
+  format!("receiving-{}", nanos)
 }
 
 impl RocksStateMachine {
@@ -776,12 +791,15 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     self.clone()
   }
 
+  /// A blank, writable file for an incoming snapshot.
+  ///
+  /// The snapshot's own id only arrives with the data, so the file is named
+  /// after a unique receiving id instead. Nothing has to delete it here:
+  /// `install_snapshot` consumes the handle, and the startup sweep removes any
+  /// `_incomplete` file a process left behind.
   async fn begin_receiving_snapshot(&mut self) -> Result<SnapshotDataOf<TypeConfig>, io::Error> {
-    let data = get_current_snapshot(&self.snapshot_dir).await?;
-    match data {
-      Some(da) => Ok(da.snapshot),
-      None => Err(io::Error::other("Cannot find current snapshot")),
-    }
+    let std_file = self.create_snapshot_temp_file(&receiving_snapshot_id())?;
+    Ok(tokio::fs::File::from_std(std_file))
   }
 
   async fn install_snapshot(
@@ -1555,6 +1573,66 @@ mod tests {
         .meta
         .last_log_id,
       snapshot_log_id
+    );
+
+    Ok(())
+  }
+
+  /// `begin_receiving_snapshot` hands OpenRaft an empty, writable file to put
+  /// an incoming snapshot into. It is the receiving side of the trait: handing
+  /// back the node's own current snapshot gives the caller data it never wrote,
+  /// and failing when there is no snapshot yet refuses a transfer that is
+  /// perfectly possible on a fresh node.
+  #[tokio::test]
+  async fn test_begin_receiving_snapshot_hands_out_a_blank_writable_file() -> Result<(), io::Error>
+  {
+    // A kept temp dir: the receive path has to create a file in it.
+    let temp_data_dir = tempfile::tempdir().unwrap().keep();
+    let engine = RocksDBEngine::new(
+      &temp_data_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+    let mut sm = RocksStateMachine::new(engine.db().clone(), temp_data_dir)
+      .await
+      .unwrap();
+
+    // A node that has never built a snapshot must still be able to receive one.
+    let mut data = sm.begin_receiving_snapshot().await?;
+    assert!(
+      data.read_to_end(&mut Vec::new()).await? == 0,
+      "the handle must start empty"
+    );
+
+    data.write_all(b"snapshot-bytes").await?;
+    data.seek(std::io::SeekFrom::Start(0)).await?;
+    let mut received = Vec::new();
+    data.read_to_end(&mut received).await?;
+    assert_eq!(
+      received, b"snapshot-bytes",
+      "the handle must accept the transfer"
+    );
+
+    // With a snapshot on disk, the handle must still be blank: the current
+    // snapshot is read-only for this purpose.
+    apply_entries(
+      &mut sm,
+      vec![create_apply_entry(
+        1,
+        Cmd::UpsertKV(UpsertKV::insert("key", b"v1")),
+      )],
+    )
+    .await;
+    sm.build_snapshot().await?;
+
+    let mut data = sm.begin_receiving_snapshot().await?;
+    let mut received = Vec::new();
+    data.read_to_end(&mut received).await?;
+    assert!(
+      received.is_empty(),
+      "the handle must not expose the current snapshot, got {} bytes",
+      received.len()
     );
 
     Ok(())
