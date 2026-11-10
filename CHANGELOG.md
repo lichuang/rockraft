@@ -1,3 +1,59 @@
+## [0.3.0] - 2026-11-10
+
+### 🐛 Bug Fixes
+
+- Log-store: keep the anchor entry in truncate_after
+- Snapshot: install the snapshot a node receives
+- Snapshot: clean up the file assembled for an incoming snapshot
+- Node: remove a leaving node from the membership
+- State-machine: keep the membership entry's log id
+- State-machine: stage metadata into the apply batch
+- Snapshot: install recovery in one atomic batch
+- Snapshot: commit the restored KV data and its metadata in one atomic batch, bound entry lengths before allocating, and reuse a single read buffer while decoding
+- Snapshot: derive the entry bound from the node and reuse decode buffers
+- Service: keep RaftReply.error a decodable ApiError
+- Snapshot: order vacuum by timestamp and sequence, not sequence alone
+- Keep UpsertKV::update generic, correct the example path, and scope the state-machine constructor to tests
+- State-machine: validate the snapshot id before using it as a path
+- Types: honour AddNode.overriding and stop stamping the unused time_ms
+- Snapshot: clear keys past the delete_range end on recovery
+- Node: bound the number of hops a forwarded request may take
+- Node: carry the forward hop count in the gRPC envelope to keep mixed versions compatible
+- Node: spend the hop budget when forwarding, not on receipt
+- Node: stop writing the node table before initialize
+- State-machine: serve a snapshot older than last_applied
+
+### 💼 Other
+
+- Node: make handle_forward_request crate-private
+- Types: report voters and learners in GetMembersReply
+
+### 🚜 Refactor
+
+- Node: stop replaying every member on join
+
+### 📚 Documentation
+
+- Snapshot: document synchronous recovery and the clean-EOF entry-boundary caveat
+- Fix stale paths, links and API drift
+
+### ⚡ Performance
+
+- Log-store: append the whole batch in one WriteBatch
+
+### 🧪 Testing
+
+- Example: assert a leaving node is dropped from /members and from the membership config (voters and learners)
+- State-machine: cover membership log-id re-application and document the staged metadata invariant
+- Clear the clippy findings in the test code
+- Snapshot: assert a snapshot key past the delete_range end survives the sweep
+- Example: assert a joining node learns every member from the membership entry
+
+### ⚙️ Miscellaneous Tasks
+
+- Run format, clippy and tests on every push and pull request
+- Run clippy on all targets and document the stricter command
+- Upgrade protoc to 36.2 and document the linked projects in the README overview
 ## [0.2.0] - 2026-10-22
 
 ### 🚀 Features
@@ -18,11 +74,19 @@
 
 - Delete the unused TTL value_meta chain (MetaSpec, Interval, with_ttl/with_expire_sec builders, and the display-more dependency) since TTL is handled at the application layer and nothing consumes it
 
+### 📚 Documentation
+
+- Add CHANGELOG for v0.2.0
+
 ### ⚡ Performance
 
 - Route forwarded requests through the shared gRPC ClientPool instead of dialing per request, cap the forward retry loop with a 5s budget and jittered backoff, shorten the leader probe to 200ms, and atomically initialize per-address pools so follower-routed writes no longer pay a TCP/HTTP2 handshake per command or pile up for ~90s during elections
 - Schedule a background compaction over the purged log span after purge so tombstoned log entries actually return disk space instead of piling up as range-delete tombstones between compactions
 - Consume UpsertKV by value through the apply path and store pending writes as Bytes so the overlay reuses the decoded allocation instead of cloning keys and values, eliminating two heap copies per KV operation on the hot write path and turning transaction condition reads from a memcpy into a refcount bump
+
+### ⚙️ Miscellaneous Tasks
+
+- Sync Cargo.lock for v0.2.0
 ## [0.1.8] - 2026-09-14
 
 ### 🚀 Features
