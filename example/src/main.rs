@@ -273,7 +273,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
   println!("  http_addr: {}", config.http_addr);
   println!("  [raft]");
   println!("    address: {}", config.base.raft.endpoint);
-  println!("    advertise_host: {}", config.base.raft.advertise_endpoint);
+  println!(
+    "    advertise_host: {}",
+    config.base.raft.advertise_endpoint
+  );
   println!("    join: {:?}", config.base.raft.join);
   println!(
     "    heartbeat_interval: {:?}",

@@ -23,6 +23,9 @@ use crate::engine::RocksDBEngine;
 use crate::error::Result;
 use crate::raft::types::TypeConfig;
 
+/// OpenRaft handle bound to this crate's state machine implementation.
+pub(crate) type Raft = openraft::Raft<TypeConfig, RocksStateMachine>;
+
 /// Create a RocksDB engine pre-configured with all column families needed by
 /// the log store and state machine.
 ///

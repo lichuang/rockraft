@@ -1,13 +1,12 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use openraft::Membership;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::raft::types::Membership;
 use crate::raft::types::Node;
 use crate::raft::types::NodeId;
-use crate::raft::types::TypeConfig;
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub struct GetMembersReq {}
@@ -26,7 +25,7 @@ pub struct GetMembersReply {
 
 impl GetMembersReply {
   /// Build the reply from an applied membership.
-  pub fn from_membership(membership: &Membership<TypeConfig>) -> Self {
+  pub fn from_membership(membership: &Membership) -> Self {
     let voters = membership.voter_ids().collect();
     let nodes = membership
       .nodes()

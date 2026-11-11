@@ -2,6 +2,7 @@ mod forward;
 mod get_members;
 mod join;
 mod leave;
+mod snapshot_chunk;
 
 pub use forward::BatchWriteReply;
 pub use forward::BatchWriteReq;
@@ -16,3 +17,4 @@ pub use get_members::GetMembersReply;
 pub use get_members::GetMembersReq;
 pub use join::JoinRequest;
 pub use leave::LeaveRequest;
+pub use snapshot_chunk::SnapshotChunk;

@@ -1,6 +1,8 @@
 use std::io;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use crate::raft::types::{decode, encode};
 use tokio::fs::File;
@@ -10,6 +12,8 @@ use tracing::info;
 
 use crate::raft::types::Snapshot;
 use crate::raft::types::SnapshotMeta;
+
+static SNAPSHOT_POINTER_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Construct the path to the snapshot dump file for a given snapshot ID directory.
 ///
@@ -165,12 +169,25 @@ pub async fn save_last_snapshot_id_file(
   last_snapshot_id: &str,
 ) -> io::Result<()> {
   let last_snapshot_id_file = snapshot_last_snapshot_id_file(snapshot_dir);
+  // Write to a sibling and rename into place. Creating the pointer directly
+  // truncates it first, so a concurrent `get_current_snapshot()` could read an
+  // empty id and report "no snapshot" while a snapshot is in fact present.
+  let tmp_file = snapshot_dir.join(format!(
+    ".last_snapshot_id.{}.tmp",
+    SNAPSHOT_POINTER_SEQ.fetch_add(1, Ordering::Relaxed)
+  ));
 
-  let mut file = File::create(&last_snapshot_id_file).await?;
+  let mut file = File::create(&tmp_file).await?;
   file.write_all(last_snapshot_id.as_bytes()).await?;
   file.flush().await?;
+  file.sync_all().await?;
+  drop(file);
 
-  Ok(())
+  let res = tokio::fs::rename(&tmp_file, &last_snapshot_id_file).await;
+  if res.is_err() {
+    let _ = tokio::fs::remove_file(&tmp_file).await;
+  }
+  res
 }
 
 /// Retrieve the last snapshot ID from the snapshot directory.
@@ -200,7 +217,7 @@ pub(crate) async fn get_last_snapshot_id(snapshot_dir: &Path) -> io::Result<Stri
   let mut file = File::open(&last_snapshot_file).await?;
   let mut content = String::new();
   file.read_to_string(&mut content).await?;
-  Ok(content)
+  Ok(content.trim().to_string())
 }
 
 /// Save snapshot metadata to the snapshot ID directory.
@@ -305,56 +322,78 @@ pub async fn get_snapshot_meta(snapshot_id_dir: &PathBuf) -> io::Result<Snapshot
 ///
 /// Note that missing files are not considered errors and result in `Ok(None)`.
 pub async fn get_current_snapshot(snapshot_dir: &Path) -> io::Result<Option<Snapshot>> {
-  let snapshot_id = match get_last_snapshot_id(snapshot_dir).await {
-    Ok(id) => id,
-    Err(e) if e.kind() == ErrorKind::NotFound => {
-      info!("No snapshot found, returning None");
-      return Ok(None);
-    }
-    Err(e) => return Err(e),
-  };
+  // A concurrent build updates the pointer and then vacuums the previous
+  // directory. We may read the old pointer just before that update and find
+  // the directory gone; retry against the (now current) pointer instead of
+  // reporting "no snapshot", which OpenRaft treats as fatal.
+  for _ in 0..3 {
+    let snapshot_id = match get_last_snapshot_id(snapshot_dir).await {
+      Ok(id) => id,
+      Err(e) if e.kind() == ErrorKind::NotFound => {
+        info!("No snapshot found, returning None");
+        return Ok(None);
+      }
+      Err(e) => return Err(e),
+    };
 
-  let snapshot_id_dir = snapshot_id_dir(snapshot_dir, &snapshot_id);
+    let snapshot_id_dir = snapshot_id_dir(snapshot_dir, &snapshot_id);
 
-  let snapshot_meta_file = snapshot_meta_file(&snapshot_id_dir);
-  let snapshot_meta = match get_snapshot_meta(&PathBuf::from(snapshot_meta_file)).await {
-    Ok(meta) => meta,
-    Err(e) if e.kind() == ErrorKind::NotFound => {
-      info!(
-        "Snapshot metadata not found for snapshot_id={}, returning None",
-        snapshot_id
-      );
-      return Ok(None);
-    }
-    Err(e) => return Err(e),
-  };
+    let snapshot_meta_file = snapshot_meta_file(&snapshot_id_dir);
+    let snapshot_meta = match get_snapshot_meta(&PathBuf::from(snapshot_meta_file)).await {
+      Ok(meta) => meta,
+      Err(e) if e.kind() == ErrorKind::NotFound => {
+        if snapshot_pointer_changed(snapshot_dir, &snapshot_id).await? {
+          continue;
+        }
+        info!(
+          "Snapshot metadata not found for snapshot_id={}, returning None",
+          snapshot_id
+        );
+        return Ok(None);
+      }
+      Err(e) => return Err(e),
+    };
 
-  let snapshot_data_file = snapshot_data_file(&snapshot_id_dir);
-  let res = match File::open(&snapshot_data_file).await {
-    Ok(file) => file,
-    Err(e) if e.kind() == ErrorKind::NotFound => {
-      info!(
-        "Snapshot file not found for snapshot_id={}, returning None",
-        snapshot_id
-      );
-      return Ok(None);
-    }
-    Err(e) => return Err(e),
-  };
+    let snapshot_data_file = snapshot_data_file(&snapshot_id_dir);
+    let res = match File::open(&snapshot_data_file).await {
+      Ok(file) => file,
+      Err(e) if e.kind() == ErrorKind::NotFound => {
+        if snapshot_pointer_changed(snapshot_dir, &snapshot_id).await? {
+          continue;
+        }
+        info!(
+          "Snapshot file not found for snapshot_id={}, returning None",
+          snapshot_id
+        );
+        return Ok(None);
+      }
+      Err(e) => return Err(e),
+    };
 
-  Ok(Some(Snapshot {
-    meta: snapshot_meta,
-    snapshot: res,
-  }))
+    return Ok(Some(Snapshot {
+      meta: snapshot_meta,
+      snapshot: res,
+    }));
+  }
+
+  info!("Snapshot pointer kept moving; no stable snapshot found");
+  Ok(None)
+}
+
+/// Whether `get_last_snapshot_id()` no longer returns `seen_id`.
+async fn snapshot_pointer_changed(snapshot_dir: &Path, seen_id: &str) -> io::Result<bool> {
+  match get_last_snapshot_id(snapshot_dir).await {
+    Ok(current) => Ok(current != seen_id),
+    Err(e) if e.kind() == ErrorKind::NotFound => Ok(true),
+    Err(e) => Err(e),
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::raft::types::TypeConfig;
-  use openraft::Membership;
-  use openraft::SnapshotMeta;
-  use openraft::StoredMembership;
+  use crate::raft::types::Membership;
+  use crate::raft::types::StoredMembership;
   use tempfile::tempdir;
 
   /// Helper function to create a complete test snapshot structure
@@ -380,8 +419,7 @@ mod tests {
     tokio::fs::create_dir_all(&snapshot_id_dir).await.unwrap();
 
     // Create snapshot metadata
-    let meta = SnapshotMeta::<TypeConfig> {
-      snapshot_id: snapshot_id.to_string(),
+    let meta = SnapshotMeta {
       ..Default::default()
     };
     save_snapshot_meta(&snapshot_id_dir, meta).await.unwrap();
@@ -410,10 +448,9 @@ mod tests {
     assert!(result.is_ok());
     let snapshot = result.unwrap();
     assert!(snapshot.is_some());
-    let snapshot = snapshot.unwrap();
+    let _snapshot = snapshot.unwrap();
 
     // Verify the snapshot metadata
-    assert_eq!(snapshot.meta.snapshot_id, "test_snapshot_001");
   }
 
   /// Test behavior when snapshot directory doesn't exist
@@ -502,7 +539,7 @@ mod tests {
     let snapshot_id_dir = snapshot_id_dir(&snapshot_dir, snapshot_id);
     tokio::fs::create_dir_all(&snapshot_id_dir).await.unwrap();
 
-    let meta = SnapshotMeta::<TypeConfig>::default();
+    let meta = SnapshotMeta::default();
     save_snapshot_meta(&snapshot_id_dir, meta).await.unwrap();
 
     // Attempt to get snapshot
@@ -569,7 +606,7 @@ mod tests {
     let snapshot_id_dir = snapshot_id_dir(&snapshot_dir, "");
     tokio::fs::create_dir_all(&snapshot_id_dir).await.unwrap();
 
-    let meta = SnapshotMeta::<TypeConfig>::default();
+    let meta = SnapshotMeta::default();
     save_snapshot_meta(&snapshot_id_dir, meta).await.unwrap();
 
     let data_file = snapshot_data_file(&snapshot_id_dir);
@@ -578,12 +615,11 @@ mod tests {
     // Attempt to get snapshot
     let result = get_current_snapshot(&snapshot_dir).await;
 
-    // Should successfully load snapshot (though with empty ID)
+    // Should successfully load the snapshot even with default metadata.
     assert!(result.is_ok());
     let snapshot = result.unwrap();
     assert!(snapshot.is_some());
-    let snapshot = snapshot.unwrap();
-    assert_eq!(snapshot.meta.snapshot_id, "");
+    let _snapshot = snapshot.unwrap();
   }
 
   /// Test that snapshot file handle is valid
@@ -640,10 +676,9 @@ mod tests {
 
     let snapshot = result.unwrap();
     assert!(snapshot.is_some());
-    let snapshot = snapshot.unwrap();
+    let _snapshot = snapshot.unwrap();
 
     // Verify it loaded snapshot_002, not the others
-    assert_eq!(snapshot.meta.snapshot_id, "snapshot_002");
   }
 
   /// Test that snapshot metadata is correctly deserialized
@@ -667,11 +702,10 @@ mod tests {
     tokio::fs::create_dir_all(&snapshot_id_dir).await.unwrap();
 
     // Create snapshot metadata with specific values
-    let membership = Membership::<TypeConfig>::default();
+    let membership = Membership::default();
     let stored_membership = StoredMembership::new(None, membership);
 
-    let meta = SnapshotMeta::<TypeConfig> {
-      snapshot_id: snapshot_id.to_string(),
+    let meta = SnapshotMeta {
       last_membership: stored_membership.clone(),
       last_log_id: None,
     };
@@ -692,7 +726,6 @@ mod tests {
     let loaded_snapshot = snapshot.unwrap();
 
     // Verify metadata integrity
-    assert_eq!(loaded_snapshot.meta.snapshot_id, snapshot_id);
     assert_eq!(loaded_snapshot.meta.last_membership, stored_membership);
     assert_eq!(loaded_snapshot.meta.last_log_id, None);
   }

@@ -4,6 +4,7 @@ use crate::error::ErrorKind;
 use crate::error::Result;
 use crate::error::RetryReason;
 use crate::node::RaftNode;
+use crate::raft::store::Raft;
 use crate::raft::types::AppliedState;
 use crate::raft::types::BatchWriteReq;
 use crate::raft::types::Cmd;
@@ -21,7 +22,6 @@ use crate::raft::types::TxnReply;
 use crate::raft::types::TxnReq;
 use crate::raft::types::TypeConfig;
 use openraft::ChangeMembers;
-use openraft::Raft;
 use openraft::ReadPolicy;
 use openraft::async_runtime::watch::WatchReceiver;
 use openraft::error::ClientWriteError;
@@ -126,7 +126,7 @@ impl<'a> LeaderHandler<'a> {
   }
 
   /// Get a reference to the underlying Raft instance
-  pub fn raft(&self) -> &Arc<Raft<TypeConfig>> {
+  pub fn raft(&self) -> &Arc<Raft> {
     self.node.raft()
   }
 

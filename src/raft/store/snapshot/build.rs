@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-use openraft::SnapshotMeta;
 use rocksdb::DB;
 use tokio::fs::File;
 use tokio::spawn;
@@ -24,6 +23,7 @@ use crate::raft::store::keys::SM_DATA_FAMILY;
 use crate::raft::store::snapshot::util::snapshot_id_dir;
 use crate::raft::types::LogId;
 use crate::raft::types::Snapshot;
+use crate::raft::types::SnapshotMeta;
 use crate::raft::types::StoredMembership;
 use crate::raft::types::read_logs_err;
 use crate::utils::now_millis;
@@ -102,7 +102,6 @@ pub async fn build_snapshot(
   let meta = SnapshotMeta {
     last_log_id: last_applied_log_id,
     last_membership,
-    snapshot_id: snapshot_id.clone(),
   };
 
   // Clone data for use in blocking task
@@ -315,6 +314,7 @@ fn vacuum_snapshot_files(
 
 #[cfg(test)]
 mod tests {
+  use super::super::util::get_last_snapshot_id;
   use super::*;
   use crate::raft::types::LeaderId;
   use openraft::Membership;
@@ -428,10 +428,12 @@ mod tests {
 
     let snapshot = result.unwrap();
     assert_eq!(snapshot.meta.last_log_id, last_applied_log_id);
-    assert!(!snapshot.meta.snapshot_id.is_empty());
+
+    let snapshot_id = get_last_snapshot_id(&snapshot_dir).await.unwrap();
+    assert!(!snapshot_id.is_empty());
 
     // Verify snapshot directory was created
-    let snapshot_id_dir = snapshot_id_dir(&snapshot_dir, &snapshot.meta.snapshot_id);
+    let snapshot_id_dir = snapshot_id_dir(&snapshot_dir, &snapshot_id);
     assert!(snapshot_id_dir.exists());
 
     // Verify snapshot data file exists
@@ -480,11 +482,13 @@ mod tests {
 
     let snapshot = result.unwrap();
     assert!(snapshot.meta.last_log_id.is_none());
-    assert!(!snapshot.meta.snapshot_id.is_empty());
-    assert!(snapshot.meta.snapshot_id.starts_with("0-0-"));
+
+    let snapshot_id = get_last_snapshot_id(&snapshot_dir).await.unwrap();
+    assert!(!snapshot_id.is_empty());
+    assert!(snapshot_id.starts_with("0-0-"));
 
     // Verify snapshot directory was created
-    let snapshot_id_dir = snapshot_id_dir(&snapshot_dir, &snapshot.meta.snapshot_id);
+    let snapshot_id_dir = snapshot_id_dir(&snapshot_dir, &snapshot_id);
     assert!(snapshot_id_dir.exists());
   }
 
@@ -520,7 +524,12 @@ mod tests {
 
     let snapshot = result.unwrap();
     assert!(snapshot.meta.last_log_id.is_none());
-    assert!(snapshot.meta.snapshot_id.starts_with("0-0-"));
+    assert!(
+      get_last_snapshot_id(&snapshot_dir)
+        .await
+        .unwrap()
+        .starts_with("0-0-")
+    );
   }
 
   /// Test Point: Snapshot file creation and validation
@@ -571,8 +580,9 @@ mod tests {
 
     assert!(result.is_ok());
 
-    let snapshot = result.unwrap();
-    let snapshot_id_dir = snapshot_id_dir(&snapshot_dir, &snapshot.meta.snapshot_id);
+    let _snapshot = result.unwrap();
+    let snapshot_id = get_last_snapshot_id(&snapshot_dir).await.unwrap();
+    let snapshot_id_dir = snapshot_id_dir(&snapshot_dir, &snapshot_id);
 
     // Verify all expected files exist
     let snapshot_file = snapshot_data_file(&snapshot_id_dir);
@@ -651,14 +661,14 @@ mod tests {
   ///   - Provides last_membership with different log_id (term=4, node_id=2, index=40)
   ///   - Validates snapshot.meta.last_log_id matches the input parameter
   ///   - Validates snapshot.meta.last_membership matches the input parameter
-  ///   - Confirms snapshot.meta.snapshot_id is non-empty
+  ///   - Confirms the last_snapshot_id pointer is non-empty
   ///   - Ensures metadata serialization/deserialization is correct
   ///
   /// Expected Behavior:
   ///   - Snapshot metadata should contain exactly the input values
   ///   - last_log_id should preserve the log_id with term=5, node_id=3, index=50
   ///   - last_membership should preserve the membership with its associated log_id
-  ///   - snapshot_id should be generated in the correct format
+  ///   - last_snapshot_id should point at the built snapshot
   ///   - Metadata file should be readable and contain serialized metadata
   #[tokio::test]
   async fn test_snapshot_meta_content() {
@@ -699,7 +709,12 @@ mod tests {
     // Verify meta content
     assert_eq!(snapshot.meta.last_log_id, last_applied_log_id);
     assert_eq!(snapshot.meta.last_membership, last_membership);
-    assert!(!snapshot.meta.snapshot_id.is_empty());
+    assert!(
+      !get_last_snapshot_id(&snapshot_dir)
+        .await
+        .unwrap()
+        .is_empty()
+    );
   }
 
   /// Test Point: Snapshot ID format with last_applied_log_id
@@ -754,6 +769,7 @@ mod tests {
 
 #[cfg(test)]
 mod seq_tests {
+  use super::super::util::get_last_snapshot_id;
   use super::*;
   use openraft::Membership;
   use tempfile::tempdir;
@@ -782,10 +798,10 @@ mod seq_tests {
 
     let mut ids = Vec::new();
     for _ in 0..8 {
-      let snap = build_snapshot(&db, &snapshot_dir, None, membership.clone())
+      let _snap = build_snapshot(&db, &snapshot_dir, None, membership.clone())
         .await
         .unwrap();
-      ids.push(snap.meta.snapshot_id);
+      ids.push(get_last_snapshot_id(&snapshot_dir).await.unwrap());
     }
 
     let unique: std::collections::HashSet<_> = ids.iter().collect();

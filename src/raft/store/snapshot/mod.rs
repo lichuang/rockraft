@@ -82,8 +82,6 @@ mod tests {
     .expect("Failed to build snapshot");
 
     // Verify snapshot was created successfully
-    assert!(!snapshot.meta.snapshot_id.is_empty());
-    println!("Snapshot created with ID: {}", snapshot.meta.snapshot_id);
 
     // Step 3: Create new empty database for recovery
     let target_db = create_empty_test_db();
@@ -195,11 +193,6 @@ mod tests {
     .await
     .expect("Failed to build empty snapshot");
 
-    println!(
-      "Empty snapshot created with ID: {}",
-      snapshot.meta.snapshot_id
-    );
-
     // Step 3: Create target database
     let target_db = create_empty_test_db();
     let cf_handle_target = target_db
@@ -272,11 +265,6 @@ mod tests {
     )
     .await
     .expect("Failed to build large snapshot");
-
-    println!(
-      "Large snapshot created with ID: {}",
-      snapshot.meta.snapshot_id
-    );
 
     // Step 3: Recover snapshot to target database
     let target_db = create_empty_test_db();
@@ -434,7 +422,9 @@ mod tests {
     .await
     .expect("Failed to build snapshot");
 
-    let snapshot_id = snapshot.meta.snapshot_id.clone();
+    let snapshot_id = util::get_last_snapshot_id(&snapshot_dir_path)
+      .await
+      .expect("last snapshot id file");
     println!("Snapshot created with ID: {}", snapshot_id);
 
     // Step 3: Verify snapshot can be retrieved via get_current_snapshot
@@ -449,8 +439,8 @@ mod tests {
 
     let retrieved_snapshot = current_snapshot.unwrap();
     assert_eq!(
-      retrieved_snapshot.meta.snapshot_id, snapshot_id,
-      "Retrieved snapshot ID should match built snapshot ID"
+      retrieved_snapshot.meta.last_log_id, snapshot.meta.last_log_id,
+      "Retrieved snapshot position should match the built snapshot"
     );
 
     // Step 4: Verify snapshot files exist

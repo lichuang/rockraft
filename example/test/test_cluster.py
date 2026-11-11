@@ -2545,6 +2545,16 @@ class TestSnapshot:
         assert snap["status"]["index"] is not None
         assert snap["status"]["term"] is not None
 
+        # Purge every node's log up to its own snapshot. Without this the
+        # joiner can catch up by replaying logs and the snapshot transfer
+        # path is never exercised.
+        for port in HTTP_PORTS:
+            snap = cluster.trigger_snapshot_and_verify(port)
+            result = cluster.purge_log(port, snap["trigger"]["index"])
+            assert result.get("success") is True, (
+                f"Failed to purge logs on port {port}: {result}"
+            )
+
         node4_conf_path = BASE_DIR / "conf" / "node4.toml"
         node4_conf_path.write_text(
             'node_id = 4\n'

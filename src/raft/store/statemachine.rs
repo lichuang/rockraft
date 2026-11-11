@@ -15,10 +15,8 @@ use crate::raft::types::{decode, encode};
 use futures::Stream;
 use futures::TryStreamExt;
 use openraft::EntryPayload;
-use openraft::Membership;
 use openraft::OptionalSend;
 use openraft::RaftSnapshotBuilder;
-use openraft::alias::SnapshotDataOf;
 use openraft::storage::EntryResponder;
 use openraft::storage::RaftStateMachine;
 use rocksdb::BoundColumnFamily;
@@ -41,10 +39,12 @@ use crate::raft::store::snapshot::recover_snapshot;
 use crate::raft::types::AppliedState;
 use crate::raft::types::Cmd;
 use crate::raft::types::LogId;
+use crate::raft::types::Membership;
 use crate::raft::types::Node;
 use crate::raft::types::NodeId;
 use crate::raft::types::Operation;
 use crate::raft::types::Snapshot;
+use crate::raft::types::SnapshotData;
 use crate::raft::types::SnapshotMeta;
 use crate::raft::types::StoredMembership;
 use crate::raft::types::SysData;
@@ -159,11 +159,12 @@ impl Clone for RocksStateMachine {
 
 /// Reject a snapshot id that cannot be used as a file name component.
 ///
-/// The id arrives from a remote peer inside an `InstallSnapshot` request and
-/// ends up in a path, so `..`, separators or an absolute path would place the
-/// assembled file outside the snapshot directory. Ids produced by
-/// `build_snapshot` are `{leader_id}-{index}-{timestamp}-{seq}`, i.e. ASCII
-/// alphanumerics, `-`, `_` and `.`.
+/// The id arrives from a remote peer in a snapshot chunk and ends up in a
+/// path, so `..`, separators or an absolute path would place the assembled
+/// file outside the snapshot directory. The transport uses
+/// `{leader_id}-{seq}` for a transfer; `build_snapshot` uses
+/// `{leader_id}-{index}-{timestamp}-{seq}`. Both are ASCII alphanumerics, `-`,
+/// `_` and `.`.
 fn check_snapshot_id(snapshot_id: &str) -> Result<(), io::Error> {
   let valid = !snapshot_id.is_empty()
     && snapshot_id.len() <= 255
@@ -539,7 +540,7 @@ impl RocksStateMachine {
   fn apply_membership(
     &self,
     log_id: LogId,
-    membership: Membership<TypeConfig>,
+    membership: Membership,
     sys_data: &mut SysData,
   ) -> Result<(), io::Error> {
     let stored = StoredMembership::new(Some(log_id), membership);
@@ -668,6 +669,8 @@ impl RocksStateMachine {
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
+  type SnapshotData = SnapshotData;
+
   async fn build_snapshot(&mut self) -> Result<Snapshot, io::Error> {
     let last_applied_log = self.get_last_applied_log_id()?;
     let last_membership = self.get_last_membership()?;
@@ -683,6 +686,7 @@ impl RaftSnapshotBuilder<TypeConfig> for RocksStateMachine {
 }
 
 impl RaftStateMachine<TypeConfig> for RocksStateMachine {
+  type SnapshotData = SnapshotData;
   type SnapshotBuilder = Self;
 
   async fn applied_state(&mut self) -> Result<(Option<LogId>, StoredMembership), io::Error> {
@@ -776,18 +780,10 @@ impl RaftStateMachine<TypeConfig> for RocksStateMachine {
     self.clone()
   }
 
-  async fn begin_receiving_snapshot(&mut self) -> Result<SnapshotDataOf<TypeConfig>, io::Error> {
-    let data = get_current_snapshot(&self.snapshot_dir).await?;
-    match data {
-      Some(da) => Ok(da.snapshot),
-      None => Err(io::Error::other("Cannot find current snapshot")),
-    }
-  }
-
   async fn install_snapshot(
     &mut self,
     meta: &SnapshotMeta,
-    snapshot: SnapshotDataOf<TypeConfig>,
+    snapshot: SnapshotData,
   ) -> Result<(), io::Error> {
     recover_snapshot(
       &self.db,
@@ -833,7 +829,6 @@ mod tests {
   use futures::stream;
   use openraft::Entry;
   use openraft::EntryPayload;
-  use openraft::Membership;
   use openraft::storage::EntryResponder;
   use tokio::io::AsyncReadExt;
   use tokio::io::AsyncSeekExt;
@@ -1334,11 +1329,10 @@ mod tests {
     let meta = SnapshotMeta {
       last_log_id: Some(snap_log_id),
       last_membership: StoredMembership::new(None, membership),
-      snapshot_id: "sync-meta-snapshot".to_string(),
     };
 
     // A snapshot data file (empty KV payload is fine — meta sync is the subject)
-    let snap_dir = temp_data_dir.join("snapshot").join(&meta.snapshot_id);
+    let snap_dir = temp_data_dir.join("snapshot").join("sync-meta-snapshot");
     tokio::fs::create_dir_all(&snap_dir).await.unwrap();
     let snap_data_path = snap_dir.join("snapshot");
     let file = std::fs::File::create(&snap_data_path).unwrap();
@@ -1495,7 +1489,6 @@ mod tests {
     let meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::default(),
-      snapshot_id: "limited".to_string(),
     };
     let file = tokio::fs::File::open(&path).await.unwrap();
     let err = sm.install_snapshot(&meta, file).await.unwrap_err();
@@ -1681,6 +1674,7 @@ mod tests {
 
     for good in [
       "T3-N5-100-1234567890-1",
+      "T3-N5-0",
       "0-0-1700000000000-7",
       "snapshot_001",
       "a.b",

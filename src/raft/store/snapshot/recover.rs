@@ -104,12 +104,12 @@ pub async fn recover_snapshot(
   snapshot: Snapshot,
   max_entry_bytes: usize,
 ) -> Result<(), io::Error> {
-  let snapshot_id = snapshot.meta.snapshot_id.clone();
+  let last_log_id = snapshot.meta.last_log_id;
   let meta = snapshot.meta.clone();
 
   info!(
-    "Starting to recover from snapshot, snapshot_id={}",
-    snapshot_id
+    "Starting to recover from snapshot, last_log_id={:?}",
+    last_log_id
   );
 
   let db_clone = db.clone();
@@ -123,8 +123,8 @@ pub async fn recover_snapshot(
   .map_err(|e| io::Error::other(format!("Snapshot recovery task failed: {}", e)))??;
 
   info!(
-    "Snapshot recovery completed successfully for snapshot_id={}",
-    snapshot_id
+    "Snapshot recovery completed successfully for last_log_id={:?}",
+    last_log_id
   );
 
   Ok(())
@@ -309,12 +309,11 @@ fn do_recover_snapshot_sync(
 mod tests {
   use super::*;
   use crate::raft::types::LogId;
-  use crate::raft::types::TypeConfig;
+  use crate::raft::types::Membership;
+  use crate::raft::types::SnapshotMeta;
+  use crate::raft::types::StoredMembership;
   use crate::raft::types::decode;
   use crate::utils::test::create_log_id;
-  use openraft::Membership;
-  use openraft::SnapshotMeta;
-  use openraft::StoredMembership;
   use std::io::Write;
   use tempfile::tempdir;
 
@@ -431,7 +430,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("test-snapshot-1"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -487,7 +485,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("empty-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -533,7 +530,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("batch-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -587,7 +583,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("async-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -656,7 +651,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("large-data-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -714,7 +708,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("overwrite-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -779,7 +772,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("stale-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -823,7 +815,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: "range-end-snapshot".to_string(),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -878,7 +869,6 @@ mod tests {
       meta: SnapshotMeta {
         last_log_id: None,
         last_membership: StoredMembership::new(None, Membership::default()),
-        snapshot_id: "tail-key-snapshot".to_string(),
       },
       snapshot: tokio::fs::File::open(&snapshot_file_path).await.unwrap(),
     };
@@ -910,7 +900,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("truncated-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -950,7 +939,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("corrupted-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -1030,7 +1018,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: "corrupt-large-snapshot".to_string(),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -1056,7 +1043,7 @@ mod tests {
       stored_log_id, old_log_id,
       "the old apply position must survive a failed install"
     );
-    let stored_membership: StoredMembership<TypeConfig> =
+    let stored_membership: StoredMembership =
       decode(&db.get_cf(&cf_meta, LAST_MEMBERSHIP_KEY).unwrap().unwrap()).unwrap();
     assert_eq!(
       stored_membership, old_membership,
@@ -1127,7 +1114,6 @@ mod tests {
       meta: SnapshotMeta {
         last_log_id: None,
         last_membership: StoredMembership::new(None, Membership::default()),
-        snapshot_id: "oversized-entry-snapshot".to_string(),
       },
       snapshot: tokio::fs::File::open(&snapshot_file_path).await.unwrap(),
     };
@@ -1163,7 +1149,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("partial-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -1208,7 +1193,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("value-truncated-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();
@@ -1254,7 +1238,6 @@ mod tests {
     let snapshot_meta = SnapshotMeta {
       last_log_id: None,
       last_membership: StoredMembership::new(None, Membership::default()),
-      snapshot_id: String::from("large-interrupted-snapshot"),
     };
 
     let file = tokio::fs::File::open(&snapshot_file_path).await.unwrap();

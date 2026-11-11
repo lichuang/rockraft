@@ -5,10 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use openraft::raft::{
-  AppendEntriesRequest, InstallSnapshotRequest, InstallSnapshotResponse, SnapshotResponse,
-  VoteRequest,
-};
+use openraft::alias::VoteOf;
+use openraft::raft::{AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
@@ -20,7 +18,8 @@ use crate::raft::protobuf as pb;
 
 use crate::node::RaftNode;
 use crate::raft::types::{
-  ForwardRequest, ForwardResponse, Snapshot, SnapshotMeta, TypeConfig, decode, encode,
+  ForwardRequest, ForwardResponse, Snapshot, SnapshotChunk, SnapshotMeta, TypeConfig, decode,
+  encode,
 };
 use openraft::async_runtime::watch::WatchReceiver;
 use pb::raft_service_server::RaftService;
@@ -343,8 +342,12 @@ impl RaftService for RaftServiceImpl {
       .await
       .map_internal("AppendEntries failed")?;
 
-    // Serialize the response
-    let response_data = encode(&result).map_internal("Failed to serialize append response")?;
+    // AppendResult carries an acknowledged log id and an optional conflict
+    // hint, neither of which is serde. The wire keeps using
+    // AppendEntriesResponse; the sender converts it back with the request's
+    // log ids.
+    let response = AppendEntriesResponse::from(result);
+    let response_data = encode(&response).map_internal("Failed to serialize append response")?;
 
     let reply = pb::AppendReply {
       value: response_data,
@@ -392,14 +395,14 @@ impl RaftService for RaftServiceImpl {
   ) -> Result<Response<pb::SnapshotReply>, Status> {
     let req = request.into_inner();
 
-    let snapshot_req: InstallSnapshotRequest<TypeConfig> =
-      decode(&req.value).map_internal("Failed to deserialize snapshot request")?;
+    let chunk: SnapshotChunk =
+      decode(&req.value).map_internal("Failed to deserialize snapshot chunk")?;
 
-    let vote = snapshot_req.vote;
-    let snapshot_id = snapshot_req.meta.snapshot_id.clone();
-    let snapshot_meta = snapshot_req.meta.clone();
-    let offset = snapshot_req.offset;
-    let done = snapshot_req.done;
+    let vote = chunk.vote;
+    let transfer_id = chunk.transfer_id.clone();
+    let snapshot_meta = chunk.meta.clone();
+    let offset = chunk.offset;
+    let done = chunk.done;
 
     // Phase 1: ensure a streaming entry exists and write the chunk
     let maybe_complete = {
@@ -407,22 +410,22 @@ impl RaftService for RaftServiceImpl {
       evict_stale(&mut guard).await;
 
       self
-        .ensure_streaming_entry(&mut guard, &snapshot_id, offset)
+        .ensure_streaming_entry(&mut guard, &transfer_id, offset)
         .await?;
 
       guard
-        .get_mut(&snapshot_id)
+        .get_mut(&transfer_id)
         .ok_or_else(|| Status::internal("Streaming snapshot not found"))?
-        .write_chunk(offset, &snapshot_req.data)
+        .write_chunk(offset, &chunk.data)
         .await?;
 
       if done {
         // The entry must exist (write_chunk just accepted the chunk); treat
         // a miss as a protocol error rather than panicking the RPC task.
-        Some(guard.remove(&snapshot_id).ok_or_else(|| {
+        Some(guard.remove(&transfer_id).ok_or_else(|| {
           Status::internal(format!(
             "Streaming snapshot {} evicted before completion",
-            snapshot_id
+            transfer_id
           ))
         })?)
       } else {
@@ -443,7 +446,7 @@ impl RaftService for RaftServiceImpl {
       }
       None => {
         let vote = WatchReceiver::borrow_watched(&self.node.raft().metrics()).vote;
-        let resp = InstallSnapshotResponse::<TypeConfig> { vote };
+        let resp = SnapshotResponse::<TypeConfig>::new(vote);
         let reply = pb::SnapshotReply {
           value: encode(&resp).map_internal("Failed to serialize snapshot response")?,
         };
@@ -497,7 +500,7 @@ impl RaftServiceImpl {
 
   async fn install_snapshot(
     &self,
-    vote: openraft::Vote<TypeConfig>,
+    vote: VoteOf<TypeConfig>,
     snapshot_meta: SnapshotMeta,
     streaming: StreamingSnapshot,
   ) -> Result<SnapshotResponse<TypeConfig>, Status> {
@@ -807,7 +810,6 @@ mod tests {
     let meta = SnapshotMeta {
       last_log_id: Some(create_log_id(1, 1, 1)),
       last_membership: StoredMembership::default(),
-      snapshot_id: "test-snapshot".to_string(),
     };
 
     service

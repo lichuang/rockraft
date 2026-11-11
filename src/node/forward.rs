@@ -7,6 +7,7 @@ use std::result::Result as StdResult;
 use std::time::Duration;
 
 use openraft::async_runtime::watch::WatchReceiver;
+use openraft::errors::ForwardReason;
 use tokio::time::{sleep, timeout};
 use tracing::debug;
 
@@ -104,16 +105,19 @@ impl RaftNode {
           Err(ForwardToLeader {
             leader_id: Some(leader_id),
             leader_node: None,
+            reason: ForwardReason::NotLeader,
           })
         }
       }
       Ok(None) => Err(ForwardToLeader {
         leader_id: None,
         leader_node: None,
+        reason: ForwardReason::NotLeader,
       }),
       Err(_) => Err(ForwardToLeader {
         leader_id: None,
         leader_node: None,
+        reason: ForwardReason::NotLeader,
       }),
     }
   }

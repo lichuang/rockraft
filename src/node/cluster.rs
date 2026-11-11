@@ -152,6 +152,9 @@ impl RaftNode {
           InitializeError::NotInMembers(e) => {
             return Err(Error::config(e.to_string()));
           }
+          InitializeError::InvalidMembership(e) => {
+            return Err(Error::config(format!("invalid membership: {}", e)));
+          }
         },
         RaftError::Fatal(e) => {
           return Err(Error::internal(e.to_string()));

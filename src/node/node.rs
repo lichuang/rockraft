@@ -9,10 +9,11 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::raft::store::Raft;
 #[allow(unused_imports)]
 use openraft::Config as OpenRaftConfig;
-use openraft::Raft;
 use openraft::async_runtime::watch::WatchReceiver;
 use tokio::sync::{Mutex, broadcast};
 use tracing::debug;
@@ -29,7 +30,7 @@ use crate::raft::types::LogId;
 use crate::raft::types::{
   AppliedState, BatchWriteReply, BatchWriteReq, Cmd, GetKVReply, GetKVReq, GetMembersReply,
   GetMembersReq, JoinRequest, LeaveRequest, LogEntry, RequestPayload, ScanPrefixReply,
-  ScanPrefixReq, TxnReply, TxnReq, TypeConfig, UpsertKV,
+  ScanPrefixReq, TxnReply, TxnReq, UpsertKV,
 };
 
 /// Runtime knobs that live outside the serializable `Config` and are set
@@ -57,7 +58,7 @@ impl Default for CreateOptions {
 pub struct RaftNode {
   #[allow(dead_code)]
   pub(crate) engine: Arc<RocksDBEngine>,
-  pub(crate) raft: Arc<Raft<TypeConfig>>,
+  pub(crate) raft: Arc<Raft>,
   pub(crate) config: Config,
   /// Pooled gRPC clients for inter-node RPCs, shared with the raft network.
   pub(crate) client_pool: Arc<ClientPool>,
@@ -68,7 +69,7 @@ pub struct RaftNode {
 
 impl RaftNode {
   /// Get a reference to the underlying Raft instance
-  pub fn raft(&self) -> &Arc<Raft<TypeConfig>> {
+  pub fn raft(&self) -> &Arc<Raft> {
     &self.raft
   }
 
@@ -337,12 +338,35 @@ impl RaftNode {
   ///
   /// Returns the `LogId` of the newly built snapshot on success.
   pub async fn trigger_snapshot(&self) -> Result<LogId> {
+    let last_applied = self
+      .raft
+      .metrics()
+      .borrow_watched()
+      .last_applied
+      .map(|log_id| log_id.index)
+      .unwrap_or(0);
+
     self
       .raft
       .trigger()
       .snapshot()
       .await
       .map_err(|e| Error::internal(format!("Failed to trigger snapshot: {}", e)))?;
+
+    // The external command returns once the state machine has built the
+    // snapshot, but RaftCore publishes the new `snapshot` metric
+    // asynchronously. Wait until it covers everything applied before the
+    // trigger; otherwise a caller immediately reading status can still see
+    // the previous snapshot.
+    self
+      .raft
+      .wait(Some(Duration::from_secs(30)))
+      .metrics(
+        |m| m.snapshot.map(|log_id| log_id.index).unwrap_or(0) >= last_applied,
+        "snapshot covers the last applied log",
+      )
+      .await
+      .map_err(|e| Error::internal(format!("Failed to wait for snapshot: {}", e)))?;
 
     self
       .snapshot_log_id()
