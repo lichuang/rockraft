@@ -1,3 +1,9 @@
+## [0.4.0] - 2026-11-11
+
+### 🚜 Refactor
+
+- Upgrade openraft to 0.10.0 and rework snapshot transfer
+
 ## [0.3.0] - 2026-11-10
 
 ### 🐛 Bug Fixes
@@ -36,6 +42,7 @@
 
 - Snapshot: document synchronous recovery and the clean-EOF entry-boundary caveat
 - Fix stale paths, links and API drift
+- Add CHANGELOG for v0.3.0
 
 ### ⚡ Performance
 
