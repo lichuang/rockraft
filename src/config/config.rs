@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::default::DEFAULT_MAX_PAYLOAD_ENTRIES;
 use super::default::default_raft_config;
 use super::default::default_rocksdb_config;
 use super::endpoint::Endpoint;
@@ -70,6 +71,14 @@ pub struct RaftConfig {
   /// Defaults to 256MB. Must be large enough for the biggest AppendEntries
   /// payload (`max_payload_entries` × max entry size) or replication breaks.
   pub grpc_max_message_size: Option<u64>,
+  /// Maximum number of entries OpenRaft puts into one `AppendEntries` RPC.
+  ///
+  /// Defaults to 50, below OpenRaft's own 300, so that a batch stays under
+  /// `grpc_max_message_size` for entries of a few megabytes. The two settings
+  /// have to agree: `max_payload_entries × max entry size` must stay below the
+  /// gRPC cap, or the follower cannot decode the batch and replication retries
+  /// it forever.
+  pub max_payload_entries: Option<u64>,
   /// How reads are served: staleness/performance trade-off chosen per node.
   ///
   /// Defaults to `LeaderApplied` (the historical behavior). See
@@ -98,6 +107,9 @@ impl RaftConfig {
     if let Some(v) = self.election_timeout_max {
       cfg.election_timeout_max = v;
     }
+    cfg.max_payload_entries = self
+      .max_payload_entries
+      .unwrap_or(DEFAULT_MAX_PAYLOAD_ENTRIES);
     cfg
   }
 }
@@ -131,6 +143,8 @@ pub(crate) struct RawRaftConfig {
   #[serde(default)]
   pub grpc_max_message_size: Option<u64>,
   #[serde(default)]
+  pub max_payload_entries: Option<u64>,
+  #[serde(default)]
   pub read_consistency: ReadConsistency,
 }
 
@@ -160,6 +174,7 @@ impl Config {
         election_timeout_min: raw.raft.election_timeout_min,
         election_timeout_max: raw.raft.election_timeout_max,
         grpc_max_message_size: raw.raft.grpc_max_message_size,
+        max_payload_entries: raw.raft.max_payload_entries,
         read_consistency: raw.raft.read_consistency,
       },
       rocksdb: raw.rocksdb,
@@ -193,6 +208,7 @@ impl Serialize for Config {
         election_timeout_min: self.raft.election_timeout_min,
         election_timeout_max: self.raft.election_timeout_max,
         grpc_max_message_size: self.raft.grpc_max_message_size,
+        max_payload_entries: self.raft.max_payload_entries,
         read_consistency: self.raft.read_consistency,
       },
       rocksdb: self.rocksdb.clone(),
@@ -216,8 +232,31 @@ mod tests {
       election_timeout_min: None,
       election_timeout_max: None,
       grpc_max_message_size,
+      max_payload_entries: None,
       read_consistency: ReadConsistency::default(),
     }
+  }
+
+  /// OpenRaft's own default (300) can exceed the gRPC cap once entries are
+  /// large, so rockraft batches far fewer entries unless told otherwise.
+  #[test]
+  fn test_max_payload_entries_defaults_below_the_openraft_default() {
+    let cfg = make_raft_config(None);
+    assert_eq!(
+      cfg.to_openraft_config().max_payload_entries,
+      DEFAULT_MAX_PAYLOAD_ENTRIES
+    );
+    assert!(
+      DEFAULT_MAX_PAYLOAD_ENTRIES < openraft::Config::default().max_payload_entries,
+      "the default has to be more conservative than OpenRaft's"
+    );
+  }
+
+  #[test]
+  fn test_max_payload_entries_override() {
+    let mut cfg = make_raft_config(None);
+    cfg.max_payload_entries = Some(7);
+    assert_eq!(cfg.to_openraft_config().max_payload_entries, 7);
   }
 
   #[test]
@@ -244,6 +283,7 @@ mod tests {
         election_timeout_min: None,
         election_timeout_max: None,
         grpc_max_message_size: Some(8 * 1024 * 1024),
+        max_payload_entries: Some(10),
         read_consistency: ReadConsistency::default(),
       },
       rocksdb: Default::default(),

@@ -407,6 +407,7 @@ mod tests {
         election_timeout_min: None,
         election_timeout_max: None,
         grpc_max_message_size: None,
+        max_payload_entries: None,
         read_consistency: ReadConsistency::default(),
       },
       rocksdb: RocksdbConfig {
