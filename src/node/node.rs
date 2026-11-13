@@ -20,6 +20,7 @@ use tracing::debug;
 
 use crate::config::Config;
 use crate::config::ReadConsistency;
+use crate::config::validate_raft_config;
 use crate::engine::RocksDBEngine;
 use crate::error::{Error, Result};
 use crate::network::ClientPool;
@@ -103,6 +104,13 @@ impl RaftNode {
   }
 
   pub(crate) async fn create(config: &Config, options: &CreateOptions) -> Result<Arc<Self>> {
+    // Validate before anything durable is created: a bad config has to fail
+    // this call, not panic later inside the election timer.
+    let raft_config = match options.raft_config.clone() {
+      Some(cfg) => validate_raft_config(cfg)?,
+      None => config.raft.to_openraft_config()?,
+    };
+
     let engine = Arc::new(store::create_storage_engine(
       &config.rocksdb.data_path,
       config.rocksdb.max_open_files,
@@ -123,10 +131,6 @@ impl RaftNode {
       config.raft.grpc_max_message_size(),
     ));
     let factory = NetworkFactory::new(client_pool.clone());
-    let raft_config = options
-      .raft_config
-      .clone()
-      .unwrap_or_else(|| config.raft.to_openraft_config());
 
     let raft = Arc::new(
       Raft::new(
@@ -392,6 +396,7 @@ mod tests {
   use super::*;
   use crate::config::RaftConfig;
   use crate::config::RocksdbConfig;
+  use crate::error::ErrorKind;
   use crate::raft::types::{Endpoint, Node};
   use tempfile::tempdir;
 
@@ -429,6 +434,36 @@ mod tests {
       };
       sm.add_node(node).unwrap();
     }
+  }
+
+  /// A bad config must fail the build with a configuration error before any
+  /// storage exists. It used to reach `Raft::new` unvalidated and panic later
+  /// inside the election timer.
+  #[tokio::test]
+  async fn test_create_rejects_an_invalid_raft_config() -> Result<()> {
+    let temp_dir = tempdir().unwrap().keep();
+    let data_path = temp_dir.into_os_string().into_string().unwrap();
+
+    let mut config = create_test_config(&data_path, 1, "127.0.0.1:5001");
+    config.raft.election_timeout_min = Some(2000);
+    config.raft.election_timeout_max = Some(1000);
+
+    let err = match RaftNode::create(&config, &CreateOptions::default()).await {
+      Ok(_) => panic!("an invalid raft config must fail the build"),
+      Err(e) => e,
+    };
+
+    assert!(
+      matches!(err.kind(), ErrorKind::InvalidConfig(_)),
+      "expected a configuration error, got: {:?}",
+      err
+    );
+    assert!(
+      !std::path::Path::new(&data_path).join("CURRENT").exists(),
+      "the config has to be rejected before the storage engine is created"
+    );
+
+    Ok(())
   }
 
   #[tokio::test]

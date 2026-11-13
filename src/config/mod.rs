@@ -41,6 +41,7 @@ pub mod read_consistency;
 pub use config::Config;
 pub use config::RaftConfig;
 pub use config::RocksdbConfig;
+pub(crate) use config::validate_raft_config;
 pub(crate) use default::DEFAULT_GRPC_MAX_MESSAGE_SIZE;
 pub use endpoint::Endpoint;
 pub use read_consistency::ReadConsistency;
