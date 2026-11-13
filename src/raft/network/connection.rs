@@ -1,3 +1,6 @@
+use openraft::ErrorSubject;
+use openraft::ErrorVerb;
+use openraft::StorageError;
 use openraft::error::NetworkError;
 use openraft::error::RPCError;
 use openraft::error::Unreachable;
@@ -22,7 +25,6 @@ use std::sync::atomic::Ordering;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 
-use crate::error::Result;
 use crate::network::ClientPool;
 use crate::raft::protobuf::AppendReply;
 use crate::raft::protobuf::AppendRequest;
@@ -39,6 +41,43 @@ use crate::raft::types::decode;
 use crate::raft::types::encode;
 
 static SNAPSHOT_TRANSFER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Classify a `tonic::Status` that came back from a peer.
+///
+/// `RPCError<C>` leaves `E = Infallible` in its `RemoteError` variant, so a
+/// network implementation cannot report "the peer answered with an error": the
+/// only lever is how soon OpenRaft retries. Transport-level codes mean the
+/// connection itself is in trouble and the next attempt may well work, so they
+/// stay `Network`, which retries a few times before backing off. Every other
+/// code was produced by the peer's handler and will not change on its own, so it
+/// becomes `Unreachable`: OpenRaft backs off instead of hammering a follower
+/// whose append handler fails every time.
+fn classify_status(status: tonic::Status) -> RPCError<TypeConfig> {
+  match status.code() {
+    tonic::Code::Unavailable
+    | tonic::Code::Cancelled
+    | tonic::Code::DeadlineExceeded
+    | tonic::Code::Unknown => RPCError::Network(NetworkError::new(&status)),
+    _ => RPCError::Unreachable(Unreachable::new(&status)),
+  }
+}
+
+/// A connection that could not be established at all.
+///
+/// Reported as `Unreachable`, which is what OpenRaft's network docs expect for
+/// this case: it backs off instead of reconnecting on every tick.
+fn connect_error(err: &crate::error::Error) -> RPCError<TypeConfig> {
+  RPCError::Unreachable(Unreachable::new(err))
+}
+
+/// A failure to read the local snapshot file while streaming it out.
+fn snapshot_read_error(verb: ErrorVerb, err: Error) -> StreamingError<TypeConfig> {
+  StreamingError::StorageError(StorageError::from_io_error(
+    ErrorSubject::Snapshot(None),
+    verb,
+    err,
+  ))
+}
 
 trait ReplyValue {
   fn value(&self) -> &[u8];
@@ -81,7 +120,11 @@ impl NetworkConnection {
     }
   }
 
-  async fn send_rpc<Req, Resp, Reply, F, Fut>(&mut self, req: &Req, send: F) -> Result<Resp>
+  async fn send_rpc<Req, Resp, Reply, F, Fut>(
+    &mut self,
+    req: &Req,
+    send: F,
+  ) -> StdResult<Resp, RPCError<TypeConfig>>
   where
     Req: serde::Serialize,
     Resp: serde::de::DeserializeOwned,
@@ -92,21 +135,30 @@ impl NetworkConnection {
     self.serialize_buf.clear();
     encode(req)
       .map(|data| self.serialize_buf.extend_from_slice(&data))
-      .map_err(|e| crate::error::Error::internal(format!("encode failed: {}", e)))?;
+      .map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))?;
 
-    let reply = send(self.serialize_buf.clone()).await?.into_inner();
-    decode(reply.value())
-      .map_err(|e| crate::error::Error::internal(format!("decode failed: {}", e)))
+    let reply = send(self.serialize_buf.clone())
+      .await
+      .map_err(classify_status)?
+      .into_inner();
+
+    // A reply this node cannot decode is a protocol mismatch, not a blip:
+    // backing off keeps it out of a tight retry loop.
+    decode(reply.value()).map_err(|e| RPCError::Unreachable(Unreachable::new(&e)))
   }
 
   async fn append_entries_internal(
     &mut self,
     req: AppendEntriesRequest<TypeConfig>,
-  ) -> Result<AppendResult<TypeConfig>> {
+  ) -> StdResult<AppendResult<TypeConfig>, RPCError<TypeConfig>> {
     let prev_log_id = req.prev_log_id;
     let last_log_id = req.entries.last().map(|entry| entry.log_id).or(prev_log_id);
 
-    let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
+    let mut conn = self
+      .client_pool
+      .raft_service_client(&self.addr)
+      .await
+      .map_err(|e| connect_error(&e))?;
     let response: AppendEntriesResponse<TypeConfig> = self
       .send_rpc(&req, |data| {
         conn.append(tonic::Request::new(AppendRequest { value: data }))
@@ -119,8 +171,12 @@ impl NetworkConnection {
   async fn vote_internal(
     &mut self,
     req: VoteRequest<TypeConfig>,
-  ) -> Result<VoteResponse<TypeConfig>> {
-    let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
+  ) -> StdResult<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
+    let mut conn = self
+      .client_pool
+      .raft_service_client(&self.addr)
+      .await
+      .map_err(|e| connect_error(&e))?;
     self
       .send_rpc(&req, |data| {
         conn.vote(tonic::Request::new(PbVoteRequest { value: data }))
@@ -131,8 +187,12 @@ impl NetworkConnection {
   async fn install_snapshot_internal(
     &mut self,
     chunk: SnapshotChunk,
-  ) -> Result<SnapshotResponse<TypeConfig>> {
-    let mut conn = self.client_pool.raft_service_client(&self.addr).await?;
+  ) -> StdResult<SnapshotResponse<TypeConfig>, RPCError<TypeConfig>> {
+    let mut conn = self
+      .client_pool
+      .raft_service_client(&self.addr)
+      .await
+      .map_err(|e| connect_error(&e))?;
     self
       .send_rpc(&chunk, |data| {
         conn.snapshot(tonic::Request::new(PbSnapshotRequest { value: data }))
@@ -160,13 +220,13 @@ impl NetworkConnection {
     let end = snapshot_data
       .seek(SeekFrom::End(0))
       .await
-      .map_err(|e| StreamingError::from(Unreachable::new(&e)))?;
+      .map_err(|e| snapshot_read_error(ErrorVerb::Seek, e))?;
 
     // Seek back to beginning
     snapshot_data
       .seek(SeekFrom::Start(0))
       .await
-      .map_err(|e| StreamingError::from(Unreachable::new(&e)))?;
+      .map_err(|e| snapshot_read_error(ErrorVerb::Seek, e))?;
 
     let mut offset = 0u64;
     // Use default chunk size of 64KB if not specified
@@ -192,7 +252,7 @@ impl NetworkConnection {
         let n = snapshot_data
           .read_buf(&mut buf)
           .await
-          .map_err(|e| StreamingError::from(Unreachable::new(&e)))?;
+          .map_err(|e| snapshot_read_error(ErrorVerb::Read, e))?;
         if n == 0 {
           break;
         }
@@ -201,7 +261,7 @@ impl NetworkConnection {
       let n_read = buf.len();
       if n_read == 0 && offset < end {
         let io_err = Error::other("snapshot file ended before its reported size");
-        return Err(StreamingError::from(Unreachable::new(&io_err)));
+        return Err(snapshot_read_error(ErrorVerb::Read, io_err));
       }
       let done = (offset + n_read as u64) >= end;
 
@@ -225,11 +285,9 @@ impl NetworkConnection {
             return Ok(resp);
           }
         }
-        Err(err) => {
-          // Convert RockRaftError to RPCError
-          let io_err = Error::other(err.to_string());
-          return Err(StreamingError::from(Unreachable::new(&io_err)));
-        }
+        // A chunk the peer refused is classified the same way as append/vote:
+        // transport trouble retries, a handler error backs off.
+        Err(err) => return Err(StreamingError::from(err)),
       }
 
       offset += n_read as u64;
@@ -245,10 +303,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
     rpc: AppendEntriesRequest<TypeConfig>,
     _option: RPCOption,
   ) -> StdResult<AppendResult<TypeConfig>, RPCError<TypeConfig>> {
-    self
-      .append_entries_internal(rpc)
-      .await
-      .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+    self.append_entries_internal(rpc).await
   }
 
   async fn vote(
@@ -256,10 +311,7 @@ impl RaftNetworkV2<TypeConfig> for NetworkConnection {
     rpc: VoteRequest<TypeConfig>,
     _option: RPCOption,
   ) -> StdResult<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
-    self
-      .vote_internal(rpc)
-      .await
-      .map_err(|e| RPCError::Network(NetworkError::new(&e)))
+    self.vote_internal(rpc).await
   }
 
   async fn full_snapshot(
@@ -300,5 +352,52 @@ impl openraft::RaftNetworkFactory<TypeConfig> for NetworkFactory {
 
   async fn new_client(&mut self, _target: u64, node: &Node) -> Self::Network {
     self.new_client_with_addr(node.endpoint.to_string())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use tonic::Code;
+
+  use super::*;
+
+  #[test]
+  fn test_transport_status_retries_as_network() {
+    for code in [
+      Code::Unavailable,
+      Code::Cancelled,
+      Code::DeadlineExceeded,
+      Code::Unknown,
+    ] {
+      let err = classify_status(tonic::Status::new(code, "connection reset"));
+
+      assert!(
+        matches!(err, RPCError::Network(_)),
+        "{:?} means the connection is in trouble and has to retry, got: {}",
+        code,
+        err
+      );
+    }
+  }
+
+  /// A peer whose handler refuses the request will refuse it again; retrying
+  /// immediately just burns the replication loop, so it has to back off.
+  #[test]
+  fn test_peer_handler_status_backs_off() {
+    for code in [
+      Code::Internal,
+      Code::InvalidArgument,
+      Code::PermissionDenied,
+      Code::FailedPrecondition,
+    ] {
+      let err = classify_status(tonic::Status::new(code, "peer refused"));
+
+      assert!(
+        matches!(err, RPCError::Unreachable(_)),
+        "{:?} comes from the peer's handler and has to back off, got: {}",
+        code,
+        err
+      );
+    }
   }
 }
