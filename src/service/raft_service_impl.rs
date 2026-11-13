@@ -756,6 +756,7 @@ mod tests {
         election_timeout_min: Some(10_000),
         election_timeout_max: Some(20_000),
         grpc_max_message_size: None,
+        max_payload_entries: None,
         read_consistency: ReadConsistency::default(),
       },
       rocksdb: RocksdbConfig {
