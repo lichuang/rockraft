@@ -466,6 +466,44 @@ mod tests {
     Ok(())
   }
 
+  /// An OpenRaft config handed to the builder never passes through
+  /// `RaftConfig::to_openraft_config`, so `create` has to validate it too.
+  #[tokio::test]
+  async fn test_create_rejects_an_invalid_raft_config_override() -> Result<()> {
+    let temp_dir = tempdir().unwrap().keep();
+    let data_path = temp_dir.into_os_string().into_string().unwrap();
+
+    let config = create_test_config(&data_path, 1, "127.0.0.1:5001");
+
+    let override_config = OpenRaftConfig {
+      election_timeout_min: 2000,
+      election_timeout_max: 1000,
+      ..OpenRaftConfig::default()
+    };
+
+    let options = CreateOptions {
+      raft_config: Some(override_config),
+      ..CreateOptions::default()
+    };
+
+    let err = match RaftNode::create(&config, &options).await {
+      Ok(_) => panic!("an invalid raft config override must fail the build"),
+      Err(e) => e,
+    };
+
+    assert!(
+      matches!(err.kind(), ErrorKind::InvalidConfig(_)),
+      "expected a configuration error, got: {:?}",
+      err
+    );
+    assert!(
+      !std::path::Path::new(&data_path).join("CURRENT").exists(),
+      "the config has to be rejected before the storage engine is created"
+    );
+
+    Ok(())
+  }
+
   #[tokio::test]
   async fn test_is_in_cluster_node_exists() -> Result<()> {
     let temp_dir = tempdir().unwrap().keep();

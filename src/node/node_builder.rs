@@ -93,6 +93,11 @@ impl<'a> RaftNodeBuilder<'a> {
   /// Provide a custom OpenRaft configuration.
   ///
   /// If not provided, sensible defaults will be used.
+  ///
+  /// The configuration is validated when the node is built; an invalid one
+  /// (for example `election_timeout_min >= election_timeout_max`) fails the
+  /// build with a configuration error instead of panicking later inside
+  /// OpenRaft's election timer.
   pub fn raft_config(mut self, config: OpenRaftConfig) -> Self {
     self.raft_config = Some(config);
     self

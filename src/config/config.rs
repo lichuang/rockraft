@@ -9,10 +9,15 @@ use crate::error::Error;
 use crate::error::Result;
 use openraft::Config as OpenRaftConfig;
 
-/// Node configuration with all fields parsed and validated.
+/// Node configuration with all fields parsed.
 ///
 /// This struct is the single source of truth for configuration.
-/// All string parsing (e.g., address strings to Endpoint) happens during construction.
+/// All string parsing (e.g., address strings to Endpoint) happens during
+/// construction; the Raft timing values are validated later, when the node is
+/// built, because OpenRaft validates the final `OpenRaftConfig` — including an
+/// override supplied through [`RaftNodeBuilder::raft_config`].
+///
+/// [`RaftNodeBuilder::raft_config`]: crate::node::RaftNodeBuilder::raft_config
 #[derive(Debug, Clone)]
 pub struct Config {
   pub node_id: u64,
@@ -263,9 +268,14 @@ mod tests {
     cfg.election_timeout_min = Some(2000);
     cfg.election_timeout_max = Some(4000);
 
+    let err = cfg
+      .to_openraft_config()
+      .expect_err("an election timeout at or below the heartbeat interval must be rejected");
+
     assert!(
-      cfg.to_openraft_config().is_err(),
-      "an election timeout at or below the heartbeat interval must be rejected"
+      err.to_string().contains("heartbeat"),
+      "the error has to name the setting, got: {}",
+      err
     );
   }
 
