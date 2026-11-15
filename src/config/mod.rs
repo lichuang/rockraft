@@ -20,6 +20,7 @@
 //!         election_timeout_min: None,
 //!         election_timeout_max: None,
 //!         grpc_max_message_size: None,
+//!         max_payload_entries: None,
 //!         read_consistency: Default::default(),
 //!     },
 //!     rocksdb: RocksdbConfig {
@@ -43,5 +44,7 @@ pub use config::RaftConfig;
 pub use config::RocksdbConfig;
 pub(crate) use config::validate_raft_config;
 pub(crate) use default::DEFAULT_GRPC_MAX_MESSAGE_SIZE;
+#[cfg(test)]
+pub(crate) use default::DEFAULT_MAX_PAYLOAD_ENTRIES;
 pub use endpoint::Endpoint;
 pub use read_consistency::ReadConsistency;
