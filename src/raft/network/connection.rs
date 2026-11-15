@@ -71,6 +71,11 @@ fn connect_error(err: &crate::error::Error) -> RPCError<TypeConfig> {
 }
 
 /// A failure to read the local snapshot file while streaming it out.
+///
+/// This is a storage error by OpenRaft's definition, and a storage error is
+/// fatal: RaftCore shuts the node down instead of retrying. A snapshot this
+/// node cannot read is a local storage fault, not a network blip, so dying is
+/// preferable to retrying a file that will keep failing.
 fn snapshot_read_error(verb: ErrorVerb, err: Error) -> StreamingError<TypeConfig> {
   StreamingError::StorageError(StorageError::from_io_error(
     ErrorSubject::Snapshot(None),
@@ -389,6 +394,14 @@ mod tests {
       Code::InvalidArgument,
       Code::PermissionDenied,
       Code::FailedPrecondition,
+      Code::NotFound,
+      Code::AlreadyExists,
+      Code::ResourceExhausted,
+      Code::Aborted,
+      Code::OutOfRange,
+      Code::Unimplemented,
+      Code::DataLoss,
+      Code::Unauthenticated,
     ] {
       let err = classify_status(tonic::Status::new(code, "peer refused"));
 
@@ -399,5 +412,46 @@ mod tests {
         err
       );
     }
+  }
+
+  /// A connection that never opened is not a retry-immediately case: the
+  /// target is down, and OpenRaft has to back off before dialing it again.
+  #[test]
+  fn test_connect_error_backs_off() {
+    let err = connect_error(&crate::error::Error::internal("connection refused"));
+
+    assert!(
+      matches!(err, RPCError::Unreachable(_)),
+      "a failed connection has to back off, got: {}",
+      err
+    );
+  }
+
+  /// A snapshot the sender cannot read is a local storage fault. OpenRaft
+  /// treats `StorageError` as fatal (it stops the node), so the classification
+  /// is deliberate and the subject/verb have to say what failed.
+  #[test]
+  fn test_snapshot_read_error_is_a_storage_error() {
+    let err = snapshot_read_error(ErrorVerb::Seek, Error::other("injected seek failure"));
+
+    let StreamingError::StorageError(storage_err) = err else {
+      panic!(
+        "a local snapshot read failure must be a storage error, got: {}",
+        err
+      );
+    };
+
+    let msg = storage_err.to_string();
+    assert!(msg.contains("Seek"), "the verb must be kept, got: {}", msg);
+    assert!(
+      msg.contains("Snapshot"),
+      "the subject must be kept, got: {}",
+      msg
+    );
+    assert!(
+      msg.contains("injected seek failure"),
+      "the original io error must be kept, got: {}",
+      msg
+    );
   }
 }
