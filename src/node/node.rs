@@ -394,6 +394,7 @@ impl RaftNode {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::config::DEFAULT_MAX_PAYLOAD_ENTRIES;
   use crate::config::RaftConfig;
   use crate::config::RocksdbConfig;
   use crate::error::ErrorKind;
@@ -412,6 +413,7 @@ mod tests {
         election_timeout_min: None,
         election_timeout_max: None,
         grpc_max_message_size: None,
+        max_payload_entries: None,
         read_consistency: ReadConsistency::default(),
       },
       rocksdb: RocksdbConfig {
@@ -532,6 +534,50 @@ mod tests {
 
     let result = raft_node.is_in_cluster()?;
     assert!(!result, "Node 4 should not be in the cluster");
+
+    Ok(())
+  }
+
+  /// The batch size is not just parsed: it has to reach the `OpenRaftConfig`
+  /// the running node actually uses, or the wire cap is still guarding a batch
+  /// of OpenRaft's default 300 entries.
+  #[tokio::test]
+  async fn test_create_applies_the_batch_size_to_the_running_raft() -> Result<()> {
+    let temp_dir = tempdir().unwrap().keep();
+    let data_path = temp_dir.into_os_string().into_string().unwrap();
+
+    let mut config = create_test_config(&data_path, 1, "127.0.0.1:5001");
+    config.raft.max_payload_entries = Some(7);
+
+    let raft_node = RaftNode::create(&config, &CreateOptions::default()).await?;
+
+    assert_eq!(
+      raft_node.raft().config().max_payload_entries,
+      7,
+      "the configured batch size must be what the running node replicates with"
+    );
+
+    Ok(())
+  }
+
+  /// Without an explicit setting the node must use rockraft's conservative
+  /// default, not the OpenRaft one.
+  #[tokio::test]
+  async fn test_create_uses_the_default_batch_size() -> Result<()> {
+    let temp_dir = tempdir().unwrap().keep();
+    let data_path = temp_dir.into_os_string().into_string().unwrap();
+
+    let config = create_test_config(&data_path, 1, "127.0.0.1:5001");
+    let raft_node = RaftNode::create(&config, &CreateOptions::default()).await?;
+
+    assert_eq!(
+      raft_node.raft().config().max_payload_entries,
+      DEFAULT_MAX_PAYLOAD_ENTRIES
+    );
+    assert!(
+      DEFAULT_MAX_PAYLOAD_ENTRIES < openraft::Config::default().max_payload_entries,
+      "the running default has to be below OpenRaft's"
+    );
 
     Ok(())
   }
