@@ -85,8 +85,14 @@ pub async fn persist_snapshot_file(
   save_snapshot_meta(&id_dir, meta.clone()).await?;
   save_last_snapshot_id_file(snapshot_dir, &snapshot_id).await?;
 
-  // The contract allows exactly one snapshot: this one.
-  vacuum_snapshot_files(snapshot_dir.to_path_buf(), snapshot_id.clone(), snapshot_id)?;
+  // The contract allows exactly one snapshot: this one. Cleanup is best-effort
+  // like the build path: the installed snapshot is already current, and a
+  // failed `remove_dir_all` must not turn into a fatal storage error.
+  if let Err(e) =
+    vacuum_snapshot_files(snapshot_dir.to_path_buf(), snapshot_id.clone(), snapshot_id)
+  {
+    error!("Fail to clean up older snapshots after install: {}", e);
+  }
 
   Ok(())
 }

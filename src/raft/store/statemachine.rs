@@ -240,12 +240,23 @@ impl RocksStateMachine {
       .join(format!("received-{}-{}_incomplete", now_millis(), seq));
     data.seek(SeekFrom::Start(0)).await?;
 
-    let mut out = tokio::fs::File::create(&staged).await?;
-    tokio::io::copy(&mut data, &mut out).await?;
+    if let Err(e) = Self::copy_snapshot_to(&mut data, &staged).await {
+      // A half-written staging file must not live until the next restart.
+      let _ = tokio::fs::remove_file(&staged).await;
+      return Err(e);
+    }
+
+    Ok(staged)
+  }
+
+  /// Copy the incoming snapshot into `path` and make it durable.
+  async fn copy_snapshot_to(data: &mut SnapshotData, path: &Path) -> Result<(), io::Error> {
+    let mut out = tokio::fs::File::create(path).await?;
+    tokio::io::copy(data, &mut out).await?;
     out.flush().await?;
     out.sync_all().await?;
 
-    Ok(staged)
+    Ok(())
   }
 
   fn lock_sys_data(&self) -> Result<std::sync::MutexGuard<'_, SysData>, io::Error> {
@@ -906,6 +917,20 @@ mod tests {
       .unwrap();
   }
 
+  /// Names of the `*_incomplete` staging files left in `snapshot_dir`.
+  ///
+  /// A successful install moves its staging file into the snapshot directory,
+  /// and a failed one has to delete it; neither may leave one behind until the
+  /// next restart sweep.
+  fn leftover_incomplete_files(snapshot_dir: &Path) -> Vec<String> {
+    std::fs::read_dir(snapshot_dir)
+      .unwrap()
+      .map(|entry| entry.unwrap())
+      .map(|entry| entry.file_name().to_string_lossy().to_string())
+      .filter(|name| name.ends_with("_incomplete"))
+      .collect()
+  }
+
   #[tokio::test]
   async fn test_set_and_get_last_applied() -> Result<(), io::Error> {
     let sm = create_test_state_machine().await;
@@ -1552,6 +1577,10 @@ mod tests {
       "the install must use the state machine's own limit, got: {}",
       err
     );
+    assert!(
+      leftover_incomplete_files(&sm.snapshot_dir).is_empty(),
+      "a failed install must delete its staging file"
+    );
 
     Ok(())
   }
@@ -1701,6 +1730,80 @@ mod tests {
     assert_eq!(
       snapshot_dirs, 1,
       "installing a snapshot has to leave exactly one snapshot directory behind"
+    );
+    assert!(
+      leftover_incomplete_files(&target_dir.join("snapshot")).is_empty(),
+      "the staging file has to be moved, not copied and left behind"
+    );
+
+    Ok(())
+  }
+
+  /// A node that caught up from a snapshot must be able to ship that exact
+  /// snapshot on: this is the path that used to fail with "snapshot not found"
+  /// once the node became leader and had to catch a follower up.
+  #[tokio::test]
+  async fn test_installed_snapshot_can_be_served_again() -> Result<(), io::Error> {
+    let source_dir = tempfile::tempdir().unwrap().keep();
+    let source_engine = RocksDBEngine::new(
+      &source_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+    let mut source = RocksStateMachine::new(source_engine.db().clone(), source_dir)
+      .await
+      .unwrap();
+
+    apply_entries(
+      &mut source,
+      vec![create_apply_entry(
+        1,
+        Cmd::UpsertKV(UpsertKV::insert("shipped", b"value")),
+      )],
+    )
+    .await;
+    let built = source.get_snapshot_builder().await.build_snapshot().await?;
+
+    let target_dir = tempfile::tempdir().unwrap().keep();
+    let target_engine = RocksDBEngine::new(
+      &target_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+    let mut target = RocksStateMachine::new(target_engine.db().clone(), target_dir)
+      .await
+      .unwrap();
+
+    target.install_snapshot(&built.meta, built.snapshot).await?;
+
+    // Serve the installed snapshot exactly the way a leader would: through
+    // `get_current_snapshot`, without touching the source state machine.
+    let served = target
+      .get_current_snapshot()
+      .await?
+      .expect("the installed snapshot must be available for sending");
+
+    let follower_dir = tempfile::tempdir().unwrap().keep();
+    let follower_engine = RocksDBEngine::new(
+      &follower_dir.to_string_lossy(),
+      1024,
+      vec![SM_META_FAMILY.to_string(), SM_DATA_FAMILY.to_string()],
+    )
+    .unwrap();
+    let mut follower = RocksStateMachine::new(follower_engine.db().clone(), follower_dir)
+      .await
+      .unwrap();
+
+    follower
+      .install_snapshot(&served.meta, served.snapshot)
+      .await?;
+
+    assert_eq!(
+      follower.get_kv("shipped")?,
+      Some(b"value".to_vec()),
+      "the snapshot served by the node that installed it must restore the same data"
     );
 
     Ok(())
