@@ -36,6 +36,67 @@ use crate::utils::now_millis;
 /// created within one process lifetime.
 static SNAPSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Generate the directory id for a new snapshot.
+///
+/// The timestamp plus a process-wide sequence keeps builds within the same
+/// millisecond from colliding into one directory name. Format:
+/// `"{leader_id}-{index}-{timestamp}-{seq}"`, or `"0-0-{timestamp}-{seq}"`
+/// without a last applied log id.
+fn new_snapshot_id(last_log_id: Option<LogId>) -> String {
+  let snapshot_idx = now_millis();
+  let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
+
+  match last_log_id {
+    Some(last) => format!(
+      "{}-{}-{}-{}",
+      last.committed_leader_id(),
+      last.index(),
+      snapshot_idx,
+      seq
+    ),
+    None => format!("0-0-{}-{}", snapshot_idx, seq),
+  }
+}
+
+/// Adopt a snapshot received from the leader as this node's current snapshot.
+///
+/// `RaftStateMachine::install_snapshot` has to leave `get_current_snapshot()`
+/// returning the snapshot it was handed, and the earlier snapshots gone. The
+/// staged file is moved into the same `<snapshot_id>/snapshot` + `meta` layout
+/// this module builds, so one reader serves both paths — and a node that
+/// caught up from a snapshot can later ship it to a follower instead of
+/// reporting "no snapshot", which OpenRaft treats as a fatal storage error.
+pub async fn persist_snapshot_file(
+  snapshot_dir: &Path,
+  meta: &SnapshotMeta,
+  staged: &Path,
+) -> Result<(), io::Error> {
+  let snapshot_id = new_snapshot_id(meta.last_log_id);
+  let id_dir = snapshot_id_dir(snapshot_dir, &snapshot_id);
+  tokio::fs::create_dir_all(&id_dir).await?;
+
+  if let Err(e) = tokio::fs::rename(staged, snapshot_data_file(&id_dir)).await {
+    let _ = tokio::fs::remove_file(staged).await;
+    return Err(e);
+  }
+
+  // Data and meta land first; only then does the pointer move, so a crash can
+  // never leave the pointer naming a half-written snapshot.
+  save_snapshot_meta(&id_dir, meta.clone()).await?;
+  save_last_snapshot_id_file(snapshot_dir, &snapshot_id).await?;
+
+  // The contract allows exactly one snapshot: this one. Cleanup is best-effort
+  // like the build path: the installed snapshot is already current, and a
+  // failed `remove_dir_all` must not turn into a fatal storage error.
+  if let Err(e) =
+    vacuum_snapshot_files(snapshot_dir.to_path_buf(), snapshot_id.clone(), snapshot_id)
+  {
+    error!("Fail to clean up older snapshots after install: {}", e);
+  }
+
+  Ok(())
+}
+
 /// Build a snapshot from the current database state
 ///
 /// This function creates a compressed snapshot of the SM_DATA_FAMILY column family,
@@ -75,25 +136,7 @@ pub async fn build_snapshot(
   last_applied_log_id: Option<LogId>,
   last_membership: StoredMembership,
 ) -> Result<Snapshot, io::Error> {
-  // Generate unique snapshot ID: timestamp + a process-wide sequence, so
-  // builds within the same millisecond cannot collide into the same
-  // directory name.
-  let snapshot_idx = now_millis();
-  let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
-
-  // ID format: "{leader_id}-{index}-{timestamp}-{seq}", or
-  // "0-0-{timestamp}-{seq}" without a last_applied_log_id.
-  let snapshot_id = if let Some(last) = last_applied_log_id {
-    format!(
-      "{}-{}-{}-{}",
-      last.committed_leader_id(),
-      last.index(),
-      snapshot_idx,
-      seq
-    )
-  } else {
-    format!("0-0-{}-{}", snapshot_idx, seq)
-  };
+  let snapshot_id = new_snapshot_id(last_applied_log_id);
   // Create snapshot directory (including all parent directories if they don't exist)
   let snapshot_id_dir = snapshot_id_dir(snapshot_dir, &snapshot_id);
   tokio::fs::create_dir_all(snapshot_id_dir.clone()).await?;
@@ -255,7 +298,7 @@ fn snapshot_id_order(snapshot_id: &str) -> Option<(u64, u64)> {
 ///   - Deleting a directory that a concurrent reader still holds open is
 ///     safe on POSIX: unlink removes the name, and open file handles keep
 ///     working until closed, so an in-flight snapshot transfer is unaffected.
-fn vacuum_snapshot_files(
+pub(crate) fn vacuum_snapshot_files(
   snapshot_dir: PathBuf,
   fallback_id: String,
   own_id: String,

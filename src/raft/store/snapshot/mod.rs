@@ -3,6 +3,7 @@ mod recover;
 mod util;
 
 pub use build::build_snapshot;
+pub(crate) use build::persist_snapshot_file;
 #[cfg(test)]
 pub(crate) use recover::DEFAULT_SNAPSHOT_ENTRY_LIMIT;
 pub use recover::recover_snapshot;
