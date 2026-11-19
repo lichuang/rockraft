@@ -12,11 +12,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
+      - name: Cache protoc
+        uses: actions/cache@v4
         with:
-          version: '36.2'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ~/.local/protoc
+          key: protoc-${{ runner.os }}-${{ runner.arch }}-36.2
+
+      - name: Install protoc
+        run: .github/scripts/install-protoc.sh
+        env:
+          PROTOC_VERSION: '36.2'
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -41,11 +46,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
+      - name: Cache protoc
+        uses: actions/cache@v4
         with:
-          version: '36.2'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ~/.local/protoc
+          key: protoc-${{ runner.os }}-${{ runner.arch }}-36.2
+
+      - name: Install protoc
+        run: .github/scripts/install-protoc.sh
+        env:
+          PROTOC_VERSION: '36.2'
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
